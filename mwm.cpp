@@ -1064,6 +1064,8 @@ static const int backlight_popup_h = 64;
 static const int backlight_popup_pad = 12;
 static const int backlight_popup_slider_h = 8;
 static const int backlight_popup_slider_y = 34;
+static const int backlight_popup_knob_w = 12;
+static const int backlight_popup_knob_h = 20;
 
 static std::array<void (*)(XEvent *), LASTEvent> make_handler_table(void) {
   std::array<void (*)(XEvent *), LASTEvent> handlers = {};
@@ -1347,6 +1349,8 @@ static void drawbacklightpopup(void) {
   int slider_x;
   int slider_w;
   int fill_w;
+  int knob_x;
+  int knob_y;
 
   if (!backlight_popup_visible || backlight_popup_win == None) {
     return;
@@ -1368,12 +1372,30 @@ static void drawbacklightpopup(void) {
 
   if (backlight_percent >= 0) {
     fill_w = (slider_w * backlight_percent) / 100;
-    if (fill_w < 1) {
-      fill_w = 1;
+    if (fill_w < (backlight_popup_knob_w / 2)) {
+      fill_w = backlight_popup_knob_w / 2;
+    }
+    if (fill_w > slider_w) {
+      fill_w = slider_w;
     }
     drw_setscheme(drw, scheme[SchemeSel]);
     drw_rect(drw, slider_x, backlight_popup_slider_y, fill_w,
              backlight_popup_slider_h, 1, 0);
+
+    knob_x = slider_x + fill_w - (backlight_popup_knob_w / 2);
+    if (knob_x < slider_x) {
+      knob_x = slider_x;
+    }
+    if (knob_x > slider_x + slider_w - backlight_popup_knob_w) {
+      knob_x = slider_x + slider_w - backlight_popup_knob_w;
+    }
+    knob_y = backlight_popup_slider_y + (backlight_popup_slider_h / 2) -
+             (backlight_popup_knob_h / 2);
+    drw_rect(drw, knob_x, knob_y, backlight_popup_knob_w, backlight_popup_knob_h,
+             1, 0);
+    drw_setscheme(drw, scheme[SchemeNorm]);
+    drw_rect(drw, knob_x, knob_y, backlight_popup_knob_w, backlight_popup_knob_h,
+             0, 0);
   }
 
   drw_map(drw, backlight_popup_win, 0, 0, backlight_popup_w, backlight_popup_h);
@@ -1407,6 +1429,7 @@ static int widget_popup_handle_motion(XMotionEvent *ev) {
 static int widget_popup_handle_button(XButtonPressedEvent *ev) {
   int slider_x;
   int slider_w;
+  int slider_y;
   int relative_x;
   int percent;
 
@@ -1425,6 +1448,10 @@ static int widget_popup_handle_button(XButtonPressedEvent *ev) {
 
   slider_x = backlight_popup_pad;
   slider_w = backlight_popup_w - 2 * backlight_popup_pad;
+  slider_y = backlight_popup_slider_y - ((backlight_popup_knob_h - backlight_popup_slider_h) / 2);
+  if (ev->y < slider_y || ev->y > slider_y + backlight_popup_knob_h) {
+    return 1;
+  }
   relative_x = ev->x - slider_x;
   if (relative_x < 0) {
     relative_x = 0;
