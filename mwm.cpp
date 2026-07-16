@@ -203,6 +203,7 @@ void drw_map(Drw *drw, Window win, int x, int y, unsigned int w,
 
 void die(const char *fmt, ...);
 void *ecalloc(size_t nmemb, size_t size);
+template <typename T> T *ecalloc_type(size_t nmemb = 1);
 
 // }}} util
 
@@ -230,6 +231,10 @@ void *ecalloc(size_t nmemb, size_t size) {
   if (!(p = calloc(nmemb, size)))
     die("calloc:");
   return p;
+}
+
+template <typename T> T *ecalloc_type(size_t nmemb) {
+  return static_cast<T *>(ecalloc(nmemb, sizeof(T)));
 }
 
 // }}} util.c
@@ -292,7 +297,7 @@ static size_t utf8decode(const char *c, long *u, size_t clen) {
 
 Drw *drw_create(Display *dpy, int screen, Window root, unsigned int w,
                 unsigned int h) {
-  Drw *drw = ecalloc(1, sizeof(Drw));
+  Drw *drw = ecalloc_type<Drw>();
   drw->dpy = dpy;
   drw->screen = screen;
   drw->root = root;
@@ -358,7 +363,7 @@ static Fnt *xfont_create(Drw *drw, const char *fontname,
     die("no font specified.");
   }
 
-  font = ecalloc(1, sizeof(Fnt));
+  font = ecalloc_type<Fnt>();
   font->xfont = xfont;
   font->pattern = pattern;
   font->h = xfont->ascent + xfont->descent;
@@ -418,7 +423,7 @@ Clr *drw_scm_create(Drw *drw, const char *clrnames[], size_t clrcount) {
   Clr *ret;
   /* need at least two colors for a scheme */
   if (!drw || !clrnames || clrcount < 2 ||
-      !(ret = ecalloc(clrcount, sizeof(XftColor)))) {
+      !(ret = ecalloc_type<XftColor>(clrcount))) {
     return NULL;
   }
   for (i = 0; i < clrcount; i++) {
@@ -645,7 +650,7 @@ void drw_font_getexts(Fnt *font, const char *text, unsigned int len,
 
 Cur *drw_cur_create(Drw *drw, int shape) {
   Cur *cur;
-  if (!drw || !(cur = ecalloc(1, sizeof(Cur)))) {
+  if (!drw || !(cur = ecalloc_type<Cur>())) {
     return NULL;
   }
   cur->cursor = XCreateFontCursor(drw->dpy, shape);
@@ -1168,7 +1173,7 @@ static char *xstrdup_local(const char *src) {
     src = "";
   }
   len = strlen(src);
-  dst = ecalloc(len + 1, sizeof(char));
+  dst = ecalloc_type<char>(len + 1);
   memcpy(dst, src, len);
   return dst;
 }
@@ -1808,7 +1813,7 @@ static void setcolorscheme(void) {
   size_t i;
 
   freecolorscheme();
-  scheme = ecalloc(SchemeSel + 1, sizeof(Clr *));
+  scheme = ecalloc_type<Clr *>(SchemeSel + 1);
   for (i = 0; i < SchemeSel + 1; i++) {
     scheme[i] = drw_scm_create(drw, colors[i], 3);
   }
@@ -2255,7 +2260,7 @@ void clientmessage(XEvent *e) {
       if (!XGetWindowAttributes(dpy, cme->data.l[2], &wa)) {
         return;
       }
-      i = ecalloc(1, sizeof(Client));
+      i = ecalloc_type<Client>();
       i->win = cme->data.l[2];
       i->mon = selmon;
       updatesystrayicongeom(i, wa.width, wa.height);
@@ -2410,7 +2415,7 @@ void configurerequest(XEvent *e) {
 // {{{ Monitor *createmon(void)
 Monitor *createmon(void) {
   Monitor *m;
-  m = ecalloc(1, sizeof(Monitor));
+  m = ecalloc_type<Monitor>();
   m->tagset[0] = m->tagset[1] =
       workspaces_len ? workspace_mask_from_index(0) : 0;
   m->mfact = mfact;
@@ -3035,7 +3040,7 @@ void manage(Window w, XWindowAttributes *wa) {
   Client *c, *t = NULL;
   Window trans = None;
   XWindowChanges wc;
-  c = ecalloc(1, sizeof(Client));
+  c = ecalloc_type<Client>();
   c->cfact = 1.0f;
   c->win = w;
   /* geometry */
@@ -4172,12 +4177,15 @@ void unmapnotify(XEvent *e) {
 // {{{ void updatebars(void)
 void updatebars(void) {
   Monitor *m;
-  XSetWindowAttributes wa = {.override_redirect = True,
-                             .background_pixmap = ParentRelative,
-                             .event_mask = ButtonPressMask | ExposureMask};
-  XClassHint ch = {"dwm", "dwm"};
+  XSetWindowAttributes wa = {};
+  XClassHint ch = {};
   XEvent ev = {0};
   unsigned long orient = 0;
+  wa.override_redirect = True;
+  wa.background_pixmap = ParentRelative;
+  wa.event_mask = ButtonPressMask | ExposureMask;
+  ch.res_name = const_cast<char *>("dwm");
+  ch.res_class = const_cast<char *>("dwm");
   for (m = mons; m; m = m->next) {
     if (m->barwin) {
       continue;
@@ -4191,7 +4199,7 @@ void updatebars(void) {
     XSetClassHint(dpy, m->barwin, &ch);
   }
   if (showsystray && !systray) {
-    systray = ecalloc(1, sizeof(Systray));
+    systray = ecalloc_type<Systray>();
     systray->win = XCreateSimpleWindow(dpy, root, 0, 0, 1, bh, 0, 0,
                                        scheme[SchemeNorm][ColBg].pixel);
     XChangeProperty(dpy, systray->win, netatom[NetSystemTrayOrientation],
@@ -4259,7 +4267,7 @@ int updategeom(void) {
       ;
     }
     /* only consider unique geometries as separate screens */
-    unique = ecalloc(nn, sizeof(XineramaScreenInfo));
+    unique = ecalloc_type<XineramaScreenInfo>(nn);
     for (i = 0, j = 0; i < nn; i++) {
       if (isuniquegeom(unique, j, &info[i])) {
         memcpy(&unique[j++], &info[i], sizeof(XineramaScreenInfo));
