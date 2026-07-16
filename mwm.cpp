@@ -85,6 +85,7 @@ DEALINGS IN THE SOFTWARE.
 #include <X11/keysym.h>
 #include <array>
 #include <ctype.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
@@ -107,8 +108,10 @@ extern "C" {
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/un.h>
 #include <sys/types.h>
+#include <time.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -726,6 +729,7 @@ enum {
   ClkLtSymbol,
   ClkStatusText,
   ClkWinTitle,
+  ClkWidgetBar,
   ClkClientWin,
   ClkRootWin,
   ClkLast
@@ -800,6 +804,7 @@ struct Monitor {
   int nmaster;
   int num;
   int by;             /* bar geometry */
+  int bby;            /* widget bar geometry */
   int mx, my, mw, mh; /* screen size */
   int wx, wy, ww, wh; /* window area  */
   unsigned int seltags;
@@ -812,6 +817,7 @@ struct Monitor {
   Client *stack;
   Monitor *next;
   Window barwin;
+  Window widgetbarwin;
   const Layout *lt[2];
 };
 
@@ -860,6 +866,7 @@ static void detachstack(Client *c);
 static Monitor *dirtomon(int dir);
 static void drawbar(Monitor *m);
 static void drawbars(void);
+static void drawwidgetbar(Monitor *m);
 static void enternotify(XEvent *e);
 static void expose(XEvent *e);
 static void focus(Client *c);
@@ -900,6 +907,7 @@ static void promptcommand(const Arg *arg);
 static void propertynotify(XEvent *e);
 static void quit(const Arg *arg);
 static Monitor *recttomon(int x, int y, int w, int h);
+static int read_long_from_file(const char *path, long *value);
 static void removesystrayicon(Client *i);
 static void resize(Client *c, int x, int y, int w, int h, int interact);
 static void resizebydir(const Arg *arg);
@@ -941,6 +949,7 @@ static void updatebars(void);
 static void updateclientlist(void);
 static int updategeom(void);
 static void updatenumlockmask(void);
+static void updatewidgets(void);
 static void updatesystray(void);
 static void updatesystrayicongeom(Client *i, int w, int h);
 static void updatesystrayiconstate(Client *i);
@@ -949,6 +958,11 @@ static void updatestatus(void);
 static void updatetitle(Client *c);
 static void updatewindowtype(Client *c);
 static void updatewmhints(Client *c);
+static void widget_init_paths(void);
+static void widget_format_backlight(char *buf, size_t size);
+static void widget_format_battery(char *buf, size_t size);
+static int widget_handle_button(Monitor *m, XButtonPressedEvent *ev);
+static int widget_set_backlight_percent(int delta_percent);
 static void view(const Arg *arg);
 static void viewnth(const Arg *arg);
 static void tagnth(const Arg *arg);
@@ -1024,6 +1038,15 @@ static size_t wm_capture_buffer_size = 0;
 static size_t wm_capture_buffer_len = 0;
 static char wm_socket_path[sizeof(((struct sockaddr_un *)0)->sun_path)];
 static char **saved_argv;
+static char backlight_dir[PATH_MAX];
+static char backlight_brightness_path[PATH_MAX];
+static char backlight_max_path[PATH_MAX];
+static char battery_capacity_path[PATH_MAX];
+static char battery_status_path[PATH_MAX];
+static int backlight_percent = -1;
+static int battery_percent = -1;
+static int battery_charging = 0;
+static time_t widgets_last_refresh = 0;
 
 static std::array<void (*)(XEvent *), LASTEvent> make_handler_table(void) {
   std::array<void (*)(XEvent *), LASTEvent> handlers = {};
@@ -1042,6 +1065,181 @@ static std::array<void (*)(XEvent *), LASTEvent> make_handler_table(void) {
   handlers[PropertyNotify] = propertynotify;
   handlers[UnmapNotify] = unmapnotify;
   return handlers;
+}
+
+static int read_long_from_file(const char *path, long *value) {
+  FILE *fp;
+  long parsed;
+
+  if (!path || path[0] == '\0' || !value) {
+    return 0;
+  }
+  fp = fopen(path, "r");
+  if (!fp) {
+    return 0;
+  }
+  if (fscanf(fp, "%ld", &parsed) != 1) {
+    fclose(fp);
+    return 0;
+  }
+  fclose(fp);
+  *value = parsed;
+  return 1;
+}
+
+static void widget_init_paths(void) {
+  DIR *dir;
+  struct dirent *entry;
+
+  if (backlight_brightness_path[0] == '\0') {
+    dir = opendir("/sys/class/backlight");
+    if (dir) {
+      while ((entry = readdir(dir))) {
+        if (entry->d_name[0] == '.') {
+          continue;
+        }
+        snprintf(backlight_dir, sizeof(backlight_dir), "/sys/class/backlight/%s",
+                 entry->d_name);
+        snprintf(backlight_brightness_path, sizeof(backlight_brightness_path),
+                 "%s/brightness", backlight_dir);
+        snprintf(backlight_max_path, sizeof(backlight_max_path), "%s/max_brightness",
+                 backlight_dir);
+        break;
+      }
+      closedir(dir);
+    }
+  }
+
+  if (battery_capacity_path[0] == '\0') {
+    dir = opendir("/sys/class/power_supply");
+    if (dir) {
+      while ((entry = readdir(dir))) {
+        if (entry->d_name[0] == '.' || strncmp(entry->d_name, "BAT", 3) != 0) {
+          continue;
+        }
+        snprintf(battery_capacity_path, sizeof(battery_capacity_path),
+                 "/sys/class/power_supply/%s/capacity", entry->d_name);
+        snprintf(battery_status_path, sizeof(battery_status_path),
+                 "/sys/class/power_supply/%s/status", entry->d_name);
+        break;
+      }
+      closedir(dir);
+    }
+  }
+}
+
+static void updatewidgets(void) {
+  FILE *fp;
+  char status[64];
+  long value;
+  long max_value;
+
+  widget_init_paths();
+
+  backlight_percent = -1;
+  if (read_long_from_file(backlight_brightness_path, &value) &&
+      read_long_from_file(backlight_max_path, &max_value) && max_value > 0) {
+    backlight_percent = (int)((value * 100 + (max_value / 2)) / max_value);
+  }
+
+  battery_percent = -1;
+  battery_charging = 0;
+  if (read_long_from_file(battery_capacity_path, &value)) {
+    battery_percent = (int)value;
+  }
+  if (battery_status_path[0] != '\0') {
+    fp = fopen(battery_status_path, "r");
+    if (fp) {
+      if (fgets(status, sizeof(status), fp)) {
+        battery_charging =
+            strncmp(status, "Charging", 8) == 0 || strncmp(status, "Full", 4) == 0;
+      }
+      fclose(fp);
+    }
+  }
+}
+
+static void widget_format_backlight(char *buf, size_t size) {
+  if (backlight_percent < 0) {
+    snprintf(buf, size, "backlight n/a");
+    return;
+  }
+  snprintf(buf, size, "backlight %d%%", backlight_percent);
+}
+
+static void widget_format_battery(char *buf, size_t size) {
+  if (battery_percent < 0) {
+    snprintf(buf, size, "battery n/a");
+    return;
+  }
+  snprintf(buf, size, "battery %d%% %s", battery_percent,
+           battery_charging ? "charging" : "discharging");
+}
+
+static int widget_set_backlight_percent(int delta_percent) {
+  FILE *fp;
+  long brightness;
+  long max_brightness;
+  long next_brightness;
+
+  widget_init_paths();
+  if (!read_long_from_file(backlight_brightness_path, &brightness) ||
+      !read_long_from_file(backlight_max_path, &max_brightness) ||
+      max_brightness <= 0 || backlight_brightness_path[0] == '\0') {
+    return 0;
+  }
+
+  next_brightness = brightness + (max_brightness * delta_percent) / 100;
+  if (next_brightness < 1) {
+    next_brightness = 1;
+  }
+  if (next_brightness > max_brightness) {
+    next_brightness = max_brightness;
+  }
+
+  fp = fopen(backlight_brightness_path, "w");
+  if (!fp) {
+    return 0;
+  }
+  fprintf(fp, "%ld\n", next_brightness);
+  fclose(fp);
+  updatewidgets();
+  drawbars();
+  return 1;
+}
+
+static int widget_handle_button(Monitor *m, XButtonPressedEvent *ev) {
+  char backlight_text[64];
+  char battery_text[64];
+  int backlight_w;
+  int battery_w;
+  int spacing;
+  int battery_x;
+  int backlight_x;
+
+  if (!m || ev->window != m->widgetbarwin) {
+    return 0;
+  }
+
+  widget_format_backlight(backlight_text, sizeof(backlight_text));
+  widget_format_battery(battery_text, sizeof(battery_text));
+  backlight_w = (int)TEXTW(backlight_text);
+  battery_w = (int)TEXTW(battery_text);
+  spacing = lrpad;
+  battery_x = m->ww - battery_w;
+  backlight_x = battery_x - spacing - backlight_w;
+
+  if (ev->x >= backlight_x && ev->x < backlight_x + backlight_w) {
+    if (ev->button == Button1 || ev->button == Button4) {
+      return widget_set_backlight_percent(+5);
+    }
+    if (ev->button == Button3 || ev->button == Button5) {
+      return widget_set_backlight_percent(-5);
+    }
+    return 1;
+  }
+
+  return 1;
 }
 
 static void client_save_workspace_tags(const Client *c) {
@@ -1765,6 +1963,9 @@ void buttonpress(XEvent *e) {
     selmon = m;
     focus(NULL);
   }
+  if (widget_handle_button(m, ev)) {
+    return;
+  }
   // If the window is equal to the selected monitor's bar window
   if (ev->window == selmon->barwin) {
     i = x = 0;
@@ -2316,6 +2517,10 @@ void cleanupmon(Monitor *mon) {
   }
   XUnmapWindow(dpy, mon->barwin);
   XDestroyWindow(dpy, mon->barwin);
+  if (mon->widgetbarwin) {
+    XUnmapWindow(dpy, mon->widgetbarwin);
+    XDestroyWindow(dpy, mon->widgetbarwin);
+  }
   free(mon);
 }
 // }}} void cleanupmon(Monitor *mon)
@@ -2417,6 +2622,7 @@ void configurenotify(XEvent *e) {
           }
         }
         XMoveResizeWindow(dpy, m->barwin, m->wx, m->by, m->ww, bh);
+        XMoveResizeWindow(dpy, m->widgetbarwin, m->wx, m->bby, m->ww, bh);
       }
       updatesystray();
       focus(NULL);
@@ -2638,11 +2844,46 @@ void drawbar(Monitor *m) {
 }
 // }}} void drawbar(Monitor *m)
 
+// {{{ void drawwidgetbar(Monitor *m)
+void drawwidgetbar(Monitor *m) {
+  char backlight_text[64];
+  char battery_text[64];
+  int backlight_w;
+  int battery_w;
+  int spacing;
+  int x;
+
+  if (!m->showbar) {
+    return;
+  }
+
+  drw_setscheme(drw, scheme[SchemeNorm]);
+  drw_rect(drw, 0, 0, m->ww, bh, 1, 1);
+
+  widget_format_backlight(backlight_text, sizeof(backlight_text));
+  widget_format_battery(battery_text, sizeof(battery_text));
+  backlight_w = (int)TEXTW(backlight_text);
+  battery_w = (int)TEXTW(battery_text);
+  spacing = lrpad;
+
+  x = m->ww - battery_w;
+  drw_setscheme(drw, scheme[SchemeNorm]);
+  drw_text(drw, x, 0, battery_w, bh, lrpad / 2, battery_text, 0);
+
+  x -= spacing + backlight_w;
+  drw_setscheme(drw, scheme[SchemeSel]);
+  drw_text(drw, x, 0, backlight_w, bh, lrpad / 2, backlight_text, 0);
+
+  drw_map(drw, m->widgetbarwin, 0, 0, m->ww, bh);
+}
+// }}} void drawwidgetbar(Monitor *m)
+
 // {{{ void drawbars(void)
 void drawbars(void) {
   Monitor *m;
   for (m = mons; m; m = m->next) {
     drawbar(m);
+    drawwidgetbar(m);
   }
 }
 // }}} void drawbars(void)
@@ -2673,7 +2914,11 @@ void expose(XEvent *e) {
   Monitor *m;
   XExposeEvent *ev = &e->xexpose;
   if (ev->count == 0 && (m = wintomon(ev->window))) {
-    drawbar(m);
+    if (ev->window == m->barwin) {
+      drawbar(m);
+    } else if (ev->window == m->widgetbarwin) {
+      drawwidgetbar(m);
+    }
   }
 }
 // }}} void expose(XEvent *e)
@@ -3693,6 +3938,15 @@ void run(void) {
   XSync(dpy, False);
   xfd = ConnectionNumber(dpy);
   while (running) {
+    struct timeval tv;
+    time_t now;
+
+    now = time(NULL);
+    if (widgets_last_refresh == 0 || now - widgets_last_refresh >= 2) {
+      updatewidgets();
+      widgets_last_refresh = now;
+      drawbars();
+    }
     FD_ZERO(&readfds);
     FD_SET(xfd, &readfds);
     maxfd = xfd;
@@ -3702,7 +3956,9 @@ void run(void) {
         maxfd = wm_command_fd;
       }
     }
-    if (select(maxfd + 1, &readfds, NULL, NULL, NULL) < 0) {
+    tv.tv_sec = 1;
+    tv.tv_usec = 0;
+    if (select(maxfd + 1, &readfds, NULL, NULL, &tv) < 0) {
       if (errno == EINTR) {
         continue;
       }
@@ -3939,6 +4195,8 @@ void setup(void) {
   set_default_bar_theme();
   workspace_set_defaults();
   load_theme_from_lua();
+  updatewidgets();
+  widgets_last_refresh = time(NULL);
   updategeom();
   /* init atoms */
   utf8string = XInternAtom(dpy, "UTF8_STRING", False);
@@ -4131,6 +4389,8 @@ void togglebar(const Arg *arg) {
   updatebarpos(selmon);
   XMoveResizeWindow(dpy, selmon->barwin, selmon->wx, selmon->by, selmon->ww,
                     bh);
+  XMoveResizeWindow(dpy, selmon->widgetbarwin, selmon->wx, selmon->bby,
+                    selmon->ww, bh);
   updatesystray();
   arrange(selmon);
 }
@@ -4271,15 +4531,31 @@ void updatebars(void) {
   ch.res_class = const_cast<char *>("dwm");
   for (m = mons; m; m = m->next) {
     if (m->barwin) {
+      if (!m->widgetbarwin) {
+        m->widgetbarwin = XCreateWindow(
+            dpy, root, m->wx, m->bby, m->ww, bh, 0, DefaultDepth(dpy, screen),
+            CopyFromParent, DefaultVisual(dpy, screen),
+            CWOverrideRedirect | CWBackPixmap | CWEventMask, &wa);
+        XDefineCursor(dpy, m->widgetbarwin, cursor[CurNormal]->cursor);
+        XMapRaised(dpy, m->widgetbarwin);
+        XSetClassHint(dpy, m->widgetbarwin, &ch);
+      }
       continue;
     }
     m->barwin = XCreateWindow(
         dpy, root, m->wx, m->by, m->ww, bh, 0, DefaultDepth(dpy, screen),
         CopyFromParent, DefaultVisual(dpy, screen),
         CWOverrideRedirect | CWBackPixmap | CWEventMask, &wa);
+    m->widgetbarwin = XCreateWindow(
+        dpy, root, m->wx, m->bby, m->ww, bh, 0, DefaultDepth(dpy, screen),
+        CopyFromParent, DefaultVisual(dpy, screen),
+        CWOverrideRedirect | CWBackPixmap | CWEventMask, &wa);
     XDefineCursor(dpy, m->barwin, cursor[CurNormal]->cursor);
+    XDefineCursor(dpy, m->widgetbarwin, cursor[CurNormal]->cursor);
     XMapRaised(dpy, m->barwin);
+    XMapRaised(dpy, m->widgetbarwin);
     XSetClassHint(dpy, m->barwin, &ch);
+    XSetClassHint(dpy, m->widgetbarwin, &ch);
   }
   if (showsystray && !systray) {
     systray = ecalloc_type<Systray>();
@@ -4311,11 +4587,13 @@ void updatebarpos(Monitor *m) {
   m->wy = m->my;
   m->wh = m->mh;
   if (m->showbar) {
-    m->wh -= bh;
+    m->wh -= 2 * bh;
     m->by = m->topbar ? m->wy : m->wy + m->wh;
-    m->wy = m->topbar ? m->wy + bh : m->wy;
+    m->bby = m->topbar ? (m->my + m->mh - bh) : m->my;
+    m->wy = m->my + bh;
   } else {
     m->by = -bh;
+    m->bby = -bh;
   }
 }
 // }}} void updatebarpos(Monitor *m)
@@ -4688,7 +4966,7 @@ Monitor *wintomon(Window w) {
   for (m = mons; m; m = m->next) {
     // Return the monitor if the window matches the monitor's bar window
     // NOTE: barwin not in list of clients, so we check for it here
-    if (w == m->barwin) {
+    if (w == m->barwin || w == m->widgetbarwin) {
       return m;
     }
   }
