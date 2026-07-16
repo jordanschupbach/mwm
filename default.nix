@@ -32,7 +32,7 @@ pkgs.stdenv.mkDerivation {
     # List all available packages for debugging
     pkg-config --list-all
 
-    gcc mwm.c -o mwm \
+    g++ mwm.cpp -o mwm \
       $(pkg-config --cflags --libs harfbuzz) \
       $(pkg-config --cflags --libs freetype) \
       $(pkg-config --cflags --libs fontconfig) \

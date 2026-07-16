@@ -2,7 +2,7 @@
 #     nix develop . --command bash -c "mkdir -p build && cmake -S . -B build && cmake --build build -- -j$(nproc)"
 
 default:
-    gcc mwm.c -o mwm \
+    g++ mwm.cpp -o mwm \
     $(pkg-config --cflags --libs harfbuzz) \
     $(pkg-config --cflags --libs freetype2) \
     $(pkg-config --cflags --libs fontconfig) \

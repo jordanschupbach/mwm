@@ -4,10 +4,12 @@ project(
   mwm
   VERSION 0.1
   DESCRIPTION "My window manager (dwm clone)"
-  LANGUAGES C
+  LANGUAGES C CXX
 )
 
 set(CMAKE_C_STANDARD 23)
+set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 
 find_package(PkgConfig REQUIRED)
@@ -44,7 +46,7 @@ link_directories(
   ${XINERAMA_LIBRARY_DIRS}
 )
 
-add_executable(mwm mwm.c)
+add_executable(mwm mwm.cpp)
 add_executable(mwm-cli mwm-cli.c)
 
 target_link_libraries(mwm
@@ -61,5 +63,4 @@ target_link_libraries(mwm
 )
 
 install(TARGETS mwm mwm-cli DESTINATION bin)
-
 
