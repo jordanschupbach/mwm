@@ -1357,7 +1357,8 @@ static size_t workspace_ensure(const char *name) {
   if (workspaces_len >= 64) {
     return SIZE_MAX;
   }
-  next = realloc(workspaces, (workspaces_len + 1) * sizeof(Workspace));
+  next = static_cast<Workspace *>(
+      realloc(workspaces, (workspaces_len + 1) * sizeof(Workspace)));
   if (!next) {
     die("realloc:");
   }
@@ -1506,7 +1507,7 @@ static void get_workspace_socket_path(char *buf, size_t size) {
 
 // {{{ void applyrules(Client *c)
 void applyrules(Client *c) {
-  const char *class, *instance;
+  const char *class_name, *instance;
   unsigned int i;
   const Rule *r;
   Monitor *m;
@@ -1516,13 +1517,13 @@ void applyrules(Client *c) {
   c->isfloating = 0;
   c->tags = 0;
   XGetClassHint(dpy, c->win, &ch);
-  class = ch.res_class ? ch.res_class : broken;
+  class_name = ch.res_class ? ch.res_class : broken;
   instance = ch.res_name ? ch.res_name : broken;
 
   for (i = 0; i < LENGTH(rules); i++) {
     r = &rules[i];
     if ((!r->title || strstr(c->name, r->title)) &&
-        (!r->class || strstr(class, r->class)) &&
+        (!r->class || strstr(class_name, r->class)) &&
         (!r->instance || strstr(instance, r->instance))) {
       c->isfloating = r->isfloating;
       c->tags |= r->tags;
@@ -2118,7 +2119,7 @@ static int wm_command_handle_client(int fd) {
       while (next_cap < len + (size_t)nread + 1) {
         next_cap *= 2;
       }
-      next_buffer = realloc(buffer, next_cap);
+      next_buffer = static_cast<char *>(realloc(buffer, next_cap));
       if (!next_buffer) {
         free(buffer);
         return -1;
