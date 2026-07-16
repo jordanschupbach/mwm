@@ -852,6 +852,7 @@ static void arrangemon(Monitor *m);
 static void attach(Client *c);
 static void attachstack(Client *c);
 static void buttonpress(XEvent *e);
+static void buttonrelease(XEvent *e);
 static void checkotherwm(void);
 static void cleanup(void);
 static void cleanupmon(Monitor *mon);
@@ -867,6 +868,7 @@ static Monitor *dirtomon(int dir);
 static void drawbar(Monitor *m);
 static void drawbars(void);
 static void drawwidgetbar(Monitor *m);
+static void drawbacklightpopup(void);
 static void enternotify(XEvent *e);
 static void expose(XEvent *e);
 static void focus(Client *c);
@@ -958,10 +960,16 @@ static void updatestatus(void);
 static void updatetitle(Client *c);
 static void updatewindowtype(Client *c);
 static void updatewmhints(Client *c);
+static void widget_close_backlight_popup(void);
 static void widget_init_paths(void);
 static void widget_format_backlight(char *buf, size_t size);
 static void widget_format_battery(char *buf, size_t size);
 static int widget_handle_button(Monitor *m, XButtonPressedEvent *ev);
+static void widget_open_backlight_popup(Monitor *m);
+static void widget_position_backlight_popup(Monitor *m);
+static int widget_popup_handle_button(XButtonPressedEvent *ev);
+static int widget_popup_handle_motion(XMotionEvent *ev);
+static void widget_set_backlight_percent_absolute(int percent);
 static int widget_set_backlight_percent(int delta_percent);
 static void view(const Arg *arg);
 static void viewnth(const Arg *arg);
@@ -1047,10 +1055,20 @@ static int backlight_percent = -1;
 static int battery_percent = -1;
 static int battery_charging = 0;
 static time_t widgets_last_refresh = 0;
+static Window backlight_popup_win = None;
+static Monitor *backlight_popup_mon = NULL;
+static int backlight_popup_visible = 0;
+static int backlight_popup_dragging = 0;
+static const int backlight_popup_w = 240;
+static const int backlight_popup_h = 64;
+static const int backlight_popup_pad = 12;
+static const int backlight_popup_slider_h = 8;
+static const int backlight_popup_slider_y = 34;
 
 static std::array<void (*)(XEvent *), LASTEvent> make_handler_table(void) {
   std::array<void (*)(XEvent *), LASTEvent> handlers = {};
   handlers[ButtonPress] = buttonpress;
+  handlers[ButtonRelease] = buttonrelease;
   handlers[ClientMessage] = clientmessage;
   handlers[ConfigureRequest] = configurerequest;
   handlers[ConfigureNotify] = configurenotify;
@@ -1176,6 +1194,43 @@ static void widget_format_battery(char *buf, size_t size) {
            battery_charging ? "charging" : "discharging");
 }
 
+static void widget_set_backlight_percent_absolute(int percent) {
+  FILE *fp;
+  long max_brightness;
+  long next_brightness;
+
+  widget_init_paths();
+  if (!read_long_from_file(backlight_max_path, &max_brightness) ||
+      max_brightness <= 0 || backlight_brightness_path[0] == '\0') {
+    return;
+  }
+
+  if (percent < 1) {
+    percent = 1;
+  }
+  if (percent > 100) {
+    percent = 100;
+  }
+
+  next_brightness = (max_brightness * percent + 50) / 100;
+  if (next_brightness < 1) {
+    next_brightness = 1;
+  }
+  if (next_brightness > max_brightness) {
+    next_brightness = max_brightness;
+  }
+
+  fp = fopen(backlight_brightness_path, "w");
+  if (!fp) {
+    return;
+  }
+  fprintf(fp, "%ld\n", next_brightness);
+  fclose(fp);
+  updatewidgets();
+  drawbars();
+  drawbacklightpopup();
+}
+
 static int widget_set_backlight_percent(int delta_percent) {
   FILE *fp;
   long brightness;
@@ -1205,6 +1260,181 @@ static int widget_set_backlight_percent(int delta_percent) {
   fclose(fp);
   updatewidgets();
   drawbars();
+  drawbacklightpopup();
+  return 1;
+}
+
+static void widget_position_backlight_popup(Monitor *m) {
+  char backlight_text[64];
+  char battery_text[64];
+  int backlight_w;
+  int battery_w;
+  int spacing;
+  int battery_x;
+  int backlight_x;
+  int popup_x;
+  int popup_y;
+
+  if (!m || backlight_popup_win == None) {
+    return;
+  }
+
+  widget_format_backlight(backlight_text, sizeof(backlight_text));
+  widget_format_battery(battery_text, sizeof(battery_text));
+  backlight_w = (int)TEXTW(backlight_text);
+  battery_w = (int)TEXTW(battery_text);
+  spacing = lrpad;
+  battery_x = m->ww - battery_w;
+  backlight_x = battery_x - spacing - backlight_w;
+
+  popup_x = m->wx + backlight_x + (backlight_w / 2) - (backlight_popup_w / 2);
+  if (popup_x < m->wx) {
+    popup_x = m->wx;
+  }
+  if (popup_x + backlight_popup_w > m->wx + m->ww) {
+    popup_x = m->wx + m->ww - backlight_popup_w;
+  }
+
+  popup_y = m->bby - backlight_popup_h - 8;
+  if (popup_y < m->my) {
+    popup_y = m->my;
+  }
+
+  XMoveResizeWindow(dpy, backlight_popup_win, popup_x, popup_y, backlight_popup_w,
+                    backlight_popup_h);
+}
+
+static void widget_open_backlight_popup(Monitor *m) {
+  XSetWindowAttributes wa = {};
+
+  if (!m) {
+    return;
+  }
+
+  if (backlight_popup_win == None) {
+    wa.override_redirect = True;
+    wa.background_pixel = scheme[SchemeNorm][ColBg].pixel;
+    wa.border_pixel = scheme[SchemeSel][ColBorder].pixel;
+    wa.event_mask = ExposureMask | ButtonPressMask | ButtonReleaseMask |
+                    PointerMotionMask;
+    backlight_popup_win = XCreateWindow(
+        dpy, root, m->wx, m->bby - backlight_popup_h, backlight_popup_w,
+        backlight_popup_h, 1, DefaultDepth(dpy, screen), CopyFromParent,
+        DefaultVisual(dpy, screen),
+        CWOverrideRedirect | CWBackPixel | CWBorderPixel | CWEventMask, &wa);
+    XDefineCursor(dpy, backlight_popup_win, cursor[CurNormal]->cursor);
+  }
+
+  backlight_popup_mon = m;
+  backlight_popup_visible = 1;
+  backlight_popup_dragging = 0;
+  widget_position_backlight_popup(m);
+  XMapRaised(dpy, backlight_popup_win);
+  drawbacklightpopup();
+}
+
+static void widget_close_backlight_popup(void) {
+  backlight_popup_dragging = 0;
+  backlight_popup_visible = 0;
+  backlight_popup_mon = NULL;
+  if (backlight_popup_win != None) {
+    XUnmapWindow(dpy, backlight_popup_win);
+  }
+}
+
+static void drawbacklightpopup(void) {
+  char label[64];
+  int slider_x;
+  int slider_w;
+  int fill_w;
+
+  if (!backlight_popup_visible || backlight_popup_win == None) {
+    return;
+  }
+
+  drw_setscheme(drw, scheme[SchemeNorm]);
+  drw_rect(drw, 0, 0, backlight_popup_w, backlight_popup_h, 1, 1);
+
+  widget_format_backlight(label, sizeof(label));
+  drw_setscheme(drw, scheme[SchemeSel]);
+  drw_text(drw, backlight_popup_pad, 8, backlight_popup_w - 2 * backlight_popup_pad,
+           drw->fonts->h + 4, 0, label, 0);
+
+  slider_x = backlight_popup_pad;
+  slider_w = backlight_popup_w - 2 * backlight_popup_pad;
+  drw_setscheme(drw, scheme[SchemeNorm]);
+  drw_rect(drw, slider_x, backlight_popup_slider_y, slider_w,
+           backlight_popup_slider_h, 1, 0);
+
+  if (backlight_percent >= 0) {
+    fill_w = (slider_w * backlight_percent) / 100;
+    if (fill_w < 1) {
+      fill_w = 1;
+    }
+    drw_setscheme(drw, scheme[SchemeSel]);
+    drw_rect(drw, slider_x, backlight_popup_slider_y, fill_w,
+             backlight_popup_slider_h, 1, 0);
+  }
+
+  drw_map(drw, backlight_popup_win, 0, 0, backlight_popup_w, backlight_popup_h);
+}
+
+static int widget_popup_handle_motion(XMotionEvent *ev) {
+  int slider_x;
+  int slider_w;
+  int relative_x;
+  int percent;
+
+  if (!backlight_popup_visible || !backlight_popup_dragging ||
+      ev->window != backlight_popup_win) {
+    return 0;
+  }
+
+  slider_x = backlight_popup_pad;
+  slider_w = backlight_popup_w - 2 * backlight_popup_pad;
+  relative_x = ev->x - slider_x;
+  if (relative_x < 0) {
+    relative_x = 0;
+  }
+  if (relative_x > slider_w) {
+    relative_x = slider_w;
+  }
+  percent = (relative_x * 100) / slider_w;
+  widget_set_backlight_percent_absolute(percent);
+  return 1;
+}
+
+static int widget_popup_handle_button(XButtonPressedEvent *ev) {
+  int slider_x;
+  int slider_w;
+  int relative_x;
+  int percent;
+
+  if (!backlight_popup_visible) {
+    return 0;
+  }
+
+  if (ev->window != backlight_popup_win) {
+    widget_close_backlight_popup();
+    return 0;
+  }
+
+  if (ev->button != Button1) {
+    return 1;
+  }
+
+  slider_x = backlight_popup_pad;
+  slider_w = backlight_popup_w - 2 * backlight_popup_pad;
+  relative_x = ev->x - slider_x;
+  if (relative_x < 0) {
+    relative_x = 0;
+  }
+  if (relative_x > slider_w) {
+    relative_x = slider_w;
+  }
+  percent = (relative_x * 100) / slider_w;
+  backlight_popup_dragging = 1;
+  widget_set_backlight_percent_absolute(percent);
   return 1;
 }
 
@@ -1230,7 +1460,15 @@ static int widget_handle_button(Monitor *m, XButtonPressedEvent *ev) {
   backlight_x = battery_x - spacing - backlight_w;
 
   if (ev->x >= backlight_x && ev->x < backlight_x + backlight_w) {
-    if (ev->button == Button1 || ev->button == Button4) {
+    if (ev->button == Button1) {
+      if (backlight_popup_visible && backlight_popup_mon == m) {
+        widget_close_backlight_popup();
+      } else {
+        widget_open_backlight_popup(m);
+      }
+      return 1;
+    }
+    if (ev->button == Button4) {
       return widget_set_backlight_percent(+5);
     }
     if (ev->button == Button3 || ev->button == Button5) {
@@ -1957,6 +2195,9 @@ void buttonpress(XEvent *e) {
   unsigned int statusw, trayw;
 
   click = ClkRootWin;
+  if (widget_popup_handle_button(ev)) {
+    return;
+  }
   /* focus the monitor if necessary */
   if ((m = wintomon(ev->window)) && m != selmon) {
     unfocus(selmon->sel, 1);
@@ -2010,6 +2251,15 @@ void buttonpress(XEvent *e) {
   }
 }
 // }}} void buttonpress(XEvent *e)
+
+// {{{ void buttonrelease(XEvent *e)
+void buttonrelease(XEvent *e) {
+  XButtonReleasedEvent *ev = &e->xbutton;
+
+  (void)ev;
+  backlight_popup_dragging = 0;
+}
+// }}} void buttonrelease(XEvent *e)
 
 // {{{ void checkargs(int argc, char *argv[])
 void checkargs(int argc, char *argv[]) {
@@ -2484,6 +2734,10 @@ void cleanup(void) {
     free(systray);
     systray = NULL;
   }
+  if (backlight_popup_win != None) {
+    XDestroyWindow(dpy, backlight_popup_win);
+    backlight_popup_win = None;
+  }
   XDestroyWindow(dpy, wmcheckwin);
   drw_free(drw);
   XSync(dpy, False);
@@ -2623,6 +2877,10 @@ void configurenotify(XEvent *e) {
         }
         XMoveResizeWindow(dpy, m->barwin, m->wx, m->by, m->ww, bh);
         XMoveResizeWindow(dpy, m->widgetbarwin, m->wx, m->bby, m->ww, bh);
+      }
+      if (backlight_popup_visible && backlight_popup_mon) {
+        widget_position_backlight_popup(backlight_popup_mon);
+        drawbacklightpopup();
       }
       updatesystray();
       focus(NULL);
@@ -2885,6 +3143,7 @@ void drawbars(void) {
     drawbar(m);
     drawwidgetbar(m);
   }
+  drawbacklightpopup();
 }
 // }}} void drawbars(void)
 
@@ -2913,6 +3172,10 @@ void enternotify(XEvent *e) {
 void expose(XEvent *e) {
   Monitor *m;
   XExposeEvent *ev = &e->xexpose;
+  if (backlight_popup_visible && ev->window == backlight_popup_win) {
+    drawbacklightpopup();
+    return;
+  }
   if (ev->count == 0 && (m = wintomon(ev->window))) {
     if (ev->window == m->barwin) {
       drawbar(m);
@@ -3477,6 +3740,9 @@ void motionnotify(XEvent *e) {
   static Monitor *mon = NULL;
   Monitor *m;
   XMotionEvent *ev = &e->xmotion;
+  if (widget_popup_handle_motion(ev)) {
+    return;
+  }
   if (ev->window != root) {
     return;
   }
