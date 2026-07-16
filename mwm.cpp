@@ -975,6 +975,8 @@ static int wm_command_handle_client(int fd);
 static int wm_command_server_init(void);
 static void wm_command_server_shutdown(void);
 static int wm_eval_lua_buffer(const char *chunk, size_t len, int fd);
+static void client_save_workspace_tags(const Client *c);
+static int client_restore_workspace_tags(Window w, WorkspaceMask *tags);
 static std::array<void (*)(XEvent *), LASTEvent> make_handler_table(void);
 
 static Monitor *wintomon(Window w);
@@ -1040,6 +1042,62 @@ static std::array<void (*)(XEvent *), LASTEvent> make_handler_table(void) {
   handlers[PropertyNotify] = propertynotify;
   handlers[UnmapNotify] = unmapnotify;
   return handlers;
+}
+
+static void client_save_workspace_tags(const Client *c) {
+  Atom property;
+  unsigned long data[2];
+
+  if (!c) {
+    return;
+  }
+  property = XInternAtom(dpy, "_MWM_WORKSPACE_TAGS", False);
+  data[0] = (unsigned long)(c->tags & 0xFFFFFFFFULL);
+  data[1] = (unsigned long)((c->tags >> 32) & 0xFFFFFFFFULL);
+  XChangeProperty(dpy, c->win, property, XA_CARDINAL, 32, PropModeReplace,
+                  reinterpret_cast<unsigned char *>(data), 2);
+}
+
+static int client_restore_workspace_tags(Window w, WorkspaceMask *tags) {
+  Atom property;
+  Atom actual_type;
+  int actual_format;
+  unsigned long nitems;
+  unsigned long bytes_after;
+  unsigned char *data = NULL;
+  WorkspaceMask restored = 0;
+  int ok = 0;
+
+  if (!tags) {
+    return 0;
+  }
+
+  property = XInternAtom(dpy, "_MWM_WORKSPACE_TAGS", False);
+  if (XGetWindowProperty(dpy, w, property, 0, 2, False, XA_CARDINAL,
+                         &actual_type, &actual_format, &nitems, &bytes_after,
+                         &data) != Success) {
+    return 0;
+  }
+
+  if (actual_type == XA_CARDINAL && actual_format == 32 && data) {
+    unsigned long *values = reinterpret_cast<unsigned long *>(data);
+    if (nitems >= 1) {
+      restored = (WorkspaceMask)values[0];
+      if (nitems >= 2) {
+        restored |= ((WorkspaceMask)values[1]) << 32;
+      }
+      restored &= get_full_workspace_mask();
+      if (restored) {
+        *tags = restored;
+        ok = 1;
+      }
+    }
+  }
+
+  if (data) {
+    XFree(data);
+  }
+  return ok;
 }
 
 // }}} Variables
@@ -1413,6 +1471,7 @@ static int workspace_remove_index(size_t index) {
     m->tagset[1] = workspace_reindex_mask_after_remove(m->tagset[1], index);
     for (c = m->clients; c; c = c->next) {
       c->tags = workspace_reindex_mask_after_remove(c->tags, index);
+      client_save_workspace_tags(c);
     }
   }
 
@@ -3054,6 +3113,8 @@ void manage(Window w, XWindowAttributes *wa) {
   Client *c, *t = NULL;
   Window trans = None;
   XWindowChanges wc;
+  WorkspaceMask restored_tags = 0;
+  int has_restored_tags = 0;
   c = ecalloc_type<Client>();
   c->cfact = 1.0f;
   c->win = w;
@@ -3064,12 +3125,16 @@ void manage(Window w, XWindowAttributes *wa) {
   c->h = c->oldh = wa->height;
   c->oldbw = wa->border_width;
   updatetitle(c);
+  has_restored_tags = client_restore_workspace_tags(w, &restored_tags);
   if (XGetTransientForHint(dpy, w, &trans) && (t = wintoclient(trans))) {
     c->mon = t->mon;
-    c->tags = t->tags;
+    c->tags = has_restored_tags ? restored_tags : t->tags;
   } else {
     c->mon = selmon;
     applyrules(c);
+    if (has_restored_tags) {
+      c->tags = restored_tags;
+    }
   }
   if (c->x + WIDTH(c) > c->mon->wx + c->mon->ww) {
     c->x = c->mon->wx + c->mon->ww - WIDTH(c);
@@ -3097,6 +3162,7 @@ void manage(Window w, XWindowAttributes *wa) {
   if (c->isfloating) {
     XRaiseWindow(dpy, c->win);
   }
+  client_save_workspace_tags(c);
   attach(c);
   attachstack(c);
   XChangeProperty(dpy, root, netatom[NetClientList], XA_WINDOW, 32,
@@ -3716,6 +3782,7 @@ void sendmon(Client *c, Monitor *m) {
   detachstack(c);
   c->mon = m;
   c->tags = m->tagset[m->seltags]; /* assign tags of target monitor */
+  client_save_workspace_tags(c);
   attach(c);
   attachstack(c);
   focus(NULL);
@@ -3997,6 +4064,7 @@ void tag(const Arg *arg) {
   WorkspaceMask mask = arg->ull & get_full_workspace_mask();
   if (selmon->sel && mask) {
     selmon->sel->tags = mask;
+    client_save_workspace_tags(selmon->sel);
     focus(NULL);
     arrange(selmon);
   }
@@ -4095,6 +4163,7 @@ void toggletag(const Arg *arg) {
   newtags = selmon->sel->tags ^ (arg->ull & get_full_workspace_mask());
   if (newtags) {
     selmon->sel->tags = newtags;
+    client_save_workspace_tags(selmon->sel);
     focus(NULL);
     arrange(selmon);
   }
