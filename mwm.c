@@ -1096,7 +1096,7 @@ static const char *dmenucmd[] = {
     "-sf",       default_col_gray4, NULL};
 static const char *termcmd[] = {"kitty", NULL};
 
-static const char *roficmd[] = {"rofi", "-show", "run"};
+static const char *roficmd[] = {"rofi", "-show", "drun"};
 
 static const Key keys[] = {
     /* modifier                     key        function        argument */
