@@ -1,0 +1,22 @@
+-- Copy this to ~/.config/mwm/config.lua
+
+mwm.workspaces({
+  "main",
+  "web",
+  "chat",
+})
+
+mwm.theme({
+  topbar = {
+    normal = {
+      fg = "#d7d7d7",
+      bg = "#1f2329",
+      border = "#3a4048",
+    },
+    selected = {
+      fg = "#f5f7fa",
+      bg = "#2d6cdf",
+      border = "#2d6cdf",
+    },
+  },
+})
