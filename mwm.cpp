@@ -83,14 +83,21 @@ DEALINGS IN THE SOFTWARE.
 #include <X11/Xutil.h>
 #include <X11/cursorfont.h>
 #include <X11/keysym.h>
+#include <array>
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
 #include <limits.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
 #include <lauxlib.h>
 #include <lua.h>
 #include <lualib.h>
+#ifdef __cplusplus
+}
+#endif
 #include <locale.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -809,7 +816,7 @@ struct Monitor {
 };
 
 typedef struct {
-  const char *class;
+  const char *class_name;
   const char *instance;
   const char *title;
   WorkspaceMask tags;
@@ -968,6 +975,7 @@ static int wm_command_handle_client(int fd);
 static int wm_command_server_init(void);
 static void wm_command_server_shutdown(void);
 static int wm_eval_lua_buffer(const char *chunk, size_t len, int fd);
+static std::array<void (*)(XEvent *), LASTEvent> make_handler_table(void);
 
 static Monitor *wintomon(Window w);
 static int xerror(Display *dpy, XErrorEvent *ee);
@@ -986,21 +994,8 @@ static int bh;     /* bar height */
 static int lrpad;  /* sum of left and right padding for text */
 static int (*xerrorxlib)(Display *, XErrorEvent *);
 static unsigned int numlockmask = 0;
-static void (*handler[LASTEvent])(XEvent *) = {
-    [ButtonPress] = buttonpress,
-    [ClientMessage] = clientmessage,
-    [ConfigureRequest] = configurerequest,
-    [ConfigureNotify] = configurenotify,
-    [DestroyNotify] = destroynotify,
-    [EnterNotify] = enternotify,
-    [Expose] = expose,
-    [FocusIn] = focusin,
-    [KeyPress] = keypress,
-    [MappingNotify] = mappingnotify,
-    [MapRequest] = maprequest,
-    [MotionNotify] = motionnotify,
-    [PropertyNotify] = propertynotify,
-    [UnmapNotify] = unmapnotify};
+static const std::array<void (*)(XEvent *), LASTEvent> handler =
+    make_handler_table();
 static Atom wmatom[WMLast], netatom[NetLast];
 static Atom xatom[XLast];
 static int running = 1;
@@ -1027,6 +1022,25 @@ static size_t wm_capture_buffer_size = 0;
 static size_t wm_capture_buffer_len = 0;
 static char wm_socket_path[sizeof(((struct sockaddr_un *)0)->sun_path)];
 static char **saved_argv;
+
+static std::array<void (*)(XEvent *), LASTEvent> make_handler_table(void) {
+  std::array<void (*)(XEvent *), LASTEvent> handlers = {};
+  handlers[ButtonPress] = buttonpress;
+  handlers[ClientMessage] = clientmessage;
+  handlers[ConfigureRequest] = configurerequest;
+  handlers[ConfigureNotify] = configurenotify;
+  handlers[DestroyNotify] = destroynotify;
+  handlers[EnterNotify] = enternotify;
+  handlers[Expose] = expose;
+  handlers[FocusIn] = focusin;
+  handlers[KeyPress] = keypress;
+  handlers[MappingNotify] = mappingnotify;
+  handlers[MapRequest] = maprequest;
+  handlers[MotionNotify] = motionnotify;
+  handlers[PropertyNotify] = propertynotify;
+  handlers[UnmapNotify] = unmapnotify;
+  return handlers;
+}
 
 // }}} Variables
 
@@ -1523,7 +1537,7 @@ void applyrules(Client *c) {
   for (i = 0; i < LENGTH(rules); i++) {
     r = &rules[i];
     if ((!r->title || strstr(c->name, r->title)) &&
-        (!r->class || strstr(class_name, r->class)) &&
+        (!r->class_name || strstr(class_name, r->class_name)) &&
         (!r->instance || strstr(instance, r->instance))) {
       c->isfloating = r->isfloating;
       c->tags |= r->tags;
@@ -1806,10 +1820,9 @@ static void freecolorscheme(void) {
 
 static void setcolorscheme(void) {
   const char *colors[SchemeSel + 1][3] = {
-      [SchemeNorm] = {bar_theme.normal.fg, bar_theme.normal.bg,
-                      bar_theme.normal.border},
-      [SchemeSel] = {bar_theme.selected.fg, bar_theme.selected.bg,
-                     bar_theme.selected.border},
+      {bar_theme.normal.fg, bar_theme.normal.bg, bar_theme.normal.border},
+      {bar_theme.selected.fg, bar_theme.selected.bg,
+       bar_theme.selected.border},
   };
   size_t i;
 
