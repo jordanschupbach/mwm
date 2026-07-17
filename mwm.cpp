@@ -1521,73 +1521,122 @@ static void widget_update_volume(void) {
   }
 }
 
+/* {{{ widget icons (Nerd Font Private Use Area glyphs; see `fonts[]`) */
+static const char icon_battery_full[] = "";
+static const char icon_battery_75[] = "";
+static const char icon_battery_50[] = "";
+static const char icon_battery_25[] = "";
+static const char icon_battery_empty[] = "";
+static const char icon_battery_charging[] = "";
+static const char icon_backlight[] = "\U000F0599";
+static const char icon_volume_muted[] = "";
+static const char icon_volume_low[] = "";
+static const char icon_volume_high[] = "";
+static const char icon_theme_dark[] = "";
+static const char icon_theme_light[] = "\U000F0599";
+static const char icon_theme_auto[] = "";
+static const char icon_bell[] = "";
+static const char icon_bell_outline[] = "";
+static const char icon_cpu[] = "\U000F061A";
+static const char icon_mem[] = "\U000F035B";
+static const char icon_disk[] = "";
+static const char icon_net[] = "";
+static const char icon_clock[] = "";
+static const char icon_close[] = "";
+/* }}} widget icons */
+
 static void widget_format_backlight(char *buf, size_t size) {
   if (backlight_percent < 0) {
-    snprintf(buf, size, "backlight n/a");
+    snprintf(buf, size, "%s n/a", icon_backlight);
     return;
   }
-  snprintf(buf, size, "backlight %d%%", backlight_percent);
+  snprintf(buf, size, "%s %d%%", icon_backlight, backlight_percent);
 }
 
 static void widget_format_battery(char *buf, size_t size) {
+  const char *icon;
+
   if (battery_percent < 0) {
-    snprintf(buf, size, "battery n/a");
+    snprintf(buf, size, "%s n/a", icon_battery_full);
     return;
   }
-  snprintf(buf, size, "battery %d%% %s", battery_percent,
-           battery_charging ? "charging" : "discharging");
+  if (battery_charging) {
+    icon = icon_battery_charging;
+  } else if (battery_percent >= 90) {
+    icon = icon_battery_full;
+  } else if (battery_percent >= 65) {
+    icon = icon_battery_75;
+  } else if (battery_percent >= 40) {
+    icon = icon_battery_50;
+  } else if (battery_percent >= 15) {
+    icon = icon_battery_25;
+  } else {
+    icon = icon_battery_empty;
+  }
+  snprintf(buf, size, "%s %d%%", icon, battery_percent);
 }
 
 static void widget_format_volume(char *buf, size_t size) {
+  const char *icon;
+
   if (volume_percent < 0) {
-    snprintf(buf, size, "vol n/a");
+    snprintf(buf, size, "%s n/a", icon_volume_high);
     return;
+  }
+  if (volume_muted || volume_percent == 0) {
+    icon = icon_volume_muted;
+  } else if (volume_percent < 50) {
+    icon = icon_volume_low;
+  } else {
+    icon = icon_volume_high;
   }
   if (volume_muted) {
-    snprintf(buf, size, "vol %d%% muted", volume_percent);
+    snprintf(buf, size, "%s %d%% muted", icon, volume_percent);
     return;
   }
-  snprintf(buf, size, "vol %d%%", volume_percent);
+  snprintf(buf, size, "%s %d%%", icon, volume_percent);
 }
 
 static void widget_format_cpu(char *buf, size_t size) {
   if (cpu_percent < 0) {
-    snprintf(buf, size, "cpu ...");
+    snprintf(buf, size, "%s ...", icon_cpu);
     return;
   }
-  snprintf(buf, size, "cpu %d%%", cpu_percent);
+  snprintf(buf, size, "%s %d%%", icon_cpu, cpu_percent);
 }
 
 static void widget_format_mem(char *buf, size_t size) {
   if (mem_percent < 0) {
-    snprintf(buf, size, "mem n/a");
+    snprintf(buf, size, "%s n/a", icon_mem);
     return;
   }
-  snprintf(buf, size, "mem %d%%", mem_percent);
+  snprintf(buf, size, "%s %d%%", icon_mem, mem_percent);
 }
 
 static void widget_format_disk(char *buf, size_t size) {
   if (disk_percent < 0) {
-    snprintf(buf, size, "disk n/a");
+    snprintf(buf, size, "%s n/a", icon_disk);
     return;
   }
-  snprintf(buf, size, "disk %d%%", disk_percent);
+  snprintf(buf, size, "%s %d%%", icon_disk, disk_percent);
 }
 
 static void widget_format_net(char *buf, size_t size) {
   if (net_iface[0] == '\0') {
-    snprintf(buf, size, "net down");
+    snprintf(buf, size, "%s down", icon_net);
     return;
   }
-  snprintf(buf, size, "net %s %s", net_iface, net_up ? "up" : "down");
+  snprintf(buf, size, "%s %s %s", icon_net, net_iface, net_up ? "up" : "down");
 }
 
 static void widget_format_clock(char *buf, size_t size) {
   time_t now = time(NULL);
   struct tm tm_buf;
+  char timebuf[48];
 
   localtime_r(&now, &tm_buf);
-  strftime(buf, size, "%a %Y-%m-%d %H:%M", &tm_buf);
+  strftime(timebuf, sizeof(timebuf), "%a %Y-%m-%d %H:%M", &tm_buf);
+  snprintf(buf, size, "%s %s", icon_clock, timebuf);
 }
 
 static void widget_set_backlight_percent_absolute(int percent) {
@@ -2065,7 +2114,10 @@ static const int showbar = 1;           /* 0 means no bar */
 static const int showsystray = 1;       /* 0 means no system tray */
 static const unsigned int systrayspacing = 6;
 static const int topbar = 1;            /* 0 means bottom bar */
-static const char *fonts[] = {"monospace:size=10"};
+/* Second entry is a fallback used only for glyphs missing from the primary
+ * font -- widget icons live in the Nerd Font Private Use Area ranges, so a
+ * Nerd Font must be installed for them to render instead of tofu boxes. */
+static const char *fonts[] = {"monospace:size=10", "UbuntuMono Nerd Font Mono:size=10"};
 static const char dmenufont[] = "monospace:size=10";
 static const char default_col_gray1[] = "#222222";
 static const char default_col_gray2[] = "#444444";
@@ -2958,26 +3010,30 @@ static void widget_update_theme(void) {
 
 static void widget_format_theme(char *buf, size_t size) {
   const char *mode_name;
+  const char *icon;
 
   switch (theme_mode) {
   case ThemeModeDark:
     mode_name = "dark";
+    icon = icon_theme_dark;
     break;
   case ThemeModeLight:
     mode_name = "light";
+    icon = icon_theme_light;
     break;
   case ThemeModeSystem:
   default:
     mode_name = "auto";
+    icon = icon_theme_auto;
     break;
   }
 
   if (theme_mode == ThemeModeSystem) {
-    snprintf(buf, size, "theme %s (%s)", mode_name,
+    snprintf(buf, size, "%s %s (%s)", icon, mode_name,
              theme_resolved_dark ? "dark" : "light");
     return;
   }
-  snprintf(buf, size, "theme %s", mode_name);
+  snprintf(buf, size, "%s %s", icon, mode_name);
 }
 
 static void get_theme_state_path(char *buf, size_t size) {
@@ -3808,9 +3864,9 @@ static void notif_dbus_process(void) {
 
 static void widget_format_notifications(char *buf, size_t size) {
   if (notification_unread > 0) {
-    snprintf(buf, size, "notif %zu", notification_unread);
+    snprintf(buf, size, "%s %zu", icon_bell, notification_unread);
   } else {
-    snprintf(buf, size, "notif");
+    snprintf(buf, size, "%s", icon_bell_outline);
   }
 }
 
@@ -4004,7 +4060,7 @@ static void draw_notif_sidebar(void) {
         row->close_y = card_y;
         drw_setscheme(drw, scheme[SchemeNorm]);
         drw_text(drw, row->close_x, row->close_y, row->close_w, row->close_h, 0,
-                 "x", 0);
+                 icon_close, 0);
       }
 
       drw_setscheme(drw, scheme[SchemeNorm]);
