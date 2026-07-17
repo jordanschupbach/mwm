@@ -85,6 +85,7 @@ DEALINGS IN THE SOFTWARE.
 #include <X11/keysym.h>
 #include <array>
 #include <ctype.h>
+#include <dbus/dbus.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -100,6 +101,7 @@ extern "C" {
 }
 #endif
 #include <locale.h>
+#include <math.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -108,6 +110,7 @@ extern "C" {
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/time.h>
 #include <sys/un.h>
 #include <sys/types.h>
@@ -841,6 +844,61 @@ typedef struct {
   ColorSetConfig selected;
 } BarThemeConfig;
 
+enum WidgetId {
+  WidgetBattery,
+  WidgetBacklight,
+  WidgetVolume,
+  WidgetTheme,
+  WidgetNotif,
+  WidgetCpu,
+  WidgetMem,
+  WidgetDisk,
+  WidgetNet,
+  WidgetClock,
+  WidgetCount
+};
+
+enum SliderWidget { SliderBacklight, SliderVolume };
+
+enum ThemeMode { ThemeModeDark, ThemeModeLight, ThemeModeSystem, ThemeModeCount };
+
+typedef struct {
+  int x;
+  int w;
+} WidgetLayout;
+
+#define MAX_LUA_WIDGETS 16
+
+typedef struct {
+  char name[32];
+  char text[256];
+  int highlight;
+  int update_ref;
+  int click_ref;
+  int x;
+  int w;
+} LuaWidget;
+
+#define MAX_NOTIFICATIONS 50
+
+typedef struct Notification Notification;
+struct Notification {
+  unsigned int id;
+  char app_name[64];
+  char summary[256];
+  char body[512];
+  time_t received;
+  time_t expire_at; /* 0 = never */
+  Notification *next;
+};
+
+typedef struct {
+  unsigned int id;
+  int close_x, close_y, close_w, close_h;
+} NotifRowLayout;
+
+enum SidebarAnim { SidebarAnimIdle, SidebarAnimOpening, SidebarAnimClosing };
+
 // }}} Types
 
 // {{{ Function declarations
@@ -868,7 +926,7 @@ static Monitor *dirtomon(int dir);
 static void drawbar(Monitor *m);
 static void drawbars(void);
 static void drawwidgetbar(Monitor *m);
-static void drawbacklightpopup(void);
+static void draw_slider_popup(void);
 static void enternotify(XEvent *e);
 static void expose(XEvent *e);
 static void focus(Client *c);
@@ -892,11 +950,49 @@ static void killclient(const Arg *arg);
 static int load_config_from_lua(void);
 static int load_theme_from_lua(void);
 static int lua_mwm_create_workspace(lua_State *L);
+static int lua_mwm_exec(lua_State *L);
 static int lua_mwm_focus_workspace(lua_State *L);
 static int lua_mwm_list_workspaces(lua_State *L);
 static int lua_mwm_rename_workspace(lua_State *L);
 static int lua_mwm_theme(lua_State *L);
+static int lua_mwm_widget(lua_State *L);
 static int lua_mwm_workspaces(lua_State *L);
+static void reset_lua_widgets(void);
+static void widget_update_lua_widgets(void);
+static void widget_lua_click(size_t index, int button);
+
+/* {{{ notification sidebar declarations */
+static unsigned int notification_add(const char *app_name, const char *summary,
+                                     const char *body, unsigned int replaces_id,
+                                     int expire_timeout_ms);
+static void notification_remove(unsigned int id, unsigned int reason);
+static void notification_clear_all(void);
+static void notification_expire_check(void);
+static void notif_dbus_init(void);
+static void notif_dbus_try_acquire(void);
+static void notif_dbus_shutdown(void);
+static void notif_dbus_process(void);
+static void notif_dbus_handle_message(DBusMessage *msg);
+static void notif_dbus_handle_notify(DBusMessage *msg);
+static void notif_dbus_handle_close_notification(DBusMessage *msg);
+static void notif_dbus_handle_get_capabilities(DBusMessage *msg);
+static void notif_dbus_handle_get_server_information(DBusMessage *msg);
+static void notif_dbus_handle_introspect(DBusMessage *msg);
+static void notif_dbus_emit_notification_closed(unsigned int id, unsigned int reason);
+static void widget_format_notifications(char *buf, size_t size);
+static size_t notif_wrap_body(const char *text, int max_width, char out[][256],
+                              size_t max_lines);
+static void notif_format_relative_time(time_t t, char *buf, size_t size);
+static int notif_sidebar_content_height(void);
+static void notif_sidebar_position(Monitor *m);
+static void draw_notif_sidebar(void);
+static void notif_sidebar_open(Monitor *m);
+static void notif_sidebar_close(void);
+static void notif_sidebar_toggle(Monitor *m);
+static void notif_sidebar_advance_animation(void);
+static int notif_sidebar_handle_button(XButtonPressedEvent *ev);
+/* }}} notification sidebar declarations */
+
 static void manage(Window w, XWindowAttributes *wa);
 static void mappingnotify(XEvent *e);
 static void maprequest(XEvent *e);
@@ -960,17 +1056,46 @@ static void updatestatus(void);
 static void updatetitle(Client *c);
 static void updatewindowtype(Client *c);
 static void updatewmhints(Client *c);
-static void widget_close_backlight_popup(void);
+static void widget_close_slider_popup(void);
 static void widget_init_paths(void);
 static void widget_format_backlight(char *buf, size_t size);
 static void widget_format_battery(char *buf, size_t size);
+static void widget_format_clock(char *buf, size_t size);
+static void widget_format_cpu(char *buf, size_t size);
+static void widget_format_disk(char *buf, size_t size);
+static void widget_format_mem(char *buf, size_t size);
+static void widget_format_net(char *buf, size_t size);
+static void widget_format_volume(char *buf, size_t size);
 static int widget_handle_button(Monitor *m, XButtonPressedEvent *ev);
-static void widget_open_backlight_popup(Monitor *m);
-static void widget_position_backlight_popup(Monitor *m);
-static int widget_popup_handle_button(XButtonPressedEvent *ev);
-static int widget_popup_handle_motion(XMotionEvent *ev);
+static int widget_hit(enum WidgetId id, int x);
+static void widget_open_slider_popup(Monitor *m, enum SliderWidget kind);
+static void widget_position_slider_popup(Monitor *m);
+static int slider_popup_handle_button(XButtonPressedEvent *ev);
+static int slider_popup_handle_motion(XMotionEvent *ev);
+static int widget_slider_current_percent(enum SliderWidget kind);
+static void widget_slider_label(enum SliderWidget kind, char *buf, size_t size);
+static void widget_slider_set_absolute(enum SliderWidget kind, int percent);
 static void widget_set_backlight_percent_absolute(int percent);
 static int widget_set_backlight_percent(int delta_percent);
+static void widget_set_volume_percent_absolute(int percent);
+static int widget_set_volume_percent(int delta_percent);
+static void widget_toggle_volume_mute(void);
+static void widget_update_cpu(void);
+static void widget_update_disk(void);
+static void widget_update_mem(void);
+static void widget_update_net(void);
+static void widget_update_volume(void);
+static void widget_update_theme(void);
+static void widget_format_theme(char *buf, size_t size);
+static void widget_cycle_theme_mode(int direction);
+static const BarThemeConfig *active_bar_theme(void);
+static int theme_resolve_prefers_dark(void);
+static int system_prefers_dark(void);
+static void widget_apply_theme(void);
+static void widget_refresh_client_borders(void);
+static void get_theme_state_path(char *buf, size_t size);
+static void load_theme_mode_state(void);
+static void save_theme_mode_state(void);
 static void view(const Arg *arg);
 static void viewnth(const Arg *arg);
 static void tagnth(const Arg *arg);
@@ -1031,7 +1156,40 @@ static Display *dpy;
 static Drw *drw;
 static Monitor *mons, *selmon;
 static Systray *systray;
-static BarThemeConfig bar_theme;
+static BarThemeConfig bar_theme_dark;
+static BarThemeConfig bar_theme_light;
+static enum ThemeMode theme_mode = ThemeModeSystem;
+static int theme_resolved_dark = 1;
+static LuaWidget lua_widgets[MAX_LUA_WIDGETS];
+static size_t lua_widgets_len = 0;
+
+/* {{{ notification sidebar globals */
+static Notification *notifications = NULL;
+static unsigned int notification_next_id = 1;
+static size_t notification_count = 0;
+static size_t notification_unread = 0;
+
+static DBusConnection *notif_dbus_conn = NULL;
+static int notif_dbus_owned = 0;
+
+static Window notif_sidebar_win = None;
+static Monitor *notif_sidebar_mon = NULL;
+static int notif_sidebar_visible = 0;
+static enum SidebarAnim notif_anim_state = SidebarAnimIdle;
+static struct timeval notif_anim_start;
+static int notif_anim_from_x = 0;
+static int notif_anim_to_x = 0;
+static int notif_sidebar_cur_x = 0;
+static int notif_scroll_offset = 0;
+static const int notif_sidebar_w = 360;
+static const int notif_anim_duration_ms = 220;
+static const int notif_row_pad = 12;
+
+static NotifRowLayout notif_row_layout[MAX_NOTIFICATIONS];
+static size_t notif_row_layout_len = 0;
+static int notif_clear_x = 0, notif_clear_y = 0, notif_clear_w = 0, notif_clear_h = 0;
+/* }}} notification sidebar globals */
+
 static Workspace *workspaces;
 static size_t workspaces_len;
 static Window root, wmcheckwin;
@@ -1054,18 +1212,33 @@ static char battery_status_path[PATH_MAX];
 static int backlight_percent = -1;
 static int battery_percent = -1;
 static int battery_charging = 0;
+static int volume_percent = -1;
+static int volume_muted = 0;
+static long cpu_prev_total = -1;
+static long cpu_prev_idle = -1;
+static int cpu_percent = -1;
+static int mem_percent = -1;
+static int disk_percent = -1;
+static char net_iface[64];
+static int net_up = 0;
 static time_t widgets_last_refresh = 0;
-static Window backlight_popup_win = None;
-static Monitor *backlight_popup_mon = NULL;
-static int backlight_popup_visible = 0;
-static int backlight_popup_dragging = 0;
-static const int backlight_popup_w = 240;
-static const int backlight_popup_h = 64;
-static const int backlight_popup_pad = 12;
-static const int backlight_popup_slider_h = 8;
-static const int backlight_popup_slider_y = 34;
-static const int backlight_popup_knob_w = 12;
-static const int backlight_popup_knob_h = 20;
+static WidgetLayout widget_layout[WidgetCount];
+static const enum WidgetId widget_draw_order[] = {
+    WidgetBattery, WidgetBacklight, WidgetVolume, WidgetTheme, WidgetNotif,
+    WidgetCpu,     WidgetMem,       WidgetDisk,   WidgetNet,   WidgetClock,
+};
+static Window slider_popup_win = None;
+static Monitor *slider_popup_mon = NULL;
+static int slider_popup_visible = 0;
+static int slider_popup_dragging = 0;
+static enum SliderWidget slider_popup_kind = SliderBacklight;
+static const int slider_popup_w = 240;
+static const int slider_popup_h = 64;
+static const int slider_popup_pad = 12;
+static const int slider_popup_slider_h = 8;
+static const int slider_popup_slider_y = 34;
+static const int slider_popup_knob_w = 12;
+static const int slider_popup_knob_h = 20;
 
 static std::array<void (*)(XEvent *), LASTEvent> make_handler_table(void) {
   std::array<void (*)(XEvent *), LASTEvent> handlers = {};
@@ -1177,6 +1350,175 @@ static void updatewidgets(void) {
       fclose(fp);
     }
   }
+
+  widget_update_cpu();
+  widget_update_mem();
+  widget_update_disk();
+  widget_update_net();
+  widget_update_volume();
+  widget_update_theme();
+  widget_update_lua_widgets();
+}
+
+static void widget_update_cpu(void) {
+  FILE *fp;
+  char line[256];
+  long user = 0, nice_val = 0, sys_val = 0, idle = 0, iowait = 0, irq = 0,
+       softirq = 0, steal = 0;
+  long total, idle_all, delta_total, delta_idle;
+
+  cpu_percent = -1;
+  fp = fopen("/proc/stat", "r");
+  if (!fp) {
+    return;
+  }
+  if (!fgets(line, sizeof(line), fp)) {
+    fclose(fp);
+    return;
+  }
+  fclose(fp);
+
+  if (sscanf(line, "cpu %ld %ld %ld %ld %ld %ld %ld %ld", &user, &nice_val,
+             &sys_val, &idle, &iowait, &irq, &softirq, &steal) < 4) {
+    return;
+  }
+
+  idle_all = idle + iowait;
+  total = user + nice_val + sys_val + idle + iowait + irq + softirq + steal;
+
+  if (cpu_prev_total >= 0) {
+    delta_total = total - cpu_prev_total;
+    delta_idle = idle_all - cpu_prev_idle;
+    if (delta_total > 0) {
+      cpu_percent = (int)(100 * (delta_total - delta_idle) / delta_total);
+      cpu_percent = MAX(0, MIN(100, cpu_percent));
+    }
+  }
+  cpu_prev_total = total;
+  cpu_prev_idle = idle_all;
+}
+
+static void widget_update_mem(void) {
+  FILE *fp;
+  char line[256];
+  long mem_total = -1;
+  long mem_avail = -1;
+
+  mem_percent = -1;
+  fp = fopen("/proc/meminfo", "r");
+  if (!fp) {
+    return;
+  }
+  while (fgets(line, sizeof(line), fp)) {
+    if (mem_total < 0 && sscanf(line, "MemTotal: %ld", &mem_total) == 1) {
+      continue;
+    }
+    if (mem_avail < 0 && sscanf(line, "MemAvailable: %ld", &mem_avail) == 1) {
+      continue;
+    }
+    if (mem_total >= 0 && mem_avail >= 0) {
+      break;
+    }
+  }
+  fclose(fp);
+
+  if (mem_total > 0 && mem_avail >= 0) {
+    mem_percent = (int)(100 * (mem_total - mem_avail) / mem_total);
+  }
+}
+
+static void widget_update_disk(void) {
+  struct statvfs vfs;
+  unsigned long long used;
+  unsigned long long avail_for_calc;
+
+  disk_percent = -1;
+  if (statvfs("/", &vfs) != 0 || vfs.f_blocks == 0) {
+    return;
+  }
+  used = (unsigned long long)(vfs.f_blocks - vfs.f_bfree);
+  avail_for_calc = used + vfs.f_bavail;
+  if (avail_for_calc == 0) {
+    return;
+  }
+  disk_percent = (int)(used * 100 / avail_for_calc);
+}
+
+static void widget_update_net(void) {
+  FILE *fp;
+  char line[256];
+  char iface[64] = "";
+  char state[32] = "";
+  char path[128];
+
+  net_iface[0] = '\0';
+  net_up = 0;
+
+  fp = fopen("/proc/net/route", "r");
+  if (!fp) {
+    return;
+  }
+  if (fgets(line, sizeof(line), fp)) {
+    /* discard header line */
+  }
+  while (fgets(line, sizeof(line), fp)) {
+    char ifname[64];
+    unsigned long dest;
+    if (sscanf(line, "%63s %lx", ifname, &dest) == 2 && dest == 0) {
+      snprintf(iface, sizeof(iface), "%s", ifname);
+      break;
+    }
+  }
+  fclose(fp);
+
+  if (iface[0] == '\0') {
+    return;
+  }
+
+  snprintf(path, sizeof(path), "/sys/class/net/%s/operstate", iface);
+  fp = fopen(path, "r");
+  if (fp) {
+    if (fgets(state, sizeof(state), fp)) {
+      state[strcspn(state, "\n")] = '\0';
+    }
+    fclose(fp);
+  }
+
+  snprintf(net_iface, sizeof(net_iface), "%s", iface);
+  net_up = (strcmp(state, "up") == 0);
+}
+
+static void widget_update_volume(void) {
+  FILE *fp;
+  char buf[1024];
+  size_t len;
+  char *pct_end;
+  char *digits_start;
+  int pct;
+
+  volume_percent = -1;
+  volume_muted = 0;
+
+  fp = popen("amixer get Master 2>/dev/null", "r");
+  if (!fp) {
+    return;
+  }
+  len = fread(buf, 1, sizeof(buf) - 1, fp);
+  pclose(fp);
+  buf[len] = '\0';
+
+  pct_end = strstr(buf, "%]");
+  if (!pct_end) {
+    return;
+  }
+  digits_start = pct_end;
+  while (digits_start > buf && *(digits_start - 1) != '[') {
+    digits_start--;
+  }
+  if (sscanf(digits_start, "%d", &pct) == 1) {
+    volume_percent = MAX(0, MIN(100, pct));
+    volume_muted = strstr(buf, "[off]") != NULL;
+  }
 }
 
 static void widget_format_backlight(char *buf, size_t size) {
@@ -1194,6 +1536,58 @@ static void widget_format_battery(char *buf, size_t size) {
   }
   snprintf(buf, size, "battery %d%% %s", battery_percent,
            battery_charging ? "charging" : "discharging");
+}
+
+static void widget_format_volume(char *buf, size_t size) {
+  if (volume_percent < 0) {
+    snprintf(buf, size, "vol n/a");
+    return;
+  }
+  if (volume_muted) {
+    snprintf(buf, size, "vol %d%% muted", volume_percent);
+    return;
+  }
+  snprintf(buf, size, "vol %d%%", volume_percent);
+}
+
+static void widget_format_cpu(char *buf, size_t size) {
+  if (cpu_percent < 0) {
+    snprintf(buf, size, "cpu ...");
+    return;
+  }
+  snprintf(buf, size, "cpu %d%%", cpu_percent);
+}
+
+static void widget_format_mem(char *buf, size_t size) {
+  if (mem_percent < 0) {
+    snprintf(buf, size, "mem n/a");
+    return;
+  }
+  snprintf(buf, size, "mem %d%%", mem_percent);
+}
+
+static void widget_format_disk(char *buf, size_t size) {
+  if (disk_percent < 0) {
+    snprintf(buf, size, "disk n/a");
+    return;
+  }
+  snprintf(buf, size, "disk %d%%", disk_percent);
+}
+
+static void widget_format_net(char *buf, size_t size) {
+  if (net_iface[0] == '\0') {
+    snprintf(buf, size, "net down");
+    return;
+  }
+  snprintf(buf, size, "net %s %s", net_iface, net_up ? "up" : "down");
+}
+
+static void widget_format_clock(char *buf, size_t size) {
+  time_t now = time(NULL);
+  struct tm tm_buf;
+
+  localtime_r(&now, &tm_buf);
+  strftime(buf, size, "%a %Y-%m-%d %H:%M", &tm_buf);
 }
 
 static void widget_set_backlight_percent_absolute(int percent) {
@@ -1230,7 +1624,7 @@ static void widget_set_backlight_percent_absolute(int percent) {
   fclose(fp);
   updatewidgets();
   drawbars();
-  drawbacklightpopup();
+  draw_slider_popup();
 }
 
 static int widget_set_backlight_percent(int delta_percent) {
@@ -1262,162 +1656,208 @@ static int widget_set_backlight_percent(int delta_percent) {
   fclose(fp);
   updatewidgets();
   drawbars();
-  drawbacklightpopup();
+  draw_slider_popup();
   return 1;
 }
 
-static void widget_position_backlight_popup(Monitor *m) {
-  char backlight_text[64];
-  char battery_text[64];
-  int backlight_w;
-  int battery_w;
-  int spacing;
-  int battery_x;
-  int backlight_x;
+static void widget_set_volume_percent_absolute(int percent) {
+  char cmd[128];
+
+  percent = MAX(0, MIN(100, percent));
+  snprintf(cmd, sizeof(cmd), "amixer -q set Master %d%% unmute", percent);
+  /* setup() ignores SIGCHLD with SA_NOCLDWAIT so spawned clients never
+   * zombie; that also makes system()'s internal wait() fail with ECHILD
+   * even when the command ran fine, so its return value can't be trusted
+   * here. */
+  system(cmd);
+  updatewidgets();
+  drawbars();
+  draw_slider_popup();
+}
+
+static int widget_set_volume_percent(int delta_percent) {
+  if (volume_percent < 0) {
+    return 0;
+  }
+  widget_set_volume_percent_absolute(volume_percent + delta_percent);
+  return 1;
+}
+
+static void widget_toggle_volume_mute(void) {
+  system("amixer -q set Master toggle");
+  updatewidgets();
+  drawbars();
+  if (slider_popup_visible && slider_popup_kind == SliderVolume) {
+    draw_slider_popup();
+  }
+}
+
+static int widget_slider_current_percent(enum SliderWidget kind) {
+  return kind == SliderVolume ? volume_percent : backlight_percent;
+}
+
+static void widget_slider_set_absolute(enum SliderWidget kind, int percent) {
+  if (kind == SliderVolume) {
+    widget_set_volume_percent_absolute(percent);
+  } else {
+    widget_set_backlight_percent_absolute(percent);
+  }
+}
+
+static void widget_slider_label(enum SliderWidget kind, char *buf, size_t size) {
+  if (kind == SliderVolume) {
+    widget_format_volume(buf, size);
+  } else {
+    widget_format_backlight(buf, size);
+  }
+}
+
+static void widget_position_slider_popup(Monitor *m) {
+  enum WidgetId id = (slider_popup_kind == SliderVolume) ? WidgetVolume : WidgetBacklight;
+  int anchor_x;
+  int anchor_w;
   int popup_x;
   int popup_y;
 
-  if (!m || backlight_popup_win == None) {
+  if (!m || slider_popup_win == None) {
     return;
   }
 
-  widget_format_backlight(backlight_text, sizeof(backlight_text));
-  widget_format_battery(battery_text, sizeof(battery_text));
-  backlight_w = (int)TEXTW(backlight_text);
-  battery_w = (int)TEXTW(battery_text);
-  spacing = lrpad;
-  battery_x = m->ww - battery_w;
-  backlight_x = battery_x - spacing - backlight_w;
+  anchor_x = widget_layout[id].x;
+  anchor_w = widget_layout[id].w;
 
-  popup_x = m->wx + backlight_x + (backlight_w / 2) - (backlight_popup_w / 2);
+  popup_x = m->wx + anchor_x + (anchor_w / 2) - (slider_popup_w / 2);
   if (popup_x < m->wx) {
     popup_x = m->wx;
   }
-  if (popup_x + backlight_popup_w > m->wx + m->ww) {
-    popup_x = m->wx + m->ww - backlight_popup_w;
+  if (popup_x + slider_popup_w > m->wx + m->ww) {
+    popup_x = m->wx + m->ww - slider_popup_w;
   }
 
-  popup_y = m->bby - backlight_popup_h - 8;
+  popup_y = m->bby - slider_popup_h - 8;
   if (popup_y < m->my) {
     popup_y = m->my;
   }
 
-  XMoveResizeWindow(dpy, backlight_popup_win, popup_x, popup_y, backlight_popup_w,
-                    backlight_popup_h);
+  XMoveResizeWindow(dpy, slider_popup_win, popup_x, popup_y, slider_popup_w,
+                    slider_popup_h);
 }
 
-static void widget_open_backlight_popup(Monitor *m) {
+static void widget_open_slider_popup(Monitor *m, enum SliderWidget kind) {
   XSetWindowAttributes wa = {};
 
   if (!m) {
     return;
   }
 
-  if (backlight_popup_win == None) {
+  if (slider_popup_win == None) {
     wa.override_redirect = True;
     wa.background_pixel = scheme[SchemeNorm][ColBg].pixel;
     wa.border_pixel = scheme[SchemeSel][ColBorder].pixel;
     wa.event_mask = ExposureMask | ButtonPressMask | ButtonReleaseMask |
                     PointerMotionMask;
-    backlight_popup_win = XCreateWindow(
-        dpy, root, m->wx, m->bby - backlight_popup_h, backlight_popup_w,
-        backlight_popup_h, 1, DefaultDepth(dpy, screen), CopyFromParent,
+    slider_popup_win = XCreateWindow(
+        dpy, root, m->wx, m->bby - slider_popup_h, slider_popup_w,
+        slider_popup_h, 1, DefaultDepth(dpy, screen), CopyFromParent,
         DefaultVisual(dpy, screen),
         CWOverrideRedirect | CWBackPixel | CWBorderPixel | CWEventMask, &wa);
-    XDefineCursor(dpy, backlight_popup_win, cursor[CurNormal]->cursor);
+    XDefineCursor(dpy, slider_popup_win, cursor[CurNormal]->cursor);
   }
 
-  backlight_popup_mon = m;
-  backlight_popup_visible = 1;
-  backlight_popup_dragging = 0;
-  widget_position_backlight_popup(m);
-  XMapRaised(dpy, backlight_popup_win);
-  drawbacklightpopup();
+  slider_popup_kind = kind;
+  slider_popup_mon = m;
+  slider_popup_visible = 1;
+  slider_popup_dragging = 0;
+  widget_position_slider_popup(m);
+  XMapRaised(dpy, slider_popup_win);
+  draw_slider_popup();
 }
 
-static void widget_close_backlight_popup(void) {
-  backlight_popup_dragging = 0;
-  backlight_popup_visible = 0;
-  backlight_popup_mon = NULL;
-  if (backlight_popup_win != None) {
-    XUnmapWindow(dpy, backlight_popup_win);
+static void widget_close_slider_popup(void) {
+  slider_popup_dragging = 0;
+  slider_popup_visible = 0;
+  slider_popup_mon = NULL;
+  if (slider_popup_win != None) {
+    XUnmapWindow(dpy, slider_popup_win);
   }
 }
 
-static void drawbacklightpopup(void) {
+static void draw_slider_popup(void) {
   char label[64];
   int slider_x;
   int slider_w;
   int fill_w;
   int knob_x;
   int knob_y;
+  int percent;
 
-  if (!backlight_popup_visible || backlight_popup_win == None) {
+  if (!slider_popup_visible || slider_popup_win == None) {
     return;
   }
 
   drw_setscheme(drw, scheme[SchemeNorm]);
-  drw_rect(drw, 0, 0, backlight_popup_w, backlight_popup_h, 1, 1);
+  drw_rect(drw, 0, 0, slider_popup_w, slider_popup_h, 1, 1);
 
-  widget_format_backlight(label, sizeof(label));
+  widget_slider_label(slider_popup_kind, label, sizeof(label));
   drw_setscheme(drw, scheme[SchemeSel]);
-  drw_text(drw, backlight_popup_pad, 8, backlight_popup_w - 2 * backlight_popup_pad,
+  drw_text(drw, slider_popup_pad, 8, slider_popup_w - 2 * slider_popup_pad,
            drw->fonts->h + 4, 0, label, 0);
 
-  slider_x = backlight_popup_pad;
-  slider_w = backlight_popup_w - 2 * backlight_popup_pad;
+  slider_x = slider_popup_pad;
+  slider_w = slider_popup_w - 2 * slider_popup_pad;
   drw_setscheme(drw, scheme[SchemeNorm]);
-  drw_rect(drw, slider_x, backlight_popup_slider_y, slider_w,
-           backlight_popup_slider_h, 1, 0);
+  drw_rect(drw, slider_x, slider_popup_slider_y, slider_w,
+           slider_popup_slider_h, 1, 0);
 
-  if (backlight_percent >= 0) {
-    fill_w = (slider_w * backlight_percent) / 100;
-    if (fill_w < (backlight_popup_knob_w / 2)) {
-      fill_w = backlight_popup_knob_w / 2;
+  percent = widget_slider_current_percent(slider_popup_kind);
+  if (percent >= 0) {
+    fill_w = (slider_w * percent) / 100;
+    if (fill_w < (slider_popup_knob_w / 2)) {
+      fill_w = slider_popup_knob_w / 2;
     }
     if (fill_w > slider_w) {
       fill_w = slider_w;
     }
     drw_setscheme(drw, scheme[SchemeSel]);
-    drw_rect(drw, slider_x, backlight_popup_slider_y, fill_w,
-             backlight_popup_slider_h, 1, 1);
+    drw_rect(drw, slider_x, slider_popup_slider_y, fill_w,
+             slider_popup_slider_h, 1, 1);
 
-    knob_x = slider_x + fill_w - (backlight_popup_knob_w / 2);
+    knob_x = slider_x + fill_w - (slider_popup_knob_w / 2);
     if (knob_x < slider_x) {
       knob_x = slider_x;
     }
-    if (knob_x > slider_x + slider_w - backlight_popup_knob_w) {
-      knob_x = slider_x + slider_w - backlight_popup_knob_w;
+    if (knob_x > slider_x + slider_w - slider_popup_knob_w) {
+      knob_x = slider_x + slider_w - slider_popup_knob_w;
     }
-    knob_y = backlight_popup_slider_y + (backlight_popup_slider_h / 2) -
-             (backlight_popup_knob_h / 2);
+    knob_y = slider_popup_slider_y + (slider_popup_slider_h / 2) -
+             (slider_popup_knob_h / 2);
     /* Knob must stay legible regardless of fill percentage, so it can't
      * reuse ColFg like the track/fill above -- those are near-identical
      * shades in some themes and the knob would vanish into a full bar. */
     drw_setscheme(drw, scheme[SchemeNorm]);
-    drw_rect(drw, knob_x, knob_y, backlight_popup_knob_w, backlight_popup_knob_h,
+    drw_rect(drw, knob_x, knob_y, slider_popup_knob_w, slider_popup_knob_h,
              1, 1);
     drw_setscheme(drw, scheme[SchemeSel]);
-    drw_rect(drw, knob_x, knob_y, backlight_popup_knob_w, backlight_popup_knob_h,
+    drw_rect(drw, knob_x, knob_y, slider_popup_knob_w, slider_popup_knob_h,
              0, 1);
   }
 
-  drw_map(drw, backlight_popup_win, 0, 0, backlight_popup_w, backlight_popup_h);
+  drw_map(drw, slider_popup_win, 0, 0, slider_popup_w, slider_popup_h);
 }
 
-static int widget_popup_handle_motion(XMotionEvent *ev) {
+static int slider_popup_handle_motion(XMotionEvent *ev) {
   int slider_x;
   int slider_w;
   int relative_x;
   int percent;
 
-  if (!backlight_popup_visible || !backlight_popup_dragging ||
-      ev->window != backlight_popup_win) {
+  if (!slider_popup_visible || !slider_popup_dragging ||
+      ev->window != slider_popup_win) {
     return 0;
   }
 
-  slider_x = backlight_popup_pad;
-  slider_w = backlight_popup_w - 2 * backlight_popup_pad;
+  slider_x = slider_popup_pad;
+  slider_w = slider_popup_w - 2 * slider_popup_pad;
   relative_x = ev->x - slider_x;
   if (relative_x < 0) {
     relative_x = 0;
@@ -1426,23 +1866,23 @@ static int widget_popup_handle_motion(XMotionEvent *ev) {
     relative_x = slider_w;
   }
   percent = (relative_x * 100) / slider_w;
-  widget_set_backlight_percent_absolute(percent);
+  widget_slider_set_absolute(slider_popup_kind, percent);
   return 1;
 }
 
-static int widget_popup_handle_button(XButtonPressedEvent *ev) {
+static int slider_popup_handle_button(XButtonPressedEvent *ev) {
   int slider_x;
   int slider_w;
   int slider_y;
   int relative_x;
   int percent;
 
-  if (!backlight_popup_visible) {
+  if (!slider_popup_visible) {
     return 0;
   }
 
-  if (ev->window != backlight_popup_win) {
-    widget_close_backlight_popup();
+  if (ev->window != slider_popup_win) {
+    widget_close_slider_popup();
     return 0;
   }
 
@@ -1450,10 +1890,11 @@ static int widget_popup_handle_button(XButtonPressedEvent *ev) {
     return 1;
   }
 
-  slider_x = backlight_popup_pad;
-  slider_w = backlight_popup_w - 2 * backlight_popup_pad;
-  slider_y = backlight_popup_slider_y - ((backlight_popup_knob_h - backlight_popup_slider_h) / 2);
-  if (ev->y < slider_y || ev->y > slider_y + backlight_popup_knob_h) {
+  slider_x = slider_popup_pad;
+  slider_w = slider_popup_w - 2 * slider_popup_pad;
+  slider_y = slider_popup_slider_y -
+             ((slider_popup_knob_h - slider_popup_slider_h) / 2);
+  if (ev->y < slider_y || ev->y > slider_y + slider_popup_knob_h) {
     return 1;
   }
   relative_x = ev->x - slider_x;
@@ -1464,38 +1905,27 @@ static int widget_popup_handle_button(XButtonPressedEvent *ev) {
     relative_x = slider_w;
   }
   percent = (relative_x * 100) / slider_w;
-  backlight_popup_dragging = 1;
-  widget_set_backlight_percent_absolute(percent);
+  slider_popup_dragging = 1;
+  widget_slider_set_absolute(slider_popup_kind, percent);
   return 1;
 }
 
-static int widget_handle_button(Monitor *m, XButtonPressedEvent *ev) {
-  char backlight_text[64];
-  char battery_text[64];
-  int backlight_w;
-  int battery_w;
-  int spacing;
-  int battery_x;
-  int backlight_x;
+static int widget_hit(enum WidgetId id, int x) {
+  return x >= widget_layout[id].x && x < widget_layout[id].x + widget_layout[id].w;
+}
 
+static int widget_handle_button(Monitor *m, XButtonPressedEvent *ev) {
   if (!m || ev->window != m->widgetbarwin) {
     return 0;
   }
 
-  widget_format_backlight(backlight_text, sizeof(backlight_text));
-  widget_format_battery(battery_text, sizeof(battery_text));
-  backlight_w = (int)TEXTW(backlight_text);
-  battery_w = (int)TEXTW(battery_text);
-  spacing = lrpad;
-  battery_x = m->ww - battery_w;
-  backlight_x = battery_x - spacing - backlight_w;
-
-  if (ev->x >= backlight_x && ev->x < backlight_x + backlight_w) {
+  if (widget_hit(WidgetBacklight, ev->x)) {
     if (ev->button == Button1) {
-      if (backlight_popup_visible && backlight_popup_mon == m) {
-        widget_close_backlight_popup();
+      if (slider_popup_visible && slider_popup_kind == SliderBacklight &&
+          slider_popup_mon == m) {
+        widget_close_slider_popup();
       } else {
-        widget_open_backlight_popup(m);
+        widget_open_slider_popup(m, SliderBacklight);
       }
       return 1;
     }
@@ -1506,6 +1936,59 @@ static int widget_handle_button(Monitor *m, XButtonPressedEvent *ev) {
       return widget_set_backlight_percent(-5);
     }
     return 1;
+  }
+
+  if (widget_hit(WidgetVolume, ev->x)) {
+    if (ev->button == Button1) {
+      if (slider_popup_visible && slider_popup_kind == SliderVolume &&
+          slider_popup_mon == m) {
+        widget_close_slider_popup();
+      } else {
+        widget_open_slider_popup(m, SliderVolume);
+      }
+      return 1;
+    }
+    if (ev->button == Button2) {
+      widget_toggle_volume_mute();
+      return 1;
+    }
+    if (ev->button == Button4) {
+      return widget_set_volume_percent(+5);
+    }
+    if (ev->button == Button3 || ev->button == Button5) {
+      return widget_set_volume_percent(-5);
+    }
+    return 1;
+  }
+
+  if (widget_hit(WidgetTheme, ev->x)) {
+    if (ev->button == Button1 || ev->button == Button4) {
+      widget_cycle_theme_mode(+1);
+      return 1;
+    }
+    if (ev->button == Button3 || ev->button == Button5) {
+      widget_cycle_theme_mode(-1);
+      return 1;
+    }
+    return 1;
+  }
+
+  if (widget_hit(WidgetNotif, ev->x)) {
+    if (ev->button == Button1) {
+      notif_sidebar_toggle(m);
+    }
+    return 1;
+  }
+
+  {
+    size_t i;
+    for (i = 0; i < lua_widgets_len; i++) {
+      if (ev->x >= lua_widgets[i].x &&
+          ev->x < lua_widgets[i].x + lua_widgets[i].w) {
+        widget_lua_click(i, ev->button);
+        return 1;
+      }
+    }
   }
 
   return 1;
@@ -1589,6 +2072,11 @@ static const char default_col_gray2[] = "#444444";
 static const char default_col_gray3[] = "#bbbbbb";
 static const char default_col_gray4[] = "#eeeeee";
 static const char default_col_cyan[] = "#005577";
+static const char default_col_light_bg[] = "#f4f5f7";
+static const char default_col_light_fg[] = "#24292f";
+static const char default_col_light_border[] = "#d0d5dd";
+static const char default_col_light_accent[] = "#2d6cdf";
+static const char default_col_light_accent_fg[] = "#ffffff";
 
 static const Rule rules[] = {
     /*  xprop(1):
@@ -2226,7 +2714,10 @@ void buttonpress(XEvent *e) {
   unsigned int statusw, trayw;
 
   click = ClkRootWin;
-  if (widget_popup_handle_button(ev)) {
+  if (slider_popup_handle_button(ev)) {
+    return;
+  }
+  if (notif_sidebar_handle_button(ev)) {
     return;
   }
   /* focus the monitor if necessary */
@@ -2288,7 +2779,7 @@ void buttonrelease(XEvent *e) {
   XButtonReleasedEvent *ev = &e->xbutton;
 
   (void)ev;
-  backlight_popup_dragging = 0;
+  slider_popup_dragging = 0;
 }
 // }}} void buttonrelease(XEvent *e)
 
@@ -2338,12 +2829,23 @@ static void copy_color_value(char dest[32], const char *src) {
 }
 
 static void set_default_bar_theme(void) {
-  copy_color_value(bar_theme.normal.fg, default_col_gray3);
-  copy_color_value(bar_theme.normal.bg, default_col_gray1);
-  copy_color_value(bar_theme.normal.border, default_col_gray2);
-  copy_color_value(bar_theme.selected.fg, default_col_gray4);
-  copy_color_value(bar_theme.selected.bg, default_col_cyan);
-  copy_color_value(bar_theme.selected.border, default_col_cyan);
+  copy_color_value(bar_theme_dark.normal.fg, default_col_gray3);
+  copy_color_value(bar_theme_dark.normal.bg, default_col_gray1);
+  copy_color_value(bar_theme_dark.normal.border, default_col_gray2);
+  copy_color_value(bar_theme_dark.selected.fg, default_col_gray4);
+  copy_color_value(bar_theme_dark.selected.bg, default_col_cyan);
+  copy_color_value(bar_theme_dark.selected.border, default_col_cyan);
+
+  copy_color_value(bar_theme_light.normal.fg, default_col_light_fg);
+  copy_color_value(bar_theme_light.normal.bg, default_col_light_bg);
+  copy_color_value(bar_theme_light.normal.border, default_col_light_border);
+  copy_color_value(bar_theme_light.selected.fg, default_col_light_accent_fg);
+  copy_color_value(bar_theme_light.selected.bg, default_col_light_accent);
+  copy_color_value(bar_theme_light.selected.border, default_col_light_accent);
+}
+
+static const BarThemeConfig *active_bar_theme(void) {
+  return theme_resolved_dark ? &bar_theme_dark : &bar_theme_light;
 }
 
 static void freecolorscheme(void) {
@@ -2360,10 +2862,10 @@ static void freecolorscheme(void) {
 }
 
 static void setcolorscheme(void) {
+  const BarThemeConfig *active = active_bar_theme();
   const char *colors[SchemeSel + 1][3] = {
-      {bar_theme.normal.fg, bar_theme.normal.bg, bar_theme.normal.border},
-      {bar_theme.selected.fg, bar_theme.selected.bg,
-       bar_theme.selected.border},
+      {active->normal.fg, active->normal.bg, active->normal.border},
+      {active->selected.fg, active->selected.bg, active->selected.border},
   };
   size_t i;
 
@@ -2372,6 +2874,208 @@ static void setcolorscheme(void) {
   for (i = 0; i < SchemeSel + 1; i++) {
     scheme[i] = drw_scm_create(drw, colors[i], 3);
   }
+}
+
+static int system_prefers_dark(void) {
+  FILE *fp;
+  char buf[128];
+  char *tok;
+  char *last_tok = NULL;
+  int val;
+
+  fp = popen("busctl --user call org.freedesktop.portal.Desktop "
+             "/org/freedesktop/portal/desktop org.freedesktop.portal.Settings "
+             "Read ss org.freedesktop.appearance color-scheme 2>/dev/null",
+             "r");
+  if (!fp) {
+    return 1;
+  }
+  if (!fgets(buf, sizeof(buf), fp)) {
+    pclose(fp);
+    return 1;
+  }
+  pclose(fp);
+
+  tok = strtok(buf, " \t\n");
+  while (tok) {
+    last_tok = tok;
+    tok = strtok(NULL, " \t\n");
+  }
+  if (!last_tok || sscanf(last_tok, "%d", &val) != 1) {
+    return 1;
+  }
+  /* xdg-desktop-portal color-scheme: 0 = no preference, 1 = prefer dark,
+   * 2 = prefer light. Default to dark when there's no explicit preference. */
+  return val != 2;
+}
+
+static int theme_resolve_prefers_dark(void) {
+  switch (theme_mode) {
+  case ThemeModeDark:
+    return 1;
+  case ThemeModeLight:
+    return 0;
+  case ThemeModeSystem:
+  default:
+    return system_prefers_dark();
+  }
+}
+
+static void widget_refresh_client_borders(void) {
+  Monitor *m;
+  Client *c;
+
+  for (m = mons; m; m = m->next) {
+    for (c = m->clients; c; c = c->next) {
+      XSetWindowBorder(dpy, c->win,
+                        scheme[c == m->sel ? SchemeSel : SchemeNorm][ColBorder]
+                            .pixel);
+    }
+  }
+}
+
+static void widget_apply_theme(void) {
+  setcolorscheme();
+  /* Called from updatewidgets(), which setup() also runs once before
+   * updategeom() creates the first monitor -- selmon is NULL at that
+   * point and focus(NULL) unconditionally dereferences it. */
+  if (!selmon) {
+    return;
+  }
+  widget_refresh_client_borders();
+  focus(NULL);
+  drawbars();
+}
+
+static void widget_update_theme(void) {
+  int resolved = theme_resolve_prefers_dark();
+
+  if (resolved != theme_resolved_dark) {
+    theme_resolved_dark = resolved;
+    widget_apply_theme();
+  }
+}
+
+static void widget_format_theme(char *buf, size_t size) {
+  const char *mode_name;
+
+  switch (theme_mode) {
+  case ThemeModeDark:
+    mode_name = "dark";
+    break;
+  case ThemeModeLight:
+    mode_name = "light";
+    break;
+  case ThemeModeSystem:
+  default:
+    mode_name = "auto";
+    break;
+  }
+
+  if (theme_mode == ThemeModeSystem) {
+    snprintf(buf, size, "theme %s (%s)", mode_name,
+             theme_resolved_dark ? "dark" : "light");
+    return;
+  }
+  snprintf(buf, size, "theme %s", mode_name);
+}
+
+static void get_theme_state_path(char *buf, size_t size) {
+  const char *xdg_cache_home;
+  const char *home;
+
+  if (!buf || size == 0) {
+    return;
+  }
+  xdg_cache_home = getenv("XDG_CACHE_HOME");
+  if (xdg_cache_home && xdg_cache_home[0] != '\0') {
+    snprintf(buf, size, "%s/mwm/theme_mode", xdg_cache_home);
+    return;
+  }
+  home = getenv("HOME");
+  if (home && home[0] != '\0') {
+    snprintf(buf, size, "%s/.cache/mwm/theme_mode", home);
+    return;
+  }
+  buf[0] = '\0';
+}
+
+static void load_theme_mode_state(void) {
+  char path[PATH_MAX];
+  char line[32];
+  FILE *fp;
+
+  theme_mode = ThemeModeSystem;
+  get_theme_state_path(path, sizeof(path));
+  if (path[0] == '\0') {
+    return;
+  }
+
+  fp = fopen(path, "r");
+  if (!fp) {
+    return;
+  }
+  if (fgets(line, sizeof(line), fp)) {
+    line[strcspn(line, "\n")] = '\0';
+    if (strcmp(line, "dark") == 0) {
+      theme_mode = ThemeModeDark;
+    } else if (strcmp(line, "light") == 0) {
+      theme_mode = ThemeModeLight;
+    } else {
+      theme_mode = ThemeModeSystem;
+    }
+  }
+  fclose(fp);
+}
+
+static void save_theme_mode_state(void) {
+  char path[PATH_MAX];
+  char dir[PATH_MAX];
+  char *slash;
+  FILE *fp;
+  const char *name;
+
+  get_theme_state_path(path, sizeof(path));
+  if (path[0] == '\0') {
+    return;
+  }
+
+  snprintf(dir, sizeof(dir), "%s", path);
+  slash = strrchr(dir, '/');
+  if (slash) {
+    *slash = '\0';
+    mkdir(dir, 0755);
+  }
+
+  switch (theme_mode) {
+  case ThemeModeDark:
+    name = "dark";
+    break;
+  case ThemeModeLight:
+    name = "light";
+    break;
+  case ThemeModeSystem:
+  default:
+    name = "system";
+    break;
+  }
+
+  fp = fopen(path, "w");
+  if (!fp) {
+    return;
+  }
+  fprintf(fp, "%s\n", name);
+  fclose(fp);
+}
+
+static void widget_cycle_theme_mode(int direction) {
+  int next = (((int)theme_mode + direction) % ThemeModeCount + ThemeModeCount) %
+             ThemeModeCount;
+
+  theme_mode = (enum ThemeMode)next;
+  theme_resolved_dark = theme_resolve_prefers_dark();
+  save_theme_mode_state();
+  widget_apply_theme();
 }
 
 static void get_theme_config_path(char *buf, size_t size) {
@@ -2422,13 +3126,29 @@ static int lua_mwm_theme(lua_State *L) {
   if (lua_istable(L, -1)) {
     lua_getfield(L, -1, "normal");
     if (lua_istable(L, -1)) {
-      lua_read_colorset(L, lua_gettop(L), &bar_theme.normal);
+      lua_read_colorset(L, lua_gettop(L), &bar_theme_dark.normal);
     }
     lua_pop(L, 1);
 
     lua_getfield(L, -1, "selected");
     if (lua_istable(L, -1)) {
-      lua_read_colorset(L, lua_gettop(L), &bar_theme.selected);
+      lua_read_colorset(L, lua_gettop(L), &bar_theme_dark.selected);
+    }
+    lua_pop(L, 1);
+  }
+  lua_pop(L, 1);
+
+  lua_getfield(L, 1, "topbar_light");
+  if (lua_istable(L, -1)) {
+    lua_getfield(L, -1, "normal");
+    if (lua_istable(L, -1)) {
+      lua_read_colorset(L, lua_gettop(L), &bar_theme_light.normal);
+    }
+    lua_pop(L, 1);
+
+    lua_getfield(L, -1, "selected");
+    if (lua_istable(L, -1)) {
+      lua_read_colorset(L, lua_gettop(L), &bar_theme_light.selected);
     }
     lua_pop(L, 1);
   }
@@ -2560,6 +3280,884 @@ static int lua_mwm_list_workspaces(lua_State *L) {
   return 1;
 }
 
+static int lua_mwm_exec(lua_State *L) {
+  const char *cmd;
+  FILE *fp;
+  char buf[4096];
+  size_t len;
+
+  cmd = luaL_checkstring(L, 1);
+  fp = popen(cmd, "r");
+  if (!fp) {
+    lua_pushstring(L, "");
+    return 1;
+  }
+  len = fread(buf, 1, sizeof(buf) - 1, fp);
+  pclose(fp);
+  buf[len] = '\0';
+  while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r')) {
+    buf[--len] = '\0';
+  }
+  lua_pushstring(L, buf);
+  return 1;
+}
+
+static int lua_mwm_widget(lua_State *L) {
+  LuaWidget *widget;
+
+  luaL_checktype(L, 1, LUA_TTABLE);
+
+  if (lua_widgets_len >= MAX_LUA_WIDGETS) {
+    return luaL_error(L, "too many widgets (max %d)", MAX_LUA_WIDGETS);
+  }
+
+  widget = &lua_widgets[lua_widgets_len];
+  memset(widget, 0, sizeof(*widget));
+  widget->update_ref = LUA_NOREF;
+  widget->click_ref = LUA_NOREF;
+
+  lua_getfield(L, 1, "name");
+  if (lua_isstring(L, -1)) {
+    snprintf(widget->name, sizeof(widget->name), "%s", lua_tostring(L, -1));
+  } else {
+    snprintf(widget->name, sizeof(widget->name), "widget%zu", lua_widgets_len + 1);
+  }
+  lua_pop(L, 1);
+
+  lua_getfield(L, 1, "highlight");
+  widget->highlight = lua_toboolean(L, -1);
+  lua_pop(L, 1);
+
+  lua_getfield(L, 1, "update");
+  if (lua_isfunction(L, -1)) {
+    widget->update_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+  } else {
+    lua_pop(L, 1);
+  }
+
+  lua_getfield(L, 1, "click");
+  if (lua_isfunction(L, -1)) {
+    widget->click_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+  } else {
+    lua_pop(L, 1);
+  }
+
+  snprintf(widget->text, sizeof(widget->text), "%s", widget->name);
+  lua_widgets_len++;
+  return 0;
+}
+
+static void reset_lua_widgets(void) {
+  /* The Lua state that owns update_ref/click_ref is about to be closed and
+   * recreated by the caller, which invalidates every registry ref -- there
+   * is nothing to individually unref. */
+  lua_widgets_len = 0;
+}
+
+static void widget_update_lua_widgets(void) {
+  size_t i;
+  int status;
+  const char *result;
+
+  if (!command_lua) {
+    return;
+  }
+
+  for (i = 0; i < lua_widgets_len; i++) {
+    LuaWidget *widget = &lua_widgets[i];
+    if (widget->update_ref == LUA_NOREF) {
+      continue;
+    }
+    lua_rawgeti(command_lua, LUA_REGISTRYINDEX, widget->update_ref);
+    status = lua_pcall(command_lua, 0, 1, 0);
+    if (status != LUA_OK) {
+      fprintf(stderr, "mwm: widget '%s' update error: %s\n", widget->name,
+              lua_tostring(command_lua, -1));
+      lua_pop(command_lua, 1);
+      snprintf(widget->text, sizeof(widget->text), "%s: error", widget->name);
+      continue;
+    }
+    result = lua_tostring(command_lua, -1);
+    if (result) {
+      snprintf(widget->text, sizeof(widget->text), "%s", result);
+    } else {
+      widget->text[0] = '\0';
+    }
+    lua_pop(command_lua, 1);
+  }
+}
+
+static void widget_lua_click(size_t index, int button) {
+  int status;
+  LuaWidget *widget;
+
+  if (!command_lua || index >= lua_widgets_len) {
+    return;
+  }
+  widget = &lua_widgets[index];
+  if (widget->click_ref == LUA_NOREF) {
+    return;
+  }
+  lua_rawgeti(command_lua, LUA_REGISTRYINDEX, widget->click_ref);
+  lua_pushinteger(command_lua, button);
+  status = lua_pcall(command_lua, 1, 0, 0);
+  if (status != LUA_OK) {
+    fprintf(stderr, "mwm: widget '%s' click error: %s\n", widget->name,
+            lua_tostring(command_lua, -1));
+    lua_pop(command_lua, 1);
+  }
+  updatewidgets();
+  drawbars();
+}
+
+/* {{{ notification sidebar */
+
+static unsigned int notification_add(const char *app_name, const char *summary,
+                                     const char *body, unsigned int replaces_id,
+                                     int expire_timeout_ms) {
+  Notification *n = NULL;
+  time_t now = time(NULL);
+
+  if (replaces_id != 0) {
+    for (n = notifications; n; n = n->next) {
+      if (n->id == replaces_id) {
+        break;
+      }
+    }
+  }
+
+  if (!n) {
+    n = ecalloc_type<Notification>();
+    n->id = notification_next_id++;
+    n->next = notifications;
+    notifications = n;
+    notification_count++;
+  }
+
+  snprintf(n->app_name, sizeof(n->app_name), "%s", app_name ? app_name : "");
+  snprintf(n->summary, sizeof(n->summary), "%s", summary ? summary : "");
+  snprintf(n->body, sizeof(n->body), "%s", body ? body : "");
+  n->received = now;
+  n->expire_at = expire_timeout_ms > 0 ? now + expire_timeout_ms / 1000 : 0;
+
+  notification_unread++;
+
+  while (notification_count > MAX_NOTIFICATIONS) {
+    Notification *prev = notifications;
+    if (!prev || !prev->next) {
+      break;
+    }
+    while (prev->next && prev->next->next) {
+      prev = prev->next;
+    }
+    free(prev->next);
+    prev->next = NULL;
+    notification_count--;
+  }
+
+  if (notif_sidebar_visible) {
+    draw_notif_sidebar();
+  }
+  drawbars();
+  return n->id;
+}
+
+static void notification_remove(unsigned int id, unsigned int reason) {
+  Notification *cur = notifications;
+  Notification *prev = NULL;
+
+  while (cur) {
+    if (cur->id == id) {
+      if (prev) {
+        prev->next = cur->next;
+      } else {
+        notifications = cur->next;
+      }
+      free(cur);
+      if (notification_count > 0) {
+        notification_count--;
+      }
+      notif_dbus_emit_notification_closed(id, reason);
+      return;
+    }
+    prev = cur;
+    cur = cur->next;
+  }
+}
+
+static void notification_clear_all(void) {
+  Notification *cur = notifications;
+
+  while (cur) {
+    Notification *next = cur->next;
+    notif_dbus_emit_notification_closed(cur->id, 2);
+    free(cur);
+    cur = next;
+  }
+  notifications = NULL;
+  notification_count = 0;
+  notification_unread = 0;
+}
+
+static void notification_expire_check(void) {
+  Notification *cur = notifications;
+  Notification *prev = NULL;
+  time_t now = time(NULL);
+  int changed = 0;
+
+  while (cur) {
+    if (cur->expire_at != 0 && cur->expire_at <= now) {
+      Notification *dead = cur;
+
+      if (prev) {
+        prev->next = cur->next;
+      } else {
+        notifications = cur->next;
+      }
+      cur = cur->next;
+      if (notification_count > 0) {
+        notification_count--;
+      }
+      notif_dbus_emit_notification_closed(dead->id, 1);
+      free(dead);
+      changed = 1;
+      continue;
+    }
+    prev = cur;
+    cur = cur->next;
+  }
+  if (changed && notif_sidebar_visible) {
+    draw_notif_sidebar();
+  }
+}
+
+static void notif_dbus_try_acquire(void) {
+  DBusError err;
+  int ret;
+
+  if (!notif_dbus_conn || notif_dbus_owned) {
+    return;
+  }
+  dbus_error_init(&err);
+  ret = dbus_bus_request_name(notif_dbus_conn, "org.freedesktop.Notifications",
+                               DBUS_NAME_FLAG_DO_NOT_QUEUE, &err);
+  if (dbus_error_is_set(&err)) {
+    dbus_error_free(&err);
+  }
+  if (ret == DBUS_REQUEST_NAME_REPLY_PRIMARY_OWNER) {
+    notif_dbus_owned = 1;
+    fprintf(stderr, "mwm: acquired org.freedesktop.Notifications\n");
+  }
+}
+
+static void notif_dbus_init(void) {
+  DBusError err;
+
+  dbus_error_init(&err);
+  notif_dbus_conn = dbus_bus_get_private(DBUS_BUS_SESSION, &err);
+  if (dbus_error_is_set(&err) || !notif_dbus_conn) {
+    fprintf(stderr, "mwm: dbus session bus connect failed: %s\n",
+            dbus_error_is_set(&err) ? err.message : "unknown error");
+    dbus_error_free(&err);
+    notif_dbus_conn = NULL;
+    return;
+  }
+  dbus_connection_set_exit_on_disconnect(notif_dbus_conn, FALSE);
+
+  notif_dbus_try_acquire();
+  if (!notif_dbus_owned) {
+    fprintf(stderr,
+            "mwm: another notification daemon already owns "
+            "org.freedesktop.Notifications (dunst/mako/etc?) -- disable it "
+            "for mwm's notification sidebar to receive notifications. "
+            "Retrying periodically.\n");
+  }
+}
+
+static void notif_dbus_shutdown(void) {
+  if (!notif_dbus_conn) {
+    return;
+  }
+  if (notif_dbus_owned) {
+    dbus_bus_release_name(notif_dbus_conn, "org.freedesktop.Notifications", NULL);
+  }
+  dbus_connection_close(notif_dbus_conn);
+  dbus_connection_unref(notif_dbus_conn);
+  notif_dbus_conn = NULL;
+  notif_dbus_owned = 0;
+}
+
+static void notif_dbus_emit_notification_closed(unsigned int id, unsigned int reason) {
+  DBusMessage *signal;
+
+  if (!notif_dbus_conn || !notif_dbus_owned) {
+    return;
+  }
+  signal = dbus_message_new_signal("/org/freedesktop/Notifications",
+                                   "org.freedesktop.Notifications",
+                                   "NotificationClosed");
+  if (!signal) {
+    return;
+  }
+  dbus_message_append_args(signal, DBUS_TYPE_UINT32, &id, DBUS_TYPE_UINT32,
+                           &reason, DBUS_TYPE_INVALID);
+  dbus_connection_send(notif_dbus_conn, signal, NULL);
+  dbus_message_unref(signal);
+}
+
+static void notif_dbus_handle_notify(DBusMessage *msg) {
+  DBusMessageIter iter;
+  DBusMessageIter reply_iter;
+  const char *app_name = "";
+  const char *app_icon = "";
+  const char *summary = "";
+  const char *body = "";
+  dbus_uint32_t replaces_id = 0;
+  dbus_int32_t expire_timeout = -1;
+  dbus_uint32_t id = 0;
+  DBusMessage *reply;
+
+  if (dbus_message_iter_init(msg, &iter)) {
+    if (dbus_message_iter_get_arg_type(&iter) == DBUS_TYPE_STRING) {
+      dbus_message_iter_get_basic(&iter, &app_name);
+    }
+    dbus_message_iter_next(&iter);
+    if (dbus_message_iter_get_arg_type(&iter) == DBUS_TYPE_UINT32) {
+      dbus_message_iter_get_basic(&iter, &replaces_id);
+    }
+    dbus_message_iter_next(&iter);
+    if (dbus_message_iter_get_arg_type(&iter) == DBUS_TYPE_STRING) {
+      dbus_message_iter_get_basic(&iter, &app_icon);
+    }
+    dbus_message_iter_next(&iter);
+    if (dbus_message_iter_get_arg_type(&iter) == DBUS_TYPE_STRING) {
+      dbus_message_iter_get_basic(&iter, &summary);
+    }
+    dbus_message_iter_next(&iter);
+    if (dbus_message_iter_get_arg_type(&iter) == DBUS_TYPE_STRING) {
+      dbus_message_iter_get_basic(&iter, &body);
+    }
+    dbus_message_iter_next(&iter);
+    /* actions: as -- skip */
+    dbus_message_iter_next(&iter);
+    /* hints: a{sv} -- skip */
+    dbus_message_iter_next(&iter);
+    if (dbus_message_iter_get_arg_type(&iter) == DBUS_TYPE_INT32) {
+      dbus_message_iter_get_basic(&iter, &expire_timeout);
+    }
+  }
+  (void)app_icon;
+
+  id = notification_add(app_name, summary, body, replaces_id, expire_timeout);
+
+  reply = dbus_message_new_method_return(msg);
+  if (reply) {
+    dbus_message_iter_init_append(reply, &reply_iter);
+    dbus_message_iter_append_basic(&reply_iter, DBUS_TYPE_UINT32, &id);
+    dbus_connection_send(notif_dbus_conn, reply, NULL);
+    dbus_message_unref(reply);
+  }
+}
+
+static void notif_dbus_handle_close_notification(DBusMessage *msg) {
+  DBusMessageIter iter;
+  dbus_uint32_t id = 0;
+  DBusMessage *reply;
+
+  if (dbus_message_iter_init(msg, &iter) &&
+      dbus_message_iter_get_arg_type(&iter) == DBUS_TYPE_UINT32) {
+    dbus_message_iter_get_basic(&iter, &id);
+  }
+
+  notification_remove(id, 3);
+  if (notif_sidebar_visible) {
+    draw_notif_sidebar();
+  }
+  drawbars();
+
+  reply = dbus_message_new_method_return(msg);
+  if (reply) {
+    dbus_connection_send(notif_dbus_conn, reply, NULL);
+    dbus_message_unref(reply);
+  }
+}
+
+static void notif_dbus_handle_get_capabilities(DBusMessage *msg) {
+  DBusMessage *reply;
+  DBusMessageIter iter, arr;
+  const char *cap = "body";
+
+  reply = dbus_message_new_method_return(msg);
+  if (!reply) {
+    return;
+  }
+  dbus_message_iter_init_append(reply, &iter);
+  dbus_message_iter_open_container(&iter, DBUS_TYPE_ARRAY, "s", &arr);
+  dbus_message_iter_append_basic(&arr, DBUS_TYPE_STRING, &cap);
+  dbus_message_iter_close_container(&iter, &arr);
+  dbus_connection_send(notif_dbus_conn, reply, NULL);
+  dbus_message_unref(reply);
+}
+
+static void notif_dbus_handle_get_server_information(DBusMessage *msg) {
+  DBusMessage *reply;
+  const char *name = "mwm";
+  const char *vendor = "mwm";
+  const char *version = "1.0";
+  const char *spec_version = "1.2";
+
+  reply = dbus_message_new_method_return(msg);
+  if (!reply) {
+    return;
+  }
+  dbus_message_append_args(reply, DBUS_TYPE_STRING, &name, DBUS_TYPE_STRING,
+                           &vendor, DBUS_TYPE_STRING, &version,
+                           DBUS_TYPE_STRING, &spec_version, DBUS_TYPE_INVALID);
+  dbus_connection_send(notif_dbus_conn, reply, NULL);
+  dbus_message_unref(reply);
+}
+
+static void notif_dbus_handle_introspect(DBusMessage *msg) {
+  DBusMessage *reply;
+  const char *xml =
+      "<!DOCTYPE node PUBLIC \"-//freedesktop//DTD D-BUS Object Introspection "
+      "1.0//EN\"\n"
+      "\"http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd\">\n"
+      "<node>\n"
+      "  <interface name=\"org.freedesktop.Notifications\">\n"
+      "    <method name=\"Notify\">\n"
+      "      <arg type=\"s\" name=\"app_name\" direction=\"in\"/>\n"
+      "      <arg type=\"u\" name=\"replaces_id\" direction=\"in\"/>\n"
+      "      <arg type=\"s\" name=\"app_icon\" direction=\"in\"/>\n"
+      "      <arg type=\"s\" name=\"summary\" direction=\"in\"/>\n"
+      "      <arg type=\"s\" name=\"body\" direction=\"in\"/>\n"
+      "      <arg type=\"as\" name=\"actions\" direction=\"in\"/>\n"
+      "      <arg type=\"a{sv}\" name=\"hints\" direction=\"in\"/>\n"
+      "      <arg type=\"i\" name=\"expire_timeout\" direction=\"in\"/>\n"
+      "      <arg type=\"u\" name=\"id\" direction=\"out\"/>\n"
+      "    </method>\n"
+      "    <method name=\"CloseNotification\">\n"
+      "      <arg type=\"u\" name=\"id\" direction=\"in\"/>\n"
+      "    </method>\n"
+      "    <method name=\"GetCapabilities\">\n"
+      "      <arg type=\"as\" direction=\"out\"/>\n"
+      "    </method>\n"
+      "    <method name=\"GetServerInformation\">\n"
+      "      <arg type=\"s\" direction=\"out\"/>\n"
+      "      <arg type=\"s\" direction=\"out\"/>\n"
+      "      <arg type=\"s\" direction=\"out\"/>\n"
+      "      <arg type=\"s\" direction=\"out\"/>\n"
+      "    </method>\n"
+      "    <signal name=\"NotificationClosed\">\n"
+      "      <arg type=\"u\"/>\n"
+      "      <arg type=\"u\"/>\n"
+      "    </signal>\n"
+      "    <signal name=\"ActionInvoked\">\n"
+      "      <arg type=\"u\"/>\n"
+      "      <arg type=\"s\"/>\n"
+      "    </signal>\n"
+      "  </interface>\n"
+      "</node>\n";
+
+  reply = dbus_message_new_method_return(msg);
+  if (!reply) {
+    return;
+  }
+  dbus_message_append_args(reply, DBUS_TYPE_STRING, &xml, DBUS_TYPE_INVALID);
+  dbus_connection_send(notif_dbus_conn, reply, NULL);
+  dbus_message_unref(reply);
+}
+
+static void notif_dbus_handle_message(DBusMessage *msg) {
+  if (dbus_message_is_method_call(msg, "org.freedesktop.Notifications", "Notify")) {
+    notif_dbus_handle_notify(msg);
+  } else if (dbus_message_is_method_call(msg, "org.freedesktop.Notifications",
+                                         "CloseNotification")) {
+    notif_dbus_handle_close_notification(msg);
+  } else if (dbus_message_is_method_call(msg, "org.freedesktop.Notifications",
+                                         "GetCapabilities")) {
+    notif_dbus_handle_get_capabilities(msg);
+  } else if (dbus_message_is_method_call(msg, "org.freedesktop.Notifications",
+                                         "GetServerInformation")) {
+    notif_dbus_handle_get_server_information(msg);
+  } else if (dbus_message_is_method_call(msg, DBUS_INTERFACE_INTROSPECTABLE,
+                                         "Introspect")) {
+    notif_dbus_handle_introspect(msg);
+  } else if (dbus_message_get_type(msg) == DBUS_MESSAGE_TYPE_METHOD_CALL) {
+    DBusMessage *reply = dbus_message_new_error(
+        msg, DBUS_ERROR_UNKNOWN_METHOD, "mwm: method not implemented");
+    if (reply) {
+      dbus_connection_send(notif_dbus_conn, reply, NULL);
+      dbus_message_unref(reply);
+    }
+  }
+}
+
+static void notif_dbus_process(void) {
+  DBusMessage *msg;
+
+  if (!notif_dbus_conn) {
+    return;
+  }
+  dbus_connection_read_write(notif_dbus_conn, 0);
+  while ((msg = dbus_connection_pop_message(notif_dbus_conn)) != NULL) {
+    notif_dbus_handle_message(msg);
+    dbus_message_unref(msg);
+  }
+}
+
+static void widget_format_notifications(char *buf, size_t size) {
+  if (notification_unread > 0) {
+    snprintf(buf, size, "notif %zu", notification_unread);
+  } else {
+    snprintf(buf, size, "notif");
+  }
+}
+
+static size_t notif_wrap_body(const char *text, int max_width, char out[][256],
+                              size_t max_lines) {
+  size_t line_count = 0;
+  char word[256];
+  char current[256];
+  const char *p = text;
+  size_t wlen;
+
+  current[0] = '\0';
+  if (!text) {
+    return 0;
+  }
+  while (*p && line_count < max_lines) {
+    while (*p == ' ') {
+      p++;
+    }
+    wlen = 0;
+    while (*p && *p != ' ' && wlen < sizeof(word) - 1) {
+      word[wlen++] = *p++;
+    }
+    word[wlen] = '\0';
+    if (wlen == 0) {
+      break;
+    }
+
+    {
+      char trial[256];
+      if (current[0]) {
+        snprintf(trial, sizeof(trial), "%s %s", current, word);
+      } else {
+        snprintf(trial, sizeof(trial), "%s", word);
+      }
+      if (!current[0] || (int)drw_fontset_getwidth(drw, trial) <= max_width) {
+        snprintf(current, sizeof(current), "%s", trial);
+      } else {
+        snprintf(out[line_count], 256, "%s", current);
+        line_count++;
+        snprintf(current, sizeof(current), "%s", word);
+      }
+    }
+  }
+  if (current[0] && line_count < max_lines) {
+    snprintf(out[line_count], 256, "%s", current);
+    line_count++;
+  }
+  if (*p && line_count > 0) {
+    size_t len = strlen(out[line_count - 1]);
+    if (len > 250) {
+      len = 250;
+    }
+    snprintf(out[line_count - 1] + len, 256 - len, "...");
+  }
+  return line_count;
+}
+
+static void notif_format_relative_time(time_t t, char *buf, size_t size) {
+  time_t now = time(NULL);
+  long diff = (long)(now - t);
+
+  if (diff < 60) {
+    snprintf(buf, size, "now");
+  } else if (diff < 3600) {
+    snprintf(buf, size, "%ldm", diff / 60);
+  } else if (diff < 86400) {
+    snprintf(buf, size, "%ldh", diff / 3600);
+  } else {
+    snprintf(buf, size, "%ldd", diff / 86400);
+  }
+}
+
+static int notif_sidebar_content_height(void) {
+  Notification *n;
+  int total = 0;
+  char lines[3][256];
+  int max_w = notif_sidebar_w - 2 * notif_row_pad;
+
+  for (n = notifications; n; n = n->next) {
+    size_t nlines = notif_wrap_body(n->body, max_w, lines, 3);
+    total += notif_row_pad + bh + bh + (int)nlines * bh + notif_row_pad;
+  }
+  return total;
+}
+
+static void notif_sidebar_position(Monitor *m) {
+  if (!m || notif_sidebar_win == None) {
+    return;
+  }
+  XMoveResizeWindow(dpy, notif_sidebar_win, notif_sidebar_cur_x, m->wy,
+                    notif_sidebar_w, m->wh);
+}
+
+static void draw_notif_sidebar(void) {
+  Notification *n;
+  int header_h;
+  int content_h;
+  int max_scroll;
+  int panel_h;
+  int y;
+  int max_w;
+  char time_buf[16];
+  char lines[3][256];
+
+  if (notif_sidebar_win == None) {
+    return;
+  }
+
+  header_h = bh * 2;
+  panel_h = notif_sidebar_mon ? notif_sidebar_mon->wh : header_h;
+  max_w = notif_sidebar_w - 2 * notif_row_pad;
+
+  content_h = notif_sidebar_content_height();
+  max_scroll = content_h - (panel_h - header_h);
+  if (max_scroll < 0) {
+    max_scroll = 0;
+  }
+  if (notif_scroll_offset > max_scroll) {
+    notif_scroll_offset = max_scroll;
+  }
+  if (notif_scroll_offset < 0) {
+    notif_scroll_offset = 0;
+  }
+
+  drw_setscheme(drw, scheme[SchemeNorm]);
+  drw_rect(drw, 0, 0, notif_sidebar_w, panel_h, 1, 1);
+
+  drw_setscheme(drw, scheme[SchemeSel]);
+  drw_text(drw, notif_row_pad, 0, notif_sidebar_w - 2 * notif_row_pad, header_h,
+           0, "Notifications", 0);
+
+  notif_clear_h = bh;
+  notif_clear_w = (int)drw_fontset_getwidth(drw, "clear") + notif_row_pad;
+  notif_clear_x = notif_sidebar_w - notif_row_pad - notif_clear_w;
+  notif_clear_y = 0;
+  if (notification_count > 0) {
+    drw_setscheme(drw, scheme[SchemeNorm]);
+    drw_text(drw, notif_clear_x, notif_clear_y, notif_clear_w, header_h, 0,
+             "clear", 0);
+  }
+
+  drw_setscheme(drw, scheme[SchemeNorm]);
+  drw_rect(drw, 0, header_h - 1, notif_sidebar_w, 1, 1, 0);
+
+  notif_row_layout_len = 0;
+  y = header_h - notif_scroll_offset;
+
+  if (!notifications) {
+    drw_setscheme(drw, scheme[SchemeNorm]);
+    drw_text(drw, notif_row_pad, header_h, notif_sidebar_w - 2 * notif_row_pad,
+             bh, 0, "No notifications", 0);
+  }
+
+  for (n = notifications; n; n = n->next) {
+    size_t nlines = notif_wrap_body(n->body, max_w, lines, 3);
+    int card_h = notif_row_pad + bh + bh + (int)nlines * bh + notif_row_pad;
+    int card_y = y;
+
+    if (card_y + card_h >= header_h && card_y < panel_h) {
+      int row_y = card_y + notif_row_pad;
+      int close_w = bh;
+      int close_x = notif_sidebar_w - notif_row_pad - close_w;
+      int time_w = 40;
+      int time_x = close_x - time_w;
+      int name_w = time_x - notif_row_pad;
+      size_t li;
+
+      drw_setscheme(drw, scheme[SchemeNorm]);
+      drw_text(drw, notif_row_pad, row_y, name_w, bh, 0, n->app_name, 0);
+      notif_format_relative_time(n->received, time_buf, sizeof(time_buf));
+      drw_text(drw, time_x, row_y, time_w, bh, 0, time_buf, 0);
+      row_y += bh;
+
+      drw_setscheme(drw, scheme[SchemeSel]);
+      drw_text(drw, notif_row_pad, row_y, max_w, bh, 0, n->summary, 0);
+      row_y += bh;
+
+      drw_setscheme(drw, scheme[SchemeNorm]);
+      for (li = 0; li < nlines; li++) {
+        drw_text(drw, notif_row_pad, row_y, max_w, bh, 0, lines[li], 0);
+        row_y += bh;
+      }
+
+      if (notif_row_layout_len < MAX_NOTIFICATIONS) {
+        NotifRowLayout *row = &notif_row_layout[notif_row_layout_len++];
+        row->id = n->id;
+        row->close_w = close_w;
+        row->close_h = bh;
+        row->close_x = close_x;
+        row->close_y = card_y;
+        drw_setscheme(drw, scheme[SchemeNorm]);
+        drw_text(drw, row->close_x, row->close_y, row->close_w, row->close_h, 0,
+                 "x", 0);
+      }
+
+      drw_setscheme(drw, scheme[SchemeNorm]);
+      drw_rect(drw, notif_row_pad, card_y + card_h - 1, max_w, 1, 1, 0);
+    }
+
+    y += card_h;
+  }
+
+  drw_map(drw, notif_sidebar_win, 0, 0, notif_sidebar_w, panel_h);
+}
+
+static void notif_sidebar_open(Monitor *m) {
+  XSetWindowAttributes wa = {};
+
+  if (!m) {
+    return;
+  }
+
+  if (notif_sidebar_win == None) {
+    wa.override_redirect = True;
+    wa.background_pixel = scheme[SchemeNorm][ColBg].pixel;
+    wa.border_pixel = scheme[SchemeSel][ColBorder].pixel;
+    wa.event_mask = ExposureMask | ButtonPressMask | ButtonReleaseMask;
+    notif_sidebar_cur_x = m->wx + m->ww;
+    notif_sidebar_win = XCreateWindow(
+        dpy, root, notif_sidebar_cur_x, m->wy, notif_sidebar_w, m->wh, 1,
+        DefaultDepth(dpy, screen), CopyFromParent, DefaultVisual(dpy, screen),
+        CWOverrideRedirect | CWBackPixel | CWBorderPixel | CWEventMask, &wa);
+    XDefineCursor(dpy, notif_sidebar_win, cursor[CurNormal]->cursor);
+  }
+
+  notif_sidebar_mon = m;
+  notif_sidebar_visible = 1;
+  notification_unread = 0;
+  notif_scroll_offset = 0;
+
+  notif_anim_from_x = notif_sidebar_cur_x;
+  notif_anim_to_x = m->wx + m->ww - notif_sidebar_w;
+  notif_anim_state = SidebarAnimOpening;
+  gettimeofday(&notif_anim_start, NULL);
+
+  notif_sidebar_position(m);
+  draw_notif_sidebar();
+  XMapRaised(dpy, notif_sidebar_win);
+  drawbars();
+}
+
+static void notif_sidebar_close(void) {
+  if (notif_sidebar_win == None || !notif_sidebar_visible) {
+    return;
+  }
+  notif_anim_from_x = notif_sidebar_cur_x;
+  notif_anim_to_x = notif_sidebar_mon ? notif_sidebar_mon->wx + notif_sidebar_mon->ww
+                                      : notif_sidebar_cur_x;
+  notif_anim_state = SidebarAnimClosing;
+  gettimeofday(&notif_anim_start, NULL);
+}
+
+static void notif_sidebar_toggle(Monitor *m) {
+  if (notif_sidebar_visible) {
+    notif_sidebar_close();
+  } else {
+    notif_sidebar_open(m);
+  }
+}
+
+static void notif_sidebar_advance_animation(void) {
+  struct timeval now;
+  long elapsed_ms;
+  double t;
+  int mon_y = notif_sidebar_mon ? notif_sidebar_mon->wy : 0;
+
+  if (notif_anim_state == SidebarAnimIdle || notif_sidebar_win == None) {
+    return;
+  }
+
+  gettimeofday(&now, NULL);
+  elapsed_ms = (now.tv_sec - notif_anim_start.tv_sec) * 1000 +
+              (now.tv_usec - notif_anim_start.tv_usec) / 1000;
+
+  if (elapsed_ms >= notif_anim_duration_ms) {
+    notif_sidebar_cur_x = notif_anim_to_x;
+    XMoveWindow(dpy, notif_sidebar_win, notif_sidebar_cur_x, mon_y);
+    if (notif_anim_state == SidebarAnimClosing) {
+      XUnmapWindow(dpy, notif_sidebar_win);
+      notif_sidebar_visible = 0;
+    }
+    notif_anim_state = SidebarAnimIdle;
+    return;
+  }
+
+  t = (double)elapsed_ms / (double)notif_anim_duration_ms;
+  t = 1.0 - pow(1.0 - t, 3.0);
+  notif_sidebar_cur_x =
+      notif_anim_from_x + (int)((notif_anim_to_x - notif_anim_from_x) * t);
+  XMoveWindow(dpy, notif_sidebar_win, notif_sidebar_cur_x, mon_y);
+}
+
+static int notif_sidebar_handle_button(XButtonPressedEvent *ev) {
+  size_t i;
+
+  if (notif_sidebar_win == None ||
+      (!notif_sidebar_visible && notif_anim_state == SidebarAnimIdle)) {
+    return 0;
+  }
+
+  if (ev->window != notif_sidebar_win) {
+    if (notif_sidebar_visible) {
+      notif_sidebar_close();
+    }
+    return 0;
+  }
+
+  if (ev->button == Button4) {
+    notif_scroll_offset -= 40;
+    draw_notif_sidebar();
+    return 1;
+  }
+  if (ev->button == Button5) {
+    notif_scroll_offset += 40;
+    draw_notif_sidebar();
+    return 1;
+  }
+  if (ev->button != Button1) {
+    return 1;
+  }
+
+  if (notification_count > 0 && ev->y >= notif_clear_y &&
+      ev->y < notif_clear_y + notif_clear_h && ev->x >= notif_clear_x &&
+      ev->x < notif_clear_x + notif_clear_w) {
+    notification_clear_all();
+    draw_notif_sidebar();
+    drawbars();
+    return 1;
+  }
+
+  for (i = 0; i < notif_row_layout_len; i++) {
+    NotifRowLayout *row = &notif_row_layout[i];
+    if (ev->x >= row->close_x && ev->x < row->close_x + row->close_w &&
+        ev->y >= row->close_y && ev->y < row->close_y + row->close_h) {
+      notification_remove(row->id, 2);
+      draw_notif_sidebar();
+      drawbars();
+      return 1;
+    }
+  }
+
+  return 1;
+}
+
+/* }}} notification sidebar */
+
 static void lua_register_mwm_api(lua_State *L) {
   lua_pushcfunction(L, lua_print_to_client);
   lua_setglobal(L, "print");
@@ -2576,6 +4174,10 @@ static void lua_register_mwm_api(lua_State *L) {
   lua_setfield(L, -2, "rename_workspace");
   lua_pushcfunction(L, lua_mwm_list_workspaces);
   lua_setfield(L, -2, "list_workspaces");
+  lua_pushcfunction(L, lua_mwm_widget);
+  lua_setfield(L, -2, "widget");
+  lua_pushcfunction(L, lua_mwm_exec);
+  lua_setfield(L, -2, "exec");
   lua_setglobal(L, "mwm");
   lua_pushcfunction(L, lua_mwm_focus_workspace);
   lua_setglobal(L, "focus_workspace");
@@ -2765,10 +4367,20 @@ void cleanup(void) {
     free(systray);
     systray = NULL;
   }
-  if (backlight_popup_win != None) {
-    XDestroyWindow(dpy, backlight_popup_win);
-    backlight_popup_win = None;
+  if (slider_popup_win != None) {
+    XDestroyWindow(dpy, slider_popup_win);
+    slider_popup_win = None;
   }
+  if (notif_sidebar_win != None) {
+    XDestroyWindow(dpy, notif_sidebar_win);
+    notif_sidebar_win = None;
+  }
+  while (notifications) {
+    Notification *next = notifications->next;
+    free(notifications);
+    notifications = next;
+  }
+  notif_dbus_shutdown();
   XDestroyWindow(dpy, wmcheckwin);
   drw_free(drw);
   XSync(dpy, False);
@@ -2909,9 +4521,17 @@ void configurenotify(XEvent *e) {
         XMoveResizeWindow(dpy, m->barwin, m->wx, m->by, m->ww, bh);
         XMoveResizeWindow(dpy, m->widgetbarwin, m->wx, m->bby, m->ww, bh);
       }
-      if (backlight_popup_visible && backlight_popup_mon) {
-        widget_position_backlight_popup(backlight_popup_mon);
-        drawbacklightpopup();
+      if (slider_popup_visible && slider_popup_mon) {
+        widget_position_slider_popup(slider_popup_mon);
+        draw_slider_popup();
+      }
+      if (notif_sidebar_win != None && notif_sidebar_mon) {
+        if (notif_sidebar_visible && notif_anim_state == SidebarAnimIdle) {
+          notif_sidebar_cur_x =
+              notif_sidebar_mon->wx + notif_sidebar_mon->ww - notif_sidebar_w;
+        }
+        notif_sidebar_position(notif_sidebar_mon);
+        draw_notif_sidebar();
       }
       updatesystray();
       focus(NULL);
@@ -3135,11 +4755,9 @@ void drawbar(Monitor *m) {
 
 // {{{ void drawwidgetbar(Monitor *m)
 void drawwidgetbar(Monitor *m) {
-  char backlight_text[64];
-  char battery_text[64];
-  int backlight_w;
-  int battery_w;
-  int spacing;
+  char text[WidgetCount][64];
+  size_t i;
+  size_t n = sizeof(widget_draw_order) / sizeof(widget_draw_order[0]);
   int x;
 
   if (!m->showbar) {
@@ -3149,19 +4767,48 @@ void drawwidgetbar(Monitor *m) {
   drw_setscheme(drw, scheme[SchemeNorm]);
   drw_rect(drw, 0, 0, m->ww, bh, 1, 1);
 
-  widget_format_backlight(backlight_text, sizeof(backlight_text));
-  widget_format_battery(battery_text, sizeof(battery_text));
-  backlight_w = (int)TEXTW(backlight_text);
-  battery_w = (int)TEXTW(battery_text);
-  spacing = lrpad;
+  widget_format_battery(text[WidgetBattery], sizeof(text[WidgetBattery]));
+  widget_format_backlight(text[WidgetBacklight], sizeof(text[WidgetBacklight]));
+  widget_format_volume(text[WidgetVolume], sizeof(text[WidgetVolume]));
+  widget_format_theme(text[WidgetTheme], sizeof(text[WidgetTheme]));
+  widget_format_notifications(text[WidgetNotif], sizeof(text[WidgetNotif]));
+  widget_format_cpu(text[WidgetCpu], sizeof(text[WidgetCpu]));
+  widget_format_mem(text[WidgetMem], sizeof(text[WidgetMem]));
+  widget_format_disk(text[WidgetDisk], sizeof(text[WidgetDisk]));
+  widget_format_net(text[WidgetNet], sizeof(text[WidgetNet]));
+  widget_format_clock(text[WidgetClock], sizeof(text[WidgetClock]));
 
-  x = m->ww - battery_w;
-  drw_setscheme(drw, scheme[SchemeNorm]);
-  drw_text(drw, x, 0, battery_w, bh, lrpad / 2, battery_text, 0);
+  x = m->ww;
+  for (i = 0; i < n; i++) {
+    enum WidgetId id = widget_draw_order[i];
+    int w = (int)TEXTW(text[id]);
+    int highlighted = id == WidgetBacklight || id == WidgetVolume ||
+                      id == WidgetTheme ||
+                      (id == WidgetNotif && notification_unread > 0);
 
-  x -= spacing + backlight_w;
-  drw_setscheme(drw, scheme[SchemeSel]);
-  drw_text(drw, x, 0, backlight_w, bh, lrpad / 2, backlight_text, 0);
+    if (i > 0) {
+      x -= lrpad;
+    }
+    x -= w;
+    widget_layout[id].x = x;
+    widget_layout[id].w = w;
+
+    drw_setscheme(drw, scheme[highlighted ? SchemeSel : SchemeNorm]);
+    drw_text(drw, x, 0, w, bh, lrpad / 2, text[id], 0);
+  }
+
+  for (i = 0; i < lua_widgets_len; i++) {
+    LuaWidget *widget = &lua_widgets[i];
+    int w = (int)TEXTW(widget->text);
+
+    x -= lrpad;
+    x -= w;
+    widget->x = x;
+    widget->w = w;
+
+    drw_setscheme(drw, scheme[widget->highlight ? SchemeSel : SchemeNorm]);
+    drw_text(drw, x, 0, w, bh, lrpad / 2, widget->text, 0);
+  }
 
   drw_map(drw, m->widgetbarwin, 0, 0, m->ww, bh);
 }
@@ -3174,7 +4821,7 @@ void drawbars(void) {
     drawbar(m);
     drawwidgetbar(m);
   }
-  drawbacklightpopup();
+  draw_slider_popup();
 }
 // }}} void drawbars(void)
 
@@ -3203,8 +4850,12 @@ void enternotify(XEvent *e) {
 void expose(XEvent *e) {
   Monitor *m;
   XExposeEvent *ev = &e->xexpose;
-  if (backlight_popup_visible && ev->window == backlight_popup_win) {
-    drawbacklightpopup();
+  if (slider_popup_visible && ev->window == slider_popup_win) {
+    draw_slider_popup();
+    return;
+  }
+  if (notif_sidebar_win != None && ev->window == notif_sidebar_win) {
+    draw_notif_sidebar();
     return;
   }
   if (ev->count == 0 && (m = wintomon(ev->window))) {
@@ -3771,7 +5422,7 @@ void motionnotify(XEvent *e) {
   static Monitor *mon = NULL;
   Monitor *m;
   XMotionEvent *ev = &e->xmotion;
-  if (widget_popup_handle_motion(ev)) {
+  if (slider_popup_handle_motion(ev)) {
     return;
   }
   if (ev->window != root) {
@@ -4169,6 +5820,7 @@ void reloadconfig(const Arg *arg) {
     lua_close(command_lua);
     command_lua = NULL;
   }
+  reset_lua_widgets();
 
   set_default_bar_theme();
   load_config_from_lua();
@@ -4229,6 +5881,7 @@ void restack(Monitor *m) {
 void run(void) {
   int xfd;
   int maxfd;
+  int dbus_fd;
   fd_set readfds;
   XEvent ev;
 
@@ -4241,6 +5894,8 @@ void run(void) {
     now = time(NULL);
     if (widgets_last_refresh == 0 || now - widgets_last_refresh >= 2) {
       updatewidgets();
+      notification_expire_check();
+      notif_dbus_try_acquire();
       widgets_last_refresh = now;
       drawbars();
     }
@@ -4253,8 +5908,21 @@ void run(void) {
         maxfd = wm_command_fd;
       }
     }
-    tv.tv_sec = 1;
-    tv.tv_usec = 0;
+    dbus_fd = -1;
+    if (notif_dbus_conn && dbus_connection_get_unix_fd(notif_dbus_conn, &dbus_fd) &&
+        dbus_fd >= 0) {
+      FD_SET(dbus_fd, &readfds);
+      if (dbus_fd > maxfd) {
+        maxfd = dbus_fd;
+      }
+    }
+    if (notif_anim_state != SidebarAnimIdle) {
+      tv.tv_sec = 0;
+      tv.tv_usec = 16000;
+    } else {
+      tv.tv_sec = 1;
+      tv.tv_usec = 0;
+    }
     if (select(maxfd + 1, &readfds, NULL, NULL, &tv) < 0) {
       if (errno == EINTR) {
         continue;
@@ -4268,6 +5936,10 @@ void run(void) {
         close(client_fd);
       }
     }
+    if (dbus_fd >= 0 && FD_ISSET(dbus_fd, &readfds)) {
+      notif_dbus_process();
+    }
+    notif_sidebar_advance_animation();
     while (XPending(dpy)) {
       XNextEvent(dpy, &ev);
       if (handler[ev.type]) {
@@ -4489,9 +6161,11 @@ void setup(void) {
   }
   lrpad = drw->fonts->h;
   bh = drw->fonts->h + 2;
+  load_theme_mode_state();
   set_default_bar_theme();
   workspace_set_defaults();
   load_theme_from_lua();
+  notif_dbus_init();
   updatewidgets();
   widgets_last_refresh = time(NULL);
   updategeom();

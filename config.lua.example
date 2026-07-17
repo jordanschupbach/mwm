@@ -7,6 +7,7 @@ mwm.workspaces({
 })
 
 mwm.theme({
+  -- Used in dark mode (and as the fallback when no light variant is given).
   topbar = {
     normal = {
       fg = "#d7d7d7",
@@ -19,4 +20,44 @@ mwm.theme({
       border = "#2d6cdf",
     },
   },
+  -- Optional: used in light mode. Falls back to a built-in light palette
+  -- if omitted. Cycle dark/light/auto with the "theme" bottom-bar widget.
+  topbar_light = {
+    normal = {
+      fg = "#24292f",
+      bg = "#f4f5f7",
+      border = "#d0d5dd",
+    },
+    selected = {
+      fg = "#ffffff",
+      bg = "#2d6cdf",
+      border = "#2d6cdf",
+    },
+  },
+})
+
+-- Custom bottom-bar widgets. Each one is redrawn every ~2s (same cadence as
+-- the built-in widgets). `update` must return a string; returning nothing
+-- blanks the widget. `click` is optional and receives the X11 button number
+-- (1 = left, 2 = middle, 3 = right, 4/5 = scroll up/down).
+mwm.widget({
+  name = "uptime",
+  update = function()
+    return mwm.exec("uptime -p")
+  end,
+})
+
+mwm.widget({
+  name = "pomodoro",
+  highlight = true,
+  update = function()
+    return "focus: " .. tostring(_G.pomodoro_count or 0)
+  end,
+  click = function(button)
+    if button == 1 then
+      _G.pomodoro_count = (_G.pomodoro_count or 0) + 1
+    elseif button == 3 then
+      _G.pomodoro_count = 0
+    end
+  end,
 })

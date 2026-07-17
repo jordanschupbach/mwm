@@ -22,6 +22,7 @@ pkg_check_modules(XFT REQUIRED xft)
 pkg_check_modules(XINERAMA REQUIRED xinerama)
 pkg_check_modules(GLU REQUIRED glu)
 pkg_check_modules(X11 REQUIRED x11)
+pkg_check_modules(DBUS REQUIRED dbus-1)
 # find_package(X11 REQUIRED)
 # find_package(OpenGL REQUIRED)
 # find_package(GLU REQUIRED)
@@ -35,6 +36,7 @@ include_directories(
   ${X11_INCLUDE_DIR}
   ${OPENGL_INCLUDE_DIR}
   ${GLU_INCLUDE_DIR}
+  ${DBUS_INCLUDE_DIRS}
 )
 link_directories(
   ${HARFBUZZ_LIBRARY_DIRS}
@@ -44,6 +46,7 @@ link_directories(
   ${X11_LIBRARY_DIRS}
   ${XFT_LIBRARY_DIRS}
   ${XINERAMA_LIBRARY_DIRS}
+  ${DBUS_LIBRARY_DIRS}
 )
 
 add_executable(mwm mwm.cpp)
@@ -56,6 +59,7 @@ target_link_libraries(mwm
   ${LUA_LIBRARIES}
   ${XFT_LIBRARIES}
   ${XINERAMA_LIBRARIES}
+  ${DBUS_LIBRARIES}
   X11
   GL
   GLU

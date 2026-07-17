@@ -5,7 +5,8 @@
 pkgs.mkShell {
   buildInputs = [
     pkgs.coreutils
-    pkgs.fontconfig 
+    pkgs.dbus
+    pkgs.fontconfig
     pkgs.freetype
     pkgs.gcc
     pkgs.harfbuzz

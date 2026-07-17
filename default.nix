@@ -10,7 +10,8 @@ pkgs.stdenv.mkDerivation {
 
     pkgs.bear
     pkgs.coreutils
-    pkgs.fontconfig 
+    pkgs.dbus
+    pkgs.fontconfig
     pkgs.freetype
     pkgs.gcc
     pkgs.harfbuzz
@@ -26,7 +27,7 @@ pkgs.stdenv.mkDerivation {
   ];
 
   buildPhase = ''
-    export PKG_CONFIG_PATH=$PKG_CONFIG_PATH:${pkgs.freetype}/lib/pkgconfig:${pkgs.fontconfig}/lib/pkgconfig:${pkgs.harfbuzz}/lib/pkgconfig:${pkgs.lua}/lib/pkgconfig:${pkgs.xorg.libX11}/lib/pkgconfig:${pkgs.xorg.libXft}/lib/pkgconfig:${pkgs.xorg.libXinerama}/lib/pkgconfig
+    export PKG_CONFIG_PATH=$PKG_CONFIG_PATH:${pkgs.freetype}/lib/pkgconfig:${pkgs.fontconfig}/lib/pkgconfig:${pkgs.harfbuzz}/lib/pkgconfig:${pkgs.lua}/lib/pkgconfig:${pkgs.xorg.libX11}/lib/pkgconfig:${pkgs.xorg.libXft}/lib/pkgconfig:${pkgs.xorg.libXinerama}/lib/pkgconfig:${pkgs.dbus}/lib/pkgconfig
     echo "PKG_CONFIG_PATH: $PKG_CONFIG_PATH"
 
     # List all available packages for debugging
@@ -39,6 +40,7 @@ pkgs.stdenv.mkDerivation {
       $(pkg-config --cflags --libs lua) \
       $(pkg-config --cflags --libs xft) \
       $(pkg-config --cflags --libs xinerama) \
+      $(pkg-config --cflags --libs dbus-1) \
       -lX11 -lGL -lGLU -lm
 
     gcc mwm-cli.c -o mwm-cli

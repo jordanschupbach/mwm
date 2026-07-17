@@ -9,6 +9,7 @@ default:
     $(pkg-config --cflags --libs lua) \
     $(pkg-config --cflags --libs xft) \
     $(pkg-config --cflags --libs xinerama) \
+    $(pkg-config --cflags --libs dbus-1) \
     -lX11 -lGL -lGLU -lm
     gcc mwm-cli.c -o mwm-cli
 
