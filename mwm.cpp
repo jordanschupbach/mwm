@@ -1380,7 +1380,7 @@ static void drawbacklightpopup(void) {
     }
     drw_setscheme(drw, scheme[SchemeSel]);
     drw_rect(drw, slider_x, backlight_popup_slider_y, fill_w,
-             backlight_popup_slider_h, 1, 0);
+             backlight_popup_slider_h, 1, 1);
 
     knob_x = slider_x + fill_w - (backlight_popup_knob_w / 2);
     if (knob_x < slider_x) {
@@ -1391,11 +1391,15 @@ static void drawbacklightpopup(void) {
     }
     knob_y = backlight_popup_slider_y + (backlight_popup_slider_h / 2) -
              (backlight_popup_knob_h / 2);
-    drw_rect(drw, knob_x, knob_y, backlight_popup_knob_w, backlight_popup_knob_h,
-             1, 0);
+    /* Knob must stay legible regardless of fill percentage, so it can't
+     * reuse ColFg like the track/fill above -- those are near-identical
+     * shades in some themes and the knob would vanish into a full bar. */
     drw_setscheme(drw, scheme[SchemeNorm]);
     drw_rect(drw, knob_x, knob_y, backlight_popup_knob_w, backlight_popup_knob_h,
-             0, 0);
+             1, 1);
+    drw_setscheme(drw, scheme[SchemeSel]);
+    drw_rect(drw, knob_x, knob_y, backlight_popup_knob_w, backlight_popup_knob_h,
+             0, 1);
   }
 
   drw_map(drw, backlight_popup_win, 0, 0, backlight_popup_w, backlight_popup_h);

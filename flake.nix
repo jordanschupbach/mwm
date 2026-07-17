@@ -22,7 +22,6 @@
 
       buildInputs = [
         pkgs.bear
-        pkgs.cmake
         pkgs.coreutils
         pkgs.fontconfig
         pkgs.freetype
