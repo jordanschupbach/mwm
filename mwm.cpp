@@ -850,6 +850,8 @@ enum WidgetId {
   WidgetVolume,
   WidgetTheme,
   WidgetNotif,
+  WidgetTodo,
+  WidgetAgents,
   WidgetCpu,
   WidgetMem,
   WidgetDisk,
@@ -896,6 +898,42 @@ typedef struct {
   unsigned int id;
   int close_x, close_y, close_w, close_h;
 } NotifRowLayout;
+
+#define MAX_TODOS 50
+
+typedef struct Todo Todo;
+struct Todo {
+  unsigned int id;
+  char text[256];
+  int done;
+  time_t created;
+  Todo *next;
+};
+
+typedef struct {
+  unsigned int id;
+  int check_x, check_y, check_w, check_h;
+  int close_x, close_y, close_w, close_h;
+} TodoRowLayout;
+
+#define MAX_AGENTS 64
+
+typedef struct AgentStatus AgentStatus;
+struct AgentStatus {
+  char kind[16];   /* "claude" / "codex" */
+  char status[16]; /* "running" / "needs_input" */
+  char label[128];
+  char cwd[384];
+  time_t updated;
+  int from_file; /* backed by a status file on disk; dismissible */
+  char file_path[PATH_MAX];
+  AgentStatus *next;
+};
+
+typedef struct {
+  unsigned int id;
+  int close_x, close_y, close_w, close_h;
+} AgentRowLayout;
 
 enum SidebarAnim { SidebarAnimIdle, SidebarAnimOpening, SidebarAnimClosing };
 
@@ -992,6 +1030,38 @@ static void notif_sidebar_toggle(Monitor *m);
 static void notif_sidebar_advance_animation(void);
 static int notif_sidebar_handle_button(XButtonPressedEvent *ev);
 /* }}} notification sidebar declarations */
+
+/* {{{ todo sidebar declarations */
+static unsigned int todo_add(const char *text);
+static void todo_remove(unsigned int id);
+static void todo_toggle(unsigned int id);
+static void todo_clear_completed(void);
+static void todo_seed_fake(void);
+static void widget_format_todos(char *buf, size_t size);
+static int todo_sidebar_content_height(void);
+static void todo_sidebar_position(Monitor *m);
+static void draw_todo_sidebar(void);
+static void todo_sidebar_open(Monitor *m);
+static void todo_sidebar_close(void);
+static void todo_sidebar_toggle(Monitor *m);
+static void todo_sidebar_advance_animation(void);
+static int todo_sidebar_handle_button(XButtonPressedEvent *ev);
+/* }}} todo sidebar declarations */
+
+/* {{{ agent sidebar declarations */
+static void get_agent_status_dir(char *buf, size_t size);
+static void agents_refresh(void);
+static void agents_free_list(void);
+static void widget_format_agents(char *buf, size_t size);
+static int agent_sidebar_content_height(void);
+static void agent_sidebar_position(Monitor *m);
+static void draw_agent_sidebar(void);
+static void agent_sidebar_open(Monitor *m);
+static void agent_sidebar_close(void);
+static void agent_sidebar_toggle(Monitor *m);
+static void agent_sidebar_advance_animation(void);
+static int agent_sidebar_handle_button(XButtonPressedEvent *ev);
+/* }}} agent sidebar declarations */
 
 static void manage(Window w, XWindowAttributes *wa);
 static void mappingnotify(XEvent *e);
@@ -1190,6 +1260,55 @@ static size_t notif_row_layout_len = 0;
 static int notif_clear_x = 0, notif_clear_y = 0, notif_clear_w = 0, notif_clear_h = 0;
 /* }}} notification sidebar globals */
 
+/* {{{ todo sidebar globals */
+static Todo *todos = NULL;
+static unsigned int todo_next_id = 1;
+static size_t todo_count = 0;
+static size_t todo_incomplete = 0;
+
+static Window todo_sidebar_win = None;
+static Monitor *todo_sidebar_mon = NULL;
+static int todo_sidebar_visible = 0;
+static enum SidebarAnim todo_anim_state = SidebarAnimIdle;
+static struct timeval todo_anim_start;
+static int todo_anim_from_x = 0;
+static int todo_anim_to_x = 0;
+static int todo_sidebar_cur_x = 0;
+static int todo_scroll_offset = 0;
+static const int todo_sidebar_w = 360;
+static const int todo_anim_duration_ms = 220;
+static const int todo_row_pad = 12;
+
+static TodoRowLayout todo_row_layout[MAX_TODOS];
+static size_t todo_row_layout_len = 0;
+static int todo_clear_x = 0, todo_clear_y = 0, todo_clear_w = 0, todo_clear_h = 0;
+/* }}} todo sidebar globals */
+
+/* {{{ agent sidebar globals */
+static AgentStatus *agents = NULL;
+static size_t agent_count = 0;
+static size_t agent_needs_input = 0;
+static time_t agents_last_refresh = 0;
+static char agent_status_dir[PATH_MAX];
+
+static Window agent_sidebar_win = None;
+static Monitor *agent_sidebar_mon = NULL;
+static int agent_sidebar_visible = 0;
+static enum SidebarAnim agent_anim_state = SidebarAnimIdle;
+static struct timeval agent_anim_start;
+static int agent_anim_from_x = 0;
+static int agent_anim_to_x = 0;
+static int agent_sidebar_cur_x = 0;
+static int agent_scroll_offset = 0;
+static const int agent_sidebar_w = 360;
+static const int agent_anim_duration_ms = 220;
+static const int agent_row_pad = 12;
+
+static AgentRowLayout agent_row_layout[MAX_AGENTS];
+static size_t agent_row_layout_len = 0;
+static int agent_clear_x = 0, agent_clear_y = 0, agent_clear_w = 0, agent_clear_h = 0;
+/* }}} agent sidebar globals */
+
 static Workspace *workspaces;
 static size_t workspaces_len;
 static Window root, wmcheckwin;
@@ -1224,8 +1343,9 @@ static int net_up = 0;
 static time_t widgets_last_refresh = 0;
 static WidgetLayout widget_layout[WidgetCount];
 static const enum WidgetId widget_draw_order[] = {
-    WidgetBattery, WidgetBacklight, WidgetVolume, WidgetTheme, WidgetNotif,
-    WidgetCpu,     WidgetMem,       WidgetDisk,   WidgetNet,   WidgetClock,
+    WidgetBattery, WidgetBacklight, WidgetVolume,  WidgetTheme, WidgetNotif,
+    WidgetTodo,    WidgetAgents,    WidgetCpu,     WidgetMem,   WidgetDisk,
+    WidgetNet,     WidgetClock,
 };
 static Window slider_popup_win = None;
 static Monitor *slider_popup_mon = NULL;
@@ -1543,6 +1663,10 @@ static const char icon_disk[] = "";
 static const char icon_net[] = "";
 static const char icon_clock[] = "";
 static const char icon_close[] = "";
+static const char icon_todo[] = "\U0000F0AE";
+static const char icon_checkbox_unchecked[] = "\U0000F096";
+static const char icon_checkbox_checked[] = "\U0000F046";
+static const char icon_agents[] = "\U0000F120";
 /* }}} widget icons */
 
 static void widget_format_backlight(char *buf, size_t size) {
@@ -2025,6 +2149,20 @@ static int widget_handle_button(Monitor *m, XButtonPressedEvent *ev) {
   if (widget_hit(WidgetNotif, ev->x)) {
     if (ev->button == Button1) {
       notif_sidebar_toggle(m);
+    }
+    return 1;
+  }
+
+  if (widget_hit(WidgetTodo, ev->x)) {
+    if (ev->button == Button1) {
+      todo_sidebar_toggle(m);
+    }
+    return 1;
+  }
+
+  if (widget_hit(WidgetAgents, ev->x)) {
+    if (ev->button == Button1) {
+      agent_sidebar_toggle(m);
     }
     return 1;
   }
@@ -2770,6 +2908,12 @@ void buttonpress(XEvent *e) {
     return;
   }
   if (notif_sidebar_handle_button(ev)) {
+    return;
+  }
+  if (todo_sidebar_handle_button(ev)) {
+    return;
+  }
+  if (agent_sidebar_handle_button(ev)) {
     return;
   }
   /* focus the monitor if necessary */
@@ -4214,6 +4358,957 @@ static int notif_sidebar_handle_button(XButtonPressedEvent *ev) {
 
 /* }}} notification sidebar */
 
+/* {{{ todo sidebar */
+
+static unsigned int todo_add(const char *text) {
+  Todo *t = ecalloc_type<Todo>();
+
+  t->id = todo_next_id++;
+  snprintf(t->text, sizeof(t->text), "%s", text ? text : "");
+  t->done = 0;
+  t->created = time(NULL);
+  t->next = todos;
+  todos = t;
+  todo_count++;
+  todo_incomplete++;
+
+  while (todo_count > MAX_TODOS) {
+    Todo *prev = todos;
+    if (!prev || !prev->next) {
+      break;
+    }
+    while (prev->next && prev->next->next) {
+      prev = prev->next;
+    }
+    if (!prev->next->done && todo_incomplete > 0) {
+      todo_incomplete--;
+    }
+    free(prev->next);
+    prev->next = NULL;
+    todo_count--;
+  }
+
+  if (todo_sidebar_visible) {
+    draw_todo_sidebar();
+  }
+  drawbars();
+  return t->id;
+}
+
+static void todo_remove(unsigned int id) {
+  Todo *cur = todos;
+  Todo *prev = NULL;
+
+  while (cur) {
+    if (cur->id == id) {
+      if (prev) {
+        prev->next = cur->next;
+      } else {
+        todos = cur->next;
+      }
+      if (!cur->done && todo_incomplete > 0) {
+        todo_incomplete--;
+      }
+      free(cur);
+      if (todo_count > 0) {
+        todo_count--;
+      }
+      return;
+    }
+    prev = cur;
+    cur = cur->next;
+  }
+}
+
+static void todo_toggle(unsigned int id) {
+  Todo *t;
+
+  for (t = todos; t; t = t->next) {
+    if (t->id == id) {
+      t->done = !t->done;
+      if (t->done) {
+        if (todo_incomplete > 0) {
+          todo_incomplete--;
+        }
+      } else {
+        todo_incomplete++;
+      }
+      return;
+    }
+  }
+}
+
+static void todo_clear_completed(void) {
+  Todo *cur = todos;
+  Todo *prev = NULL;
+
+  while (cur) {
+    if (cur->done) {
+      Todo *dead = cur;
+
+      if (prev) {
+        prev->next = cur->next;
+      } else {
+        todos = cur->next;
+      }
+      cur = cur->next;
+      if (todo_count > 0) {
+        todo_count--;
+      }
+      free(dead);
+      continue;
+    }
+    prev = cur;
+    cur = cur->next;
+  }
+}
+
+static void todo_seed_fake(void) {
+  unsigned int id;
+
+  todo_add("Reply to the mwm sidebar feedback thread");
+  todo_add("Buy groceries");
+  id = todo_add("Write changelog for the workspace rewrite");
+  todo_toggle(id);
+}
+
+static void widget_format_todos(char *buf, size_t size) {
+  if (todo_incomplete > 0) {
+    snprintf(buf, size, "%s %zu", icon_todo, todo_incomplete);
+  } else {
+    snprintf(buf, size, "%s", icon_todo);
+  }
+}
+
+static int todo_sidebar_content_height(void) {
+  Todo *t;
+  int total = 0;
+  char lines[3][256];
+  int max_w = todo_sidebar_w - 3 * todo_row_pad - bh;
+
+  for (t = todos; t; t = t->next) {
+    size_t nlines = notif_wrap_body(t->text, max_w, lines, 3);
+    if (nlines < 1) {
+      nlines = 1;
+    }
+    total += todo_row_pad + (int)nlines * bh + todo_row_pad;
+  }
+  return total;
+}
+
+static void todo_sidebar_position(Monitor *m) {
+  if (!m || todo_sidebar_win == None) {
+    return;
+  }
+  XMoveResizeWindow(dpy, todo_sidebar_win, todo_sidebar_cur_x, m->wy,
+                    todo_sidebar_w, m->wh);
+}
+
+static void draw_todo_sidebar(void) {
+  Todo *t;
+  int header_h;
+  int content_h;
+  int max_scroll;
+  int panel_h;
+  int y;
+  int max_w;
+  char lines[3][256];
+  int have_completed = 0;
+
+  if (todo_sidebar_win == None) {
+    return;
+  }
+
+  header_h = bh * 2;
+  panel_h = todo_sidebar_mon ? todo_sidebar_mon->wh : header_h;
+  max_w = todo_sidebar_w - 3 * todo_row_pad - bh;
+
+  content_h = todo_sidebar_content_height();
+  max_scroll = content_h - (panel_h - header_h);
+  if (max_scroll < 0) {
+    max_scroll = 0;
+  }
+  if (todo_scroll_offset > max_scroll) {
+    todo_scroll_offset = max_scroll;
+  }
+  if (todo_scroll_offset < 0) {
+    todo_scroll_offset = 0;
+  }
+
+  drw_setscheme(drw, scheme[SchemeNorm]);
+  drw_rect(drw, 0, 0, todo_sidebar_w, panel_h, 1, 1);
+
+  drw_setscheme(drw, scheme[SchemeSel]);
+  drw_text(drw, todo_row_pad, 0, todo_sidebar_w - 2 * todo_row_pad, header_h,
+           0, "Todos", 0);
+
+  for (t = todos; t; t = t->next) {
+    if (t->done) {
+      have_completed = 1;
+      break;
+    }
+  }
+
+  todo_clear_h = bh;
+  todo_clear_w = (int)drw_fontset_getwidth(drw, "clear done") + todo_row_pad;
+  todo_clear_x = todo_sidebar_w - todo_row_pad - todo_clear_w;
+  todo_clear_y = 0;
+  if (have_completed) {
+    drw_setscheme(drw, scheme[SchemeNorm]);
+    drw_text(drw, todo_clear_x, todo_clear_y, todo_clear_w, header_h, 0,
+             "clear done", 0);
+  }
+
+  drw_setscheme(drw, scheme[SchemeNorm]);
+  drw_rect(drw, 0, header_h - 1, todo_sidebar_w, 1, 1, 0);
+
+  todo_row_layout_len = 0;
+  y = header_h - todo_scroll_offset;
+
+  if (!todos) {
+    drw_setscheme(drw, scheme[SchemeNorm]);
+    drw_text(drw, todo_row_pad, header_h, todo_sidebar_w - 2 * todo_row_pad,
+             bh, 0, "No todos", 0);
+  }
+
+  for (t = todos; t; t = t->next) {
+    size_t nlines = notif_wrap_body(t->text, max_w, lines, 3);
+    int row_lines = nlines < 1 ? 1 : (int)nlines;
+    int card_h = todo_row_pad + row_lines * bh + todo_row_pad;
+    int card_y = y;
+
+    if (card_y + card_h >= header_h && card_y < panel_h) {
+      int row_y = card_y + todo_row_pad;
+      int check_w = bh;
+      int check_x = todo_row_pad;
+      int close_w = bh;
+      int close_x = todo_sidebar_w - todo_row_pad - close_w;
+      int text_x = check_x + check_w + todo_row_pad;
+      int text_w = close_x - todo_row_pad - text_x;
+      size_t li;
+
+      drw_setscheme(drw, scheme[SchemeNorm]);
+      drw_text(drw, check_x, row_y, check_w, bh, 0,
+               t->done ? icon_checkbox_checked : icon_checkbox_unchecked, 0);
+
+      drw_setscheme(drw, scheme[t->done ? SchemeNorm : SchemeSel]);
+      if (nlines == 0) {
+        drw_text(drw, text_x, row_y, text_w, bh, 0, t->text, 0);
+      } else {
+        for (li = 0; li < nlines; li++) {
+          drw_text(drw, text_x, row_y + (int)li * bh, text_w, bh, 0, lines[li],
+                   0);
+        }
+      }
+
+      drw_setscheme(drw, scheme[SchemeNorm]);
+      drw_text(drw, close_x, card_y, close_w, bh, 0, icon_close, 0);
+
+      if (todo_row_layout_len < MAX_TODOS) {
+        TodoRowLayout *row = &todo_row_layout[todo_row_layout_len++];
+        row->id = t->id;
+        row->check_x = check_x;
+        row->check_y = row_y;
+        row->check_w = check_w;
+        row->check_h = bh;
+        row->close_x = close_x;
+        row->close_y = card_y;
+        row->close_w = close_w;
+        row->close_h = bh;
+      }
+
+      drw_setscheme(drw, scheme[SchemeNorm]);
+      drw_rect(drw, todo_row_pad, card_y + card_h - 1,
+               todo_sidebar_w - 2 * todo_row_pad, 1, 1, 0);
+    }
+
+    y += card_h;
+  }
+
+  drw_map(drw, todo_sidebar_win, 0, 0, todo_sidebar_w, panel_h);
+}
+
+static void todo_sidebar_open(Monitor *m) {
+  XSetWindowAttributes wa = {};
+
+  if (!m) {
+    return;
+  }
+
+  if (todo_sidebar_win == None) {
+    wa.override_redirect = True;
+    wa.background_pixel = scheme[SchemeNorm][ColBg].pixel;
+    wa.border_pixel = scheme[SchemeSel][ColBorder].pixel;
+    wa.event_mask = ExposureMask | ButtonPressMask | ButtonReleaseMask;
+    todo_sidebar_cur_x = m->wx + m->ww;
+    todo_sidebar_win = XCreateWindow(
+        dpy, root, todo_sidebar_cur_x, m->wy, todo_sidebar_w, m->wh, 1,
+        DefaultDepth(dpy, screen), CopyFromParent, DefaultVisual(dpy, screen),
+        CWOverrideRedirect | CWBackPixel | CWBorderPixel | CWEventMask, &wa);
+    XDefineCursor(dpy, todo_sidebar_win, cursor[CurNormal]->cursor);
+  }
+
+  todo_sidebar_mon = m;
+  todo_sidebar_visible = 1;
+  todo_scroll_offset = 0;
+
+  todo_anim_from_x = todo_sidebar_cur_x;
+  todo_anim_to_x = m->wx + m->ww - todo_sidebar_w;
+  todo_anim_state = SidebarAnimOpening;
+  gettimeofday(&todo_anim_start, NULL);
+
+  todo_sidebar_position(m);
+  draw_todo_sidebar();
+  XMapRaised(dpy, todo_sidebar_win);
+  drawbars();
+}
+
+static void todo_sidebar_close(void) {
+  if (todo_sidebar_win == None || !todo_sidebar_visible) {
+    return;
+  }
+  todo_anim_from_x = todo_sidebar_cur_x;
+  todo_anim_to_x = todo_sidebar_mon ? todo_sidebar_mon->wx + todo_sidebar_mon->ww
+                                    : todo_sidebar_cur_x;
+  todo_anim_state = SidebarAnimClosing;
+  gettimeofday(&todo_anim_start, NULL);
+}
+
+static void todo_sidebar_toggle(Monitor *m) {
+  if (todo_sidebar_visible) {
+    todo_sidebar_close();
+  } else {
+    todo_sidebar_open(m);
+  }
+}
+
+static void todo_sidebar_advance_animation(void) {
+  struct timeval now;
+  long elapsed_ms;
+  double t;
+  int mon_y = todo_sidebar_mon ? todo_sidebar_mon->wy : 0;
+
+  if (todo_anim_state == SidebarAnimIdle || todo_sidebar_win == None) {
+    return;
+  }
+
+  gettimeofday(&now, NULL);
+  elapsed_ms = (now.tv_sec - todo_anim_start.tv_sec) * 1000 +
+              (now.tv_usec - todo_anim_start.tv_usec) / 1000;
+
+  if (elapsed_ms >= todo_anim_duration_ms) {
+    todo_sidebar_cur_x = todo_anim_to_x;
+    XMoveWindow(dpy, todo_sidebar_win, todo_sidebar_cur_x, mon_y);
+    if (todo_anim_state == SidebarAnimClosing) {
+      XUnmapWindow(dpy, todo_sidebar_win);
+      todo_sidebar_visible = 0;
+    }
+    todo_anim_state = SidebarAnimIdle;
+    return;
+  }
+
+  t = (double)elapsed_ms / (double)todo_anim_duration_ms;
+  t = 1.0 - pow(1.0 - t, 3.0);
+  todo_sidebar_cur_x =
+      todo_anim_from_x + (int)((todo_anim_to_x - todo_anim_from_x) * t);
+  XMoveWindow(dpy, todo_sidebar_win, todo_sidebar_cur_x, mon_y);
+}
+
+static int todo_sidebar_handle_button(XButtonPressedEvent *ev) {
+  size_t i;
+
+  if (todo_sidebar_win == None ||
+      (!todo_sidebar_visible && todo_anim_state == SidebarAnimIdle)) {
+    return 0;
+  }
+
+  if (ev->window != todo_sidebar_win) {
+    if (todo_sidebar_visible) {
+      todo_sidebar_close();
+    }
+    return 0;
+  }
+
+  if (ev->button == Button4) {
+    todo_scroll_offset -= 40;
+    draw_todo_sidebar();
+    return 1;
+  }
+  if (ev->button == Button5) {
+    todo_scroll_offset += 40;
+    draw_todo_sidebar();
+    return 1;
+  }
+  if (ev->button != Button1) {
+    return 1;
+  }
+
+  if (ev->y >= todo_clear_y && ev->y < todo_clear_y + todo_clear_h &&
+      ev->x >= todo_clear_x && ev->x < todo_clear_x + todo_clear_w) {
+    todo_clear_completed();
+    draw_todo_sidebar();
+    drawbars();
+    return 1;
+  }
+
+  for (i = 0; i < todo_row_layout_len; i++) {
+    TodoRowLayout *row = &todo_row_layout[i];
+    if (ev->x >= row->check_x && ev->x < row->check_x + row->check_w &&
+        ev->y >= row->check_y && ev->y < row->check_y + row->check_h) {
+      todo_toggle(row->id);
+      draw_todo_sidebar();
+      drawbars();
+      return 1;
+    }
+    if (ev->x >= row->close_x && ev->x < row->close_x + row->close_w &&
+        ev->y >= row->close_y && ev->y < row->close_y + row->close_h) {
+      todo_remove(row->id);
+      draw_todo_sidebar();
+      drawbars();
+      return 1;
+    }
+  }
+
+  return 1;
+}
+
+/* }}} todo sidebar */
+
+/* {{{ agent sidebar */
+
+/* Pulls "field":"value" out of the small flat JSON status files written by
+ * agent-status-hook.sh. Not a general JSON parser -- only handles the
+ * single-level, string/number-valued shape that script emits. */
+static int agent_json_field(const char *json, const char *field, char *out,
+                            size_t out_size) {
+  char needle[64];
+  const char *p;
+  size_t oi = 0;
+
+  snprintf(needle, sizeof(needle), "\"%s\"", field);
+  p = strstr(json, needle);
+  if (!p) {
+    out[0] = '\0';
+    return 0;
+  }
+  p += strlen(needle);
+  while (*p == ' ' || *p == ':') {
+    p++;
+  }
+  if (*p != '"') {
+    out[0] = '\0';
+    return 0;
+  }
+  p++;
+  while (*p && *p != '"' && oi + 1 < out_size) {
+    if (*p == '\\' && *(p + 1)) {
+      p++;
+    }
+    out[oi++] = *p++;
+  }
+  out[oi] = '\0';
+  return 1;
+}
+
+static long agent_json_number(const char *json, const char *field) {
+  char needle[64];
+  const char *p;
+
+  snprintf(needle, sizeof(needle), "\"%s\"", field);
+  p = strstr(json, needle);
+  if (!p) {
+    return 0;
+  }
+  p += strlen(needle);
+  while (*p == ' ' || *p == ':') {
+    p++;
+  }
+  return atol(p);
+}
+
+static unsigned int agent_hash_id(const char *s) {
+  unsigned int h = 2166136261u;
+
+  while (*s) {
+    h ^= (unsigned char)*s++;
+    h *= 16777619u;
+  }
+  return h == 0 ? 1 : h;
+}
+
+static void get_agent_status_dir(char *buf, size_t size) {
+  const char *runtime = getenv("XDG_RUNTIME_DIR");
+  const char *user = getenv("USER");
+
+  if (runtime && runtime[0] != '\0') {
+    snprintf(buf, size, "%s/mwm-agents", runtime);
+    return;
+  }
+  snprintf(buf, size, "/tmp/mwm-agents-%s", user && user[0] ? user : "mwm");
+}
+
+static void agents_free_list(void) {
+  while (agents) {
+    AgentStatus *next = agents->next;
+    free(agents);
+    agents = next;
+  }
+}
+
+static AgentStatus *agent_list_find(AgentStatus *head, const char *kind,
+                                    const char *cwd) {
+  AgentStatus *a;
+
+  for (a = head; a; a = a->next) {
+    if (strcmp(a->kind, kind) == 0 && strcmp(a->cwd, cwd) == 0) {
+      return a;
+    }
+  }
+  return NULL;
+}
+
+static void agents_refresh(void) {
+  AgentStatus *new_list = NULL;
+  size_t count = 0;
+  size_t needs_input = 0;
+  DIR *dir;
+  struct dirent *entry;
+
+  dir = opendir(agent_status_dir);
+  if (dir) {
+    while (count < MAX_AGENTS && (entry = readdir(dir))) {
+      size_t len = strlen(entry->d_name);
+      char path[PATH_MAX];
+      FILE *fp;
+      char buf[2048];
+      size_t n;
+      AgentStatus *a;
+
+      if (len < 6 || strcmp(entry->d_name + len - 5, ".json") != 0) {
+        continue;
+      }
+      snprintf(path, sizeof(path), "%s/%s", agent_status_dir, entry->d_name);
+      fp = fopen(path, "r");
+      if (!fp) {
+        continue;
+      }
+      n = fread(buf, 1, sizeof(buf) - 1, fp);
+      fclose(fp);
+      buf[n] = '\0';
+
+      a = ecalloc_type<AgentStatus>();
+      if (!agent_json_field(buf, "agent", a->kind, sizeof(a->kind)) ||
+          !agent_json_field(buf, "status", a->status, sizeof(a->status)) ||
+          !agent_json_field(buf, "cwd", a->cwd, sizeof(a->cwd))) {
+        free(a);
+        continue;
+      }
+      agent_json_field(buf, "label", a->label, sizeof(a->label));
+      a->updated = (time_t)agent_json_number(buf, "updated");
+      a->from_file = 1;
+      snprintf(a->file_path, sizeof(a->file_path), "%s", path);
+
+      a->next = new_list;
+      new_list = a;
+      count++;
+      if (strcmp(a->status, "needs_input") == 0) {
+        needs_input++;
+      }
+    }
+    closedir(dir);
+  }
+
+  dir = opendir("/proc");
+  if (dir) {
+    while (count < MAX_AGENTS && (entry = readdir(dir))) {
+      const char *p;
+      char comm_path[64];
+      char cwd_path[64];
+      char comm[32];
+      char cwd_link[384];
+      FILE *fp;
+      ssize_t link_len;
+      AgentStatus *a;
+
+      for (p = entry->d_name; *p; p++) {
+        if (!isdigit((unsigned char)*p)) {
+          break;
+        }
+      }
+      if (*p != '\0' || entry->d_name[0] == '\0') {
+        continue;
+      }
+
+      snprintf(comm_path, sizeof(comm_path), "/proc/%s/comm", entry->d_name);
+      fp = fopen(comm_path, "r");
+      if (!fp) {
+        continue;
+      }
+      comm[0] = '\0';
+      if (fgets(comm, sizeof(comm), fp)) {
+        size_t clen = strlen(comm);
+        if (clen && comm[clen - 1] == '\n') {
+          comm[clen - 1] = '\0';
+        }
+      }
+      fclose(fp);
+
+      if (strcmp(comm, "claude") != 0 && strcmp(comm, "codex") != 0) {
+        continue;
+      }
+
+      snprintf(cwd_path, sizeof(cwd_path), "/proc/%s/cwd", entry->d_name);
+      link_len = readlink(cwd_path, cwd_link, sizeof(cwd_link) - 1);
+      if (link_len <= 0) {
+        continue;
+      }
+      cwd_link[link_len] = '\0';
+
+      if (agent_list_find(new_list, comm, cwd_link)) {
+        continue;
+      }
+
+      a = ecalloc_type<AgentStatus>();
+      snprintf(a->kind, sizeof(a->kind), "%s", comm);
+      snprintf(a->status, sizeof(a->status), "running");
+      snprintf(a->label, sizeof(a->label), "running");
+      snprintf(a->cwd, sizeof(a->cwd), "%s", cwd_link);
+      a->updated = time(NULL);
+      a->from_file = 0;
+      a->file_path[0] = '\0';
+
+      a->next = new_list;
+      new_list = a;
+      count++;
+    }
+    closedir(dir);
+  }
+
+  agents_free_list();
+  agents = new_list;
+  agent_count = count;
+  agent_needs_input = needs_input;
+  agents_last_refresh = time(NULL);
+}
+
+static void widget_format_agents(char *buf, size_t size) {
+  if (agent_needs_input > 0) {
+    snprintf(buf, size, "%s %zu", icon_agents, agent_needs_input);
+  } else if (agent_count > 0) {
+    snprintf(buf, size, "%s %zu", icon_agents, agent_count);
+  } else {
+    snprintf(buf, size, "%s", icon_agents);
+  }
+}
+
+static int agent_sidebar_content_height(void) {
+  AgentStatus *a;
+  int total = 0;
+  char lines[3][256];
+  int max_w = agent_sidebar_w - 2 * agent_row_pad;
+
+  for (a = agents; a; a = a->next) {
+    size_t nlines = notif_wrap_body(a->label, max_w, lines, 2);
+    if (nlines < 1) {
+      nlines = 1;
+    }
+    total += agent_row_pad + bh + (int)nlines * bh + bh + agent_row_pad;
+  }
+  return total;
+}
+
+static void agent_sidebar_position(Monitor *m) {
+  if (!m || agent_sidebar_win == None) {
+    return;
+  }
+  XMoveResizeWindow(dpy, agent_sidebar_win, agent_sidebar_cur_x, m->wy,
+                    agent_sidebar_w, m->wh);
+}
+
+static void draw_agent_sidebar(void) {
+  AgentStatus *a;
+  int header_h;
+  int content_h;
+  int max_scroll;
+  int panel_h;
+  int y;
+  int max_w;
+  char time_buf[16];
+  char lines[3][256];
+  char kind_label[32];
+  int have_dismissible = 0;
+
+  if (agent_sidebar_win == None) {
+    return;
+  }
+
+  header_h = bh * 2;
+  panel_h = agent_sidebar_mon ? agent_sidebar_mon->wh : header_h;
+  max_w = agent_sidebar_w - 2 * agent_row_pad;
+
+  content_h = agent_sidebar_content_height();
+  max_scroll = content_h - (panel_h - header_h);
+  if (max_scroll < 0) {
+    max_scroll = 0;
+  }
+  if (agent_scroll_offset > max_scroll) {
+    agent_scroll_offset = max_scroll;
+  }
+  if (agent_scroll_offset < 0) {
+    agent_scroll_offset = 0;
+  }
+
+  drw_setscheme(drw, scheme[SchemeNorm]);
+  drw_rect(drw, 0, 0, agent_sidebar_w, panel_h, 1, 1);
+
+  drw_setscheme(drw, scheme[SchemeSel]);
+  drw_text(drw, agent_row_pad, 0, agent_sidebar_w - 2 * agent_row_pad, header_h,
+           0, "Agents", 0);
+
+  for (a = agents; a; a = a->next) {
+    if (a->from_file) {
+      have_dismissible = 1;
+      break;
+    }
+  }
+
+  agent_clear_h = bh;
+  agent_clear_w = (int)drw_fontset_getwidth(drw, "clear") + agent_row_pad;
+  agent_clear_x = agent_sidebar_w - agent_row_pad - agent_clear_w;
+  agent_clear_y = 0;
+  if (have_dismissible) {
+    drw_setscheme(drw, scheme[SchemeNorm]);
+    drw_text(drw, agent_clear_x, agent_clear_y, agent_clear_w, header_h, 0,
+             "clear", 0);
+  }
+
+  drw_setscheme(drw, scheme[SchemeNorm]);
+  drw_rect(drw, 0, header_h - 1, agent_sidebar_w, 1, 1, 0);
+
+  agent_row_layout_len = 0;
+  y = header_h - agent_scroll_offset;
+
+  if (!agents) {
+    drw_setscheme(drw, scheme[SchemeNorm]);
+    drw_text(drw, agent_row_pad, header_h, agent_sidebar_w - 2 * agent_row_pad,
+             bh, 0, "No agents running", 0);
+  }
+
+  for (a = agents; a; a = a->next) {
+    size_t nlines = notif_wrap_body(a->label, max_w, lines, 2);
+    int label_lines = nlines < 1 ? 1 : (int)nlines;
+    int card_h = agent_row_pad + bh + label_lines * bh + bh + agent_row_pad;
+    int card_y = y;
+    int needs_input = strcmp(a->status, "needs_input") == 0;
+    unsigned int row_id;
+
+    if (card_y + card_h >= header_h && card_y < panel_h) {
+      int row_y = card_y + agent_row_pad;
+      int close_w = bh;
+      int close_x = agent_sidebar_w - agent_row_pad - close_w;
+      int time_w = 40;
+      int time_x = close_x - time_w;
+      int name_w = time_x - agent_row_pad;
+      size_t li;
+
+      snprintf(kind_label, sizeof(kind_label), "%s", a->kind);
+      if (kind_label[0] >= 'a' && kind_label[0] <= 'z') {
+        kind_label[0] = (char)(kind_label[0] - 'a' + 'A');
+      }
+
+      drw_setscheme(drw, scheme[needs_input ? SchemeSel : SchemeNorm]);
+      drw_text(drw, agent_row_pad, row_y, name_w, bh, 0, kind_label, 0);
+      notif_format_relative_time(a->updated, time_buf, sizeof(time_buf));
+      drw_text(drw, time_x, row_y, time_w, bh, 0, time_buf, 0);
+      row_y += bh;
+
+      for (li = 0; li < (size_t)label_lines; li++) {
+        const char *line_text = li < nlines ? lines[li] : "";
+        drw_text(drw, agent_row_pad, row_y, max_w, bh, 0, line_text, 0);
+        row_y += bh;
+      }
+
+      drw_setscheme(drw, scheme[SchemeNorm]);
+      drw_text(drw, agent_row_pad, row_y, max_w, bh, 0, a->cwd, 0);
+      row_y += bh;
+
+      if (a->from_file && agent_row_layout_len < MAX_AGENTS) {
+        AgentRowLayout *row = &agent_row_layout[agent_row_layout_len++];
+        row_id = agent_hash_id(a->file_path);
+        row->id = row_id;
+        row->close_w = close_w;
+        row->close_h = bh;
+        row->close_x = close_x;
+        row->close_y = card_y;
+        drw_setscheme(drw, scheme[SchemeNorm]);
+        drw_text(drw, row->close_x, row->close_y, row->close_w, row->close_h,
+                 0, icon_close, 0);
+      }
+
+      drw_setscheme(drw, scheme[SchemeNorm]);
+      drw_rect(drw, agent_row_pad, card_y + card_h - 1, max_w, 1, 1, 0);
+    }
+
+    y += card_h;
+  }
+
+  drw_map(drw, agent_sidebar_win, 0, 0, agent_sidebar_w, panel_h);
+}
+
+static void agent_sidebar_open(Monitor *m) {
+  XSetWindowAttributes wa = {};
+
+  if (!m) {
+    return;
+  }
+
+  if (agent_sidebar_win == None) {
+    wa.override_redirect = True;
+    wa.background_pixel = scheme[SchemeNorm][ColBg].pixel;
+    wa.border_pixel = scheme[SchemeSel][ColBorder].pixel;
+    wa.event_mask = ExposureMask | ButtonPressMask | ButtonReleaseMask;
+    agent_sidebar_cur_x = m->wx + m->ww;
+    agent_sidebar_win = XCreateWindow(
+        dpy, root, agent_sidebar_cur_x, m->wy, agent_sidebar_w, m->wh, 1,
+        DefaultDepth(dpy, screen), CopyFromParent, DefaultVisual(dpy, screen),
+        CWOverrideRedirect | CWBackPixel | CWBorderPixel | CWEventMask, &wa);
+    XDefineCursor(dpy, agent_sidebar_win, cursor[CurNormal]->cursor);
+  }
+
+  agent_sidebar_mon = m;
+  agent_sidebar_visible = 1;
+  agent_scroll_offset = 0;
+  agents_refresh();
+
+  agent_anim_from_x = agent_sidebar_cur_x;
+  agent_anim_to_x = m->wx + m->ww - agent_sidebar_w;
+  agent_anim_state = SidebarAnimOpening;
+  gettimeofday(&agent_anim_start, NULL);
+
+  agent_sidebar_position(m);
+  draw_agent_sidebar();
+  XMapRaised(dpy, agent_sidebar_win);
+  drawbars();
+}
+
+static void agent_sidebar_close(void) {
+  if (agent_sidebar_win == None || !agent_sidebar_visible) {
+    return;
+  }
+  agent_anim_from_x = agent_sidebar_cur_x;
+  agent_anim_to_x = agent_sidebar_mon
+                        ? agent_sidebar_mon->wx + agent_sidebar_mon->ww
+                        : agent_sidebar_cur_x;
+  agent_anim_state = SidebarAnimClosing;
+  gettimeofday(&agent_anim_start, NULL);
+}
+
+static void agent_sidebar_toggle(Monitor *m) {
+  if (agent_sidebar_visible) {
+    agent_sidebar_close();
+  } else {
+    agent_sidebar_open(m);
+  }
+}
+
+static void agent_sidebar_advance_animation(void) {
+  struct timeval now;
+  long elapsed_ms;
+  double t;
+  int mon_y = agent_sidebar_mon ? agent_sidebar_mon->wy : 0;
+
+  if (agent_anim_state == SidebarAnimIdle || agent_sidebar_win == None) {
+    return;
+  }
+
+  gettimeofday(&now, NULL);
+  elapsed_ms = (now.tv_sec - agent_anim_start.tv_sec) * 1000 +
+              (now.tv_usec - agent_anim_start.tv_usec) / 1000;
+
+  if (elapsed_ms >= agent_anim_duration_ms) {
+    agent_sidebar_cur_x = agent_anim_to_x;
+    XMoveWindow(dpy, agent_sidebar_win, agent_sidebar_cur_x, mon_y);
+    if (agent_anim_state == SidebarAnimClosing) {
+      XUnmapWindow(dpy, agent_sidebar_win);
+      agent_sidebar_visible = 0;
+    }
+    agent_anim_state = SidebarAnimIdle;
+    return;
+  }
+
+  t = (double)elapsed_ms / (double)agent_anim_duration_ms;
+  t = 1.0 - pow(1.0 - t, 3.0);
+  agent_sidebar_cur_x =
+      agent_anim_from_x + (int)((agent_anim_to_x - agent_anim_from_x) * t);
+  XMoveWindow(dpy, agent_sidebar_win, agent_sidebar_cur_x, mon_y);
+}
+
+static int agent_sidebar_handle_button(XButtonPressedEvent *ev) {
+  size_t i;
+
+  if (agent_sidebar_win == None ||
+      (!agent_sidebar_visible && agent_anim_state == SidebarAnimIdle)) {
+    return 0;
+  }
+
+  if (ev->window != agent_sidebar_win) {
+    if (agent_sidebar_visible) {
+      agent_sidebar_close();
+    }
+    return 0;
+  }
+
+  if (ev->button == Button4) {
+    agent_scroll_offset -= 40;
+    draw_agent_sidebar();
+    return 1;
+  }
+  if (ev->button == Button5) {
+    agent_scroll_offset += 40;
+    draw_agent_sidebar();
+    return 1;
+  }
+  if (ev->button != Button1) {
+    return 1;
+  }
+
+  if (ev->y >= agent_clear_y && ev->y < agent_clear_y + agent_clear_h &&
+      ev->x >= agent_clear_x && ev->x < agent_clear_x + agent_clear_w) {
+    AgentStatus *a;
+    for (a = agents; a; a = a->next) {
+      if (a->from_file) {
+        unlink(a->file_path);
+      }
+    }
+    agents_refresh();
+    draw_agent_sidebar();
+    drawbars();
+    return 1;
+  }
+
+  for (i = 0; i < agent_row_layout_len; i++) {
+    AgentRowLayout *row = &agent_row_layout[i];
+    if (ev->x >= row->close_x && ev->x < row->close_x + row->close_w &&
+        ev->y >= row->close_y && ev->y < row->close_y + row->close_h) {
+      AgentStatus *a;
+      for (a = agents; a; a = a->next) {
+        if (a->from_file && agent_hash_id(a->file_path) == row->id) {
+          unlink(a->file_path);
+          break;
+        }
+      }
+      agents_refresh();
+      draw_agent_sidebar();
+      drawbars();
+      return 1;
+    }
+  }
+
+  return 1;
+}
+
+/* }}} agent sidebar */
+
 static void lua_register_mwm_api(lua_State *L) {
   lua_pushcfunction(L, lua_print_to_client);
   lua_setglobal(L, "print");
@@ -4436,6 +5531,20 @@ void cleanup(void) {
     free(notifications);
     notifications = next;
   }
+  if (todo_sidebar_win != None) {
+    XDestroyWindow(dpy, todo_sidebar_win);
+    todo_sidebar_win = None;
+  }
+  while (todos) {
+    Todo *next = todos->next;
+    free(todos);
+    todos = next;
+  }
+  if (agent_sidebar_win != None) {
+    XDestroyWindow(dpy, agent_sidebar_win);
+    agent_sidebar_win = None;
+  }
+  agents_free_list();
   notif_dbus_shutdown();
   XDestroyWindow(dpy, wmcheckwin);
   drw_free(drw);
@@ -4588,6 +5697,22 @@ void configurenotify(XEvent *e) {
         }
         notif_sidebar_position(notif_sidebar_mon);
         draw_notif_sidebar();
+      }
+      if (todo_sidebar_win != None && todo_sidebar_mon) {
+        if (todo_sidebar_visible && todo_anim_state == SidebarAnimIdle) {
+          todo_sidebar_cur_x =
+              todo_sidebar_mon->wx + todo_sidebar_mon->ww - todo_sidebar_w;
+        }
+        todo_sidebar_position(todo_sidebar_mon);
+        draw_todo_sidebar();
+      }
+      if (agent_sidebar_win != None && agent_sidebar_mon) {
+        if (agent_sidebar_visible && agent_anim_state == SidebarAnimIdle) {
+          agent_sidebar_cur_x =
+              agent_sidebar_mon->wx + agent_sidebar_mon->ww - agent_sidebar_w;
+        }
+        agent_sidebar_position(agent_sidebar_mon);
+        draw_agent_sidebar();
       }
       updatesystray();
       focus(NULL);
@@ -4828,6 +5953,8 @@ void drawwidgetbar(Monitor *m) {
   widget_format_volume(text[WidgetVolume], sizeof(text[WidgetVolume]));
   widget_format_theme(text[WidgetTheme], sizeof(text[WidgetTheme]));
   widget_format_notifications(text[WidgetNotif], sizeof(text[WidgetNotif]));
+  widget_format_todos(text[WidgetTodo], sizeof(text[WidgetTodo]));
+  widget_format_agents(text[WidgetAgents], sizeof(text[WidgetAgents]));
   widget_format_cpu(text[WidgetCpu], sizeof(text[WidgetCpu]));
   widget_format_mem(text[WidgetMem], sizeof(text[WidgetMem]));
   widget_format_disk(text[WidgetDisk], sizeof(text[WidgetDisk]));
@@ -4840,7 +5967,9 @@ void drawwidgetbar(Monitor *m) {
     int w = (int)TEXTW(text[id]);
     int highlighted = id == WidgetBacklight || id == WidgetVolume ||
                       id == WidgetTheme ||
-                      (id == WidgetNotif && notification_unread > 0);
+                      (id == WidgetNotif && notification_unread > 0) ||
+                      (id == WidgetTodo && todo_incomplete > 0) ||
+                      (id == WidgetAgents && agent_needs_input > 0);
 
     if (i > 0) {
       x -= lrpad;
@@ -4912,6 +6041,14 @@ void expose(XEvent *e) {
   }
   if (notif_sidebar_win != None && ev->window == notif_sidebar_win) {
     draw_notif_sidebar();
+    return;
+  }
+  if (todo_sidebar_win != None && ev->window == todo_sidebar_win) {
+    draw_todo_sidebar();
+    return;
+  }
+  if (agent_sidebar_win != None && ev->window == agent_sidebar_win) {
+    draw_agent_sidebar();
     return;
   }
   if (ev->count == 0 && (m = wintomon(ev->window))) {
@@ -5952,6 +7089,10 @@ void run(void) {
       updatewidgets();
       notification_expire_check();
       notif_dbus_try_acquire();
+      agents_refresh();
+      if (agent_sidebar_visible) {
+        draw_agent_sidebar();
+      }
       widgets_last_refresh = now;
       drawbars();
     }
@@ -5972,7 +7113,8 @@ void run(void) {
         maxfd = dbus_fd;
       }
     }
-    if (notif_anim_state != SidebarAnimIdle) {
+    if (notif_anim_state != SidebarAnimIdle || todo_anim_state != SidebarAnimIdle ||
+        agent_anim_state != SidebarAnimIdle) {
       tv.tv_sec = 0;
       tv.tv_usec = 16000;
     } else {
@@ -5996,6 +7138,8 @@ void run(void) {
       notif_dbus_process();
     }
     notif_sidebar_advance_animation();
+    todo_sidebar_advance_animation();
+    agent_sidebar_advance_animation();
     while (XPending(dpy)) {
       XNextEvent(dpy, &ev);
       if (handler[ev.type]) {
@@ -6222,6 +7366,10 @@ void setup(void) {
   workspace_set_defaults();
   load_theme_from_lua();
   notif_dbus_init();
+  todo_seed_fake();
+  get_agent_status_dir(agent_status_dir, sizeof(agent_status_dir));
+  mkdir(agent_status_dir, 0700);
+  agents_refresh();
   updatewidgets();
   widgets_last_refresh = time(NULL);
   updategeom();
