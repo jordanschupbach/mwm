@@ -1070,6 +1070,22 @@ typedef struct {
   int x, y, w, h; /* bounding box, recomputed on every draw for hit-testing */
 } DesktopIcon;
 
+#define MAX_WIFI_NETWORKS 64
+#define MAX_WIFI_LIST_ROWS 8
+
+typedef struct {
+  char ssid[128];
+  int signal; /* 0-100, -1 if nmcli didn't report one */
+  int secured;
+  int active; /* the currently-connected network */
+} WifiNetwork;
+
+/* A single nmcli invocation that might take real wall-clock time (a scan or
+ * a connect attempt, both of which can take seconds) -- see wifi_job_start()
+ * and wifi_job_poll(). Only one runs at a time; that's plenty for a popup
+ * that's only ever driven by one person clicking one thing at a time. */
+enum WifiJobKind { WifiJobNone, WifiJobScan, WifiJobConnect };
+
 // }}} Types
 
 // {{{ Function declarations
@@ -1303,6 +1319,25 @@ static int keybind_help_handle_keypress(XKeyEvent *ev);
 static int keybind_help_handle_button(XButtonPressedEvent *ev);
 /* }}} keybinding help declarations */
 
+/* {{{ wifi popup declarations */
+static void wifi_job_reset(void);
+static int wifi_job_start(enum WifiJobKind kind, char *const argv[], int capture_stderr);
+static void wifi_job_poll(void);
+static int nmcli_split_line(char *line, char *fields[], int max);
+static int wifi_network_cmp(const void *a, const void *b);
+static void wifi_parse_scan_output(char *buf);
+static void wifi_start_scan(void);
+static void wifi_start_connect(const char *ssid, const char *password);
+static int wifi_popup_total_h(void);
+static void wifi_popup_position(Monitor *m);
+static void wifi_popup_draw(void);
+static void wifi_popup_open(Monitor *m);
+static void wifi_popup_close(void);
+static void wifi_popup_toggle(Monitor *m);
+static int wifi_handle_keypress(XKeyEvent *ev);
+static int wifi_handle_button(XButtonPressedEvent *ev);
+/* }}} wifi popup declarations */
+
 /* {{{ desktop icons declarations */
 static void get_desktop_dir(char *buf, size_t size);
 static void get_trash_files_dir(char *buf, size_t size);
@@ -1459,7 +1494,6 @@ static void widget_update_net(void);
 static void widget_update_wifi(void);
 static void widget_update_bluetooth(void);
 static int widget_rfkill_blocked(const char *type_name);
-static void widget_toggle_wifi(void);
 static void widget_toggle_bluetooth(void);
 static void widget_update_volume(void);
 static void widget_update_theme(void);
@@ -1782,6 +1816,33 @@ static int wifi_blocked = 0;
 static int wifi_up = 0;
 static int wifi_quality = -1; /* 0-70 per /proc/net/wireless, -1 = unknown */
 static char wifi_ssid[128];
+
+/* {{{ wifi popup globals */
+static const int wifi_popup_w = 320;
+static Window wifi_win = None;
+static int wifi_visible = 0;
+static Monitor *wifi_mon = NULL;
+static WifiNetwork wifi_networks[MAX_WIFI_NETWORKS];
+static size_t wifi_networks_len = 0;
+static int wifi_sel = 0;
+static int wifi_scanning = 0;
+static int wifi_connecting = 0;
+static char wifi_connecting_ssid[128] = "";
+static char wifi_status_msg[192] = "";
+
+static int wifi_password_mode = 0;
+static char wifi_password_ssid[128] = "";
+static char wifi_password_query[128] = "";
+static size_t wifi_password_query_len = 0;
+
+static enum WifiJobKind wifi_job_kind = WifiJobNone;
+static pid_t wifi_job_pid = -1;
+static int wifi_job_fd = -1;
+static int wifi_job_capture_stderr = 0;
+static char wifi_job_buf[8192];
+static size_t wifi_job_buf_len = 0;
+/* }}} wifi popup globals */
+
 static int bt_blocked = 0;
 static int bt_connected_count = 0;
 static char bt_first_device[128];
@@ -2374,15 +2435,6 @@ static void widget_update_bluetooth(void) {
   }
 }
 
-static void widget_toggle_wifi(void) {
-  /* setup() ignores SIGCHLD with SA_NOCLDWAIT so system()'s return value
-   * can't be trusted here (see widget_set_volume_percent_absolute); just
-   * fire the command and re-read real state afterward. */
-  system(wifi_blocked ? "rfkill unblock wifi" : "rfkill block wifi");
-  widget_update_wifi();
-  drawbars();
-}
-
 static void widget_toggle_bluetooth(void) {
   system(bt_blocked ? "rfkill unblock bluetooth" : "rfkill block bluetooth");
   widget_update_bluetooth();
@@ -2647,6 +2699,7 @@ static const char icon_desktop_text[] = "\U0000F0F6";
 static const char icon_trash_empty[] = "\U0000F1F8";
 static const char icon_trash_full[] = "\U0000F014";
 static const char icon_wifi[] = "\U0000F1EB";
+static const char icon_lock[] = "\U0000F023";
 static const char icon_bluetooth[] = "\U0000F293";
 static const char icon_mic[] = "\U0000F130";
 static const char icon_mic_muted[] = "\U0000F131";
@@ -3474,7 +3527,7 @@ static int widget_handle_button(Monitor *m, XButtonPressedEvent *ev) {
 
   if (widget_hit(WidgetWifi, ev->x)) {
     if (ev->button == Button1) {
-      widget_toggle_wifi();
+      wifi_popup_toggle(m);
     }
     return 1;
   }
@@ -4298,6 +4351,9 @@ void buttonpress(XEvent *e) {
 
   click = ClkRootWin;
   if (keybind_help_handle_button(ev)) {
+    return;
+  }
+  if (wifi_handle_button(ev)) {
     return;
   }
   if (project_handle_button(ev)) {
@@ -9291,6 +9347,578 @@ static int keybind_help_handle_button(XButtonPressedEvent *ev) {
 
 /* }}} keybinding help */
 
+/* {{{ wifi popup */
+
+/* Splits one nmcli -t (terse, colon-separated) line into up to `max`
+ * fields in place, undoing nmcli's own escaping of literal ':' and '\\'
+ * within a field value ("\:" / "\\\\"). Returns the field count found. */
+static int nmcli_split_line(char *line, char *fields[], int max) {
+  int n = 0;
+  char *out = line;
+  char *read = line;
+
+  if (max <= 0) {
+    return 0;
+  }
+  fields[n++] = out;
+  while (*read) {
+    if (read[0] == '\\' && (read[1] == ':' || read[1] == '\\')) {
+      *out++ = read[1];
+      read += 2;
+      continue;
+    }
+    if (*read == ':') {
+      *out++ = '\0';
+      read++;
+      if (n < max) {
+        fields[n++] = out;
+      }
+      continue;
+    }
+    *out++ = *read++;
+  }
+  *out = '\0';
+  return n;
+}
+
+/* Strongest signal first; whichever network is currently active always
+ * sorts to the top regardless of signal, since that's the one answer to
+ * "what am I on right now" someone opening this popup usually wants first. */
+static int wifi_network_cmp(const void *a, const void *b) {
+  const WifiNetwork *wa = (const WifiNetwork *)a;
+  const WifiNetwork *wb = (const WifiNetwork *)b;
+  if (wa->active != wb->active) {
+    return wb->active - wa->active;
+  }
+  return wb->signal - wa->signal;
+}
+
+/* Parses `nmcli -t -f SSID,SIGNAL,SECURITY,ACTIVE device wifi list` output.
+ * nmcli lists one row per BSSID, so the same SSID can appear more than once
+ * (dual-band APs, mesh nodes) -- collapsed here into one entry per SSID,
+ * keeping the strongest signal seen and OR-ing "active" across its rows. */
+static void wifi_parse_scan_output(char *buf) {
+  char *saveptr = NULL;
+  char *line;
+
+  wifi_networks_len = 0;
+  line = strtok_r(buf, "\n", &saveptr);
+  while (line && wifi_networks_len < MAX_WIFI_NETWORKS) {
+    char *fields[4];
+    int n = nmcli_split_line(line, fields, 4);
+
+    if (n >= 1 && fields[0][0] != '\0') {
+      size_t i;
+      int is_dup = 0;
+      int signal = n >= 2 ? atoi(fields[1]) : -1;
+      int active = n >= 4 && !strcmp(fields[3], "yes");
+
+      for (i = 0; i < wifi_networks_len; i++) {
+        if (!strcmp(wifi_networks[i].ssid, fields[0])) {
+          is_dup = 1;
+          if (signal > wifi_networks[i].signal) {
+            wifi_networks[i].signal = signal;
+          }
+          if (active) {
+            wifi_networks[i].active = 1;
+          }
+          break;
+        }
+      }
+      if (!is_dup) {
+        WifiNetwork *w = &wifi_networks[wifi_networks_len++];
+        snprintf(w->ssid, sizeof(w->ssid), "%s", fields[0]);
+        w->signal = signal;
+        w->secured = n >= 3 && fields[2][0] != '\0';
+        w->active = active;
+      }
+    }
+    line = strtok_r(NULL, "\n", &saveptr);
+  }
+  qsort(wifi_networks, wifi_networks_len, sizeof(WifiNetwork), wifi_network_cmp);
+  if (wifi_sel >= (int)wifi_networks_len) {
+    wifi_sel = wifi_networks_len > 0 ? (int)wifi_networks_len - 1 : 0;
+  }
+}
+
+static void wifi_job_reset(void) {
+  if (wifi_job_fd >= 0) {
+    close(wifi_job_fd);
+    wifi_job_fd = -1;
+  }
+  wifi_job_pid = -1;
+  wifi_job_kind = WifiJobNone;
+  wifi_job_buf_len = 0;
+}
+
+/* Forks and execs argv (no shell -- an SSID or password is passed through
+ * as its own argv entry, nothing to escape) with stdout (and, if
+ * capture_stderr, stderr too) captured through a non-blocking pipe. Never
+ * waits: the child is reaped automatically (setup() sets SA_NOCLDWAIT on
+ * SIGCHLD), and wifi_job_poll(), called every spin of the main loop,
+ * notices when the pipe hits EOF. This is what keeps a multi-second scan or
+ * connect attempt from freezing the whole window manager the way a plain
+ * system()/popen() call would (see the volume slider's own history of
+ * exactly this bug). */
+static int wifi_job_start(enum WifiJobKind kind, char *const argv[], int capture_stderr) {
+  int pipefd[2];
+  pid_t pid;
+
+  if (wifi_job_kind != WifiJobNone) {
+    return 0;
+  }
+  if (pipe(pipefd) != 0) {
+    return 0;
+  }
+  pid = fork();
+  if (pid < 0) {
+    close(pipefd[0]);
+    close(pipefd[1]);
+    return 0;
+  }
+  if (pid == 0) {
+    if (dpy) {
+      close(ConnectionNumber(dpy));
+    }
+    close(pipefd[0]);
+    dup2(pipefd[1], STDOUT_FILENO);
+    if (capture_stderr) {
+      dup2(pipefd[1], STDERR_FILENO);
+    } else {
+      int devnull = open("/dev/null", O_WRONLY);
+      if (devnull >= 0) {
+        dup2(devnull, STDERR_FILENO);
+        close(devnull);
+      }
+    }
+    close(pipefd[1]);
+    execvp(argv[0], argv);
+    _exit(127);
+  }
+  close(pipefd[1]);
+  fcntl(pipefd[0], F_SETFL, O_NONBLOCK);
+  wifi_job_kind = kind;
+  wifi_job_pid = pid;
+  wifi_job_fd = pipefd[0];
+  wifi_job_buf_len = 0;
+  return 1;
+}
+
+static void wifi_start_scan(void) {
+  char *argv[] = {(char *)"nmcli",  (char *)"-t",     (char *)"-f", (char *)"SSID,SIGNAL,SECURITY,ACTIVE",
+                  (char *)"device", (char *)"wifi",   (char *)"list", NULL};
+  if (wifi_job_start(WifiJobScan, argv, 0)) {
+    wifi_scanning = 1;
+  }
+}
+
+static void wifi_start_connect(const char *ssid, const char *password) {
+  char *argv[8];
+  int i = 0;
+
+  argv[i++] = (char *)"nmcli";
+  argv[i++] = (char *)"device";
+  argv[i++] = (char *)"wifi";
+  argv[i++] = (char *)"connect";
+  argv[i++] = (char *)ssid;
+  if (password && password[0]) {
+    argv[i++] = (char *)"password";
+    argv[i++] = (char *)password;
+  }
+  argv[i] = NULL;
+
+  if (wifi_job_start(WifiJobConnect, argv, 1)) {
+    wifi_connecting = 1;
+    snprintf(wifi_connecting_ssid, sizeof(wifi_connecting_ssid), "%s", ssid);
+    wifi_status_msg[0] = '\0';
+  }
+}
+
+/* Drains whatever's ready on the pending job's pipe without blocking;
+ * called from run()'s main loop on every pass (its select() also waits on
+ * this fd, so a result shows up as soon as it's ready rather than on the
+ * next 1s poll). EOF means the child is done producing output. A connect
+ * failure isn't detectable via exit status (SA_NOCLDWAIT means it's not
+ * retrievable at all), so it's detected the same way run_capture_argv's
+ * callers already have to work around system()'s untrustworthy return
+ * value elsewhere in this file: nmcli connect failures print "Error: ..."
+ * to stderr, which wifi_start_connect() captures into the same buffer as
+ * stdout specifically so this string check works. */
+static void wifi_job_poll(void) {
+  enum WifiJobKind finished_kind;
+
+  if (wifi_job_kind == WifiJobNone) {
+    return;
+  }
+
+  for (;;) {
+    ssize_t n = read(wifi_job_fd, wifi_job_buf + wifi_job_buf_len,
+                      sizeof(wifi_job_buf) - 1 - wifi_job_buf_len);
+    if (n > 0) {
+      wifi_job_buf_len += (size_t)n;
+      if (wifi_job_buf_len >= sizeof(wifi_job_buf) - 1) {
+        break;
+      }
+      continue;
+    }
+    if (n < 0 && errno == EAGAIN) {
+      return; /* still running, nothing new yet */
+    }
+    break; /* EOF or a real read error -- either way the job is done */
+  }
+
+  wifi_job_buf[wifi_job_buf_len] = '\0';
+  finished_kind = wifi_job_kind;
+  wifi_job_reset();
+
+  if (finished_kind == WifiJobScan) {
+    wifi_scanning = 0;
+    wifi_parse_scan_output(wifi_job_buf);
+  } else if (finished_kind == WifiJobConnect) {
+    wifi_connecting = 0;
+    /* Empty output counts as failure too -- a real success always prints
+     * some confirmation ("Device '...' successfully activated..."); empty
+     * means nmcli is missing, execvp failed, or it was killed, none of
+     * which should be reported as a successful connection. */
+    if (wifi_job_buf[0] == '\0' || strstr(wifi_job_buf, "Error")) {
+      snprintf(wifi_status_msg, sizeof(wifi_status_msg), "Couldn't connect to %s",
+               wifi_connecting_ssid);
+      wifi_password_mode = 1;
+      snprintf(wifi_password_ssid, sizeof(wifi_password_ssid), "%s", wifi_connecting_ssid);
+      wifi_password_query[0] = '\0';
+      wifi_password_query_len = 0;
+    } else {
+      snprintf(wifi_status_msg, sizeof(wifi_status_msg), "Connected to %s", wifi_connecting_ssid);
+      wifi_password_mode = 0;
+      wifi_start_scan(); /* refresh so the list reflects the new active network */
+    }
+  }
+
+  if (wifi_visible) {
+    wifi_popup_position(wifi_mon);
+    wifi_popup_draw();
+  }
+}
+
+static int wifi_popup_total_h(void) {
+  int rows;
+
+  if (wifi_blocked) {
+    return bh + 1 + bh;
+  }
+  if (wifi_password_mode) {
+    return bh + 1 + bh;
+  }
+  rows = (int)wifi_networks_len;
+  if (rows > MAX_WIFI_LIST_ROWS) {
+    rows = MAX_WIFI_LIST_ROWS;
+  }
+  if (rows < 1) {
+    rows = 1; /* "Scanning..." / "No networks found" */
+  }
+  return bh + 1 + rows * bh + (wifi_status_msg[0] != '\0' ? bh : 0);
+}
+
+static void wifi_popup_position(Monitor *m) {
+  int h = wifi_popup_total_h();
+  int anchor_x, anchor_w;
+  int popup_x, popup_y;
+
+  if (!m || wifi_win == None) {
+    return;
+  }
+  anchor_x = widget_layout[WidgetWifi].x;
+  anchor_w = widget_layout[WidgetWifi].w;
+
+  popup_x = m->wx + anchor_x + (anchor_w / 2) - (wifi_popup_w / 2);
+  if (popup_x < m->wx) {
+    popup_x = m->wx;
+  }
+  if (popup_x + wifi_popup_w > m->wx + m->ww) {
+    popup_x = m->wx + m->ww - wifi_popup_w;
+  }
+  popup_y = m->bby - h - 8;
+  if (popup_y < m->my) {
+    popup_y = m->my;
+  }
+  XMoveResizeWindow(dpy, wifi_win, popup_x, popup_y, wifi_popup_w, h);
+}
+
+static void wifi_popup_draw(void) {
+  int total_h = wifi_popup_total_h();
+  int y;
+  char toggle_text[64];
+
+  if (wifi_win == None) {
+    return;
+  }
+
+  drw_setscheme(drw, scheme[SchemeNorm]);
+  drw_rect(drw, 0, 0, wifi_popup_w, total_h, 1, 1);
+
+  /* Row 0 is the toggle button -- the whole row is the click target, see
+   * wifi_handle_button(). */
+  snprintf(toggle_text, sizeof(toggle_text), "%s Wi-Fi: %s", icon_wifi,
+           wifi_blocked ? "Off (click to turn on)" : "On (click to turn off)");
+  drw_setscheme(drw, scheme[SchemeSel]);
+  drw_text(drw, 0, 0, wifi_popup_w, bh, lrpad / 2, toggle_text, 0);
+
+  drw_setscheme(drw, scheme[SchemeNorm]);
+  draw_hdivider(0, bh, wifi_popup_w);
+  y = bh + 1;
+
+  if (wifi_blocked) {
+    drw_text(drw, 0, y, wifi_popup_w, bh, lrpad / 2, "Wi-Fi is off", 0);
+    y += bh;
+  } else if (wifi_password_mode) {
+    char display[192];
+    char masked[128];
+    size_t i;
+
+    for (i = 0; i < wifi_password_query_len && i + 1 < sizeof(masked); i++) {
+      masked[i] = '*';
+    }
+    masked[i] = '\0';
+    snprintf(display, sizeof(display), "Password for %s: %s", wifi_password_ssid, masked);
+    drw_setscheme(drw, scheme[SchemeSel]);
+    drw_text(drw, 0, y, wifi_popup_w, bh, lrpad / 2, display, 0);
+    y += bh;
+  } else {
+    size_t shown = wifi_networks_len < MAX_WIFI_LIST_ROWS ? wifi_networks_len : (size_t)MAX_WIFI_LIST_ROWS;
+
+    if (shown == 0) {
+      const char *hint = wifi_scanning ? "Scanning for networks..." : "No networks found";
+      drw_setscheme(drw, scheme[SchemeNorm]);
+      drw_text(drw, 0, y, wifi_popup_w, bh, lrpad / 2, hint, 0);
+      y += bh;
+    } else {
+      size_t i;
+      for (i = 0; i < shown; i++) {
+        const WifiNetwork *w = &wifi_networks[i];
+        char row_text[256];
+        char status[32] = "";
+
+        if (w->active) {
+          snprintf(status, sizeof(status), " (connected)");
+        } else if (wifi_connecting && !strcmp(wifi_connecting_ssid, w->ssid)) {
+          snprintf(status, sizeof(status), " (connecting...)");
+        }
+        snprintf(row_text, sizeof(row_text), "%s%s%s%s", w->secured ? icon_lock : "",
+                 w->secured ? " " : "", w->ssid, status);
+
+        drw_setscheme(drw, scheme[(int)i == wifi_sel ? SchemeSel : SchemeNorm]);
+        drw_text(drw, 0, y, wifi_popup_w, bh, lrpad / 2, row_text, 0);
+        y += bh;
+      }
+    }
+  }
+
+  if (!wifi_blocked && !wifi_password_mode && wifi_status_msg[0] != '\0') {
+    drw_setscheme(drw, scheme[SchemeNorm]);
+    drw_text(drw, 0, y, wifi_popup_w, bh, lrpad / 2, wifi_status_msg, 0);
+  }
+
+  drw_map(drw, wifi_win, 0, 0, wifi_popup_w, total_h);
+}
+
+static void wifi_popup_open(Monitor *m) {
+  XSetWindowAttributes wa = {};
+
+  if (!m) {
+    return;
+  }
+  if (wifi_win == None) {
+    wa.override_redirect = True;
+    wa.background_pixel = scheme[SchemeNorm][ColBg].pixel;
+    wa.border_pixel = scheme[SchemeSel][ColBorder].pixel;
+    wa.event_mask = ExposureMask | ButtonPressMask | KeyPressMask;
+    wifi_win = XCreateWindow(dpy, root, 0, 0, wifi_popup_w, bh, 1, DefaultDepth(dpy, screen),
+                             CopyFromParent, DefaultVisual(dpy, screen),
+                             CWOverrideRedirect | CWBackPixel | CWBorderPixel | CWEventMask, &wa);
+    XDefineCursor(dpy, wifi_win, cursor[CurNormal]->cursor);
+  }
+  if (XGrabKeyboard(dpy, root, True, GrabModeAsync, GrabModeAsync, CurrentTime) !=
+      GrabSuccess) {
+    return;
+  }
+
+  wifi_mon = m;
+  wifi_visible = 1;
+  wifi_sel = 0;
+  wifi_password_mode = 0;
+  wifi_status_msg[0] = '\0';
+  widget_update_wifi(); /* fresh blocked/up state before deciding whether to scan */
+  if (!wifi_blocked) {
+    wifi_start_scan();
+  }
+  wifi_popup_position(m);
+  wifi_popup_draw();
+  XMapRaised(dpy, wifi_win);
+  drawbars();
+}
+
+static void wifi_popup_close(void) {
+  if (!wifi_visible) {
+    return;
+  }
+  wifi_visible = 0;
+  wifi_password_mode = 0;
+  XUngrabKeyboard(dpy, CurrentTime);
+  if (wifi_win != None) {
+    XUnmapWindow(dpy, wifi_win);
+  }
+  drawbars();
+}
+
+static void wifi_popup_toggle(Monitor *m) {
+  if (wifi_visible) {
+    wifi_popup_close();
+  } else {
+    wifi_popup_open(m ? m : selmon);
+  }
+}
+
+static int wifi_handle_keypress(XKeyEvent *ev) {
+  char buf[64];
+  KeySym keysym = NoSymbol;
+  int len;
+
+  if (!wifi_visible) {
+    return 0;
+  }
+
+  len = XLookupString(ev, buf, sizeof(buf), &keysym, NULL);
+
+  if (keysym == XK_Escape) {
+    if (wifi_password_mode) {
+      wifi_password_mode = 0;
+      wifi_popup_position(wifi_mon);
+      wifi_popup_draw();
+    } else {
+      wifi_popup_close();
+    }
+    return 1;
+  }
+
+  if (wifi_password_mode) {
+    if (keysym == XK_Return || keysym == XK_KP_Enter) {
+      wifi_start_connect(wifi_password_ssid, wifi_password_query);
+      wifi_popup_draw();
+      return 1;
+    }
+    if (keysym == XK_BackSpace) {
+      if (wifi_password_query_len > 0) {
+        wifi_password_query[--wifi_password_query_len] = '\0';
+        wifi_popup_draw();
+      }
+      return 1;
+    }
+    {
+      int i;
+      int changed = 0;
+      for (i = 0; i < len; i++) {
+        if (!isprint((unsigned char)buf[i])) {
+          continue;
+        }
+        if (wifi_password_query_len + 1 >= sizeof(wifi_password_query)) {
+          break;
+        }
+        wifi_password_query[wifi_password_query_len++] = buf[i];
+        wifi_password_query[wifi_password_query_len] = '\0';
+        changed = 1;
+      }
+      if (changed) {
+        wifi_popup_draw();
+      }
+    }
+    return 1;
+  }
+
+  if (!wifi_blocked && wifi_networks_len > 0) {
+    size_t shown = wifi_networks_len < MAX_WIFI_LIST_ROWS ? wifi_networks_len : (size_t)MAX_WIFI_LIST_ROWS;
+
+    if (keysym == XK_Up) {
+      wifi_sel = (int)((wifi_sel - 1 + (int)shown) % (int)shown);
+      wifi_popup_draw();
+      return 1;
+    }
+    if (keysym == XK_Down) {
+      wifi_sel = (int)((wifi_sel + 1) % (int)shown);
+      wifi_popup_draw();
+      return 1;
+    }
+    if ((keysym == XK_Return || keysym == XK_KP_Enter) && !wifi_connecting) {
+      if (wifi_sel >= 0 && (size_t)wifi_sel < shown && !wifi_networks[wifi_sel].active) {
+        wifi_start_connect(wifi_networks[wifi_sel].ssid, NULL);
+        wifi_popup_position(wifi_mon);
+        wifi_popup_draw();
+      }
+      return 1;
+    }
+  }
+
+  return 1; /* swallow everything else while the popup is up */
+}
+
+static int wifi_handle_button(XButtonPressedEvent *ev) {
+  int row_y;
+
+  if (!wifi_visible) {
+    return 0;
+  }
+  if (ev->window != wifi_win) {
+    wifi_popup_close();
+    return 0;
+  }
+  if (ev->button != Button1) {
+    return 1;
+  }
+
+  if (ev->y < bh) {
+    /* Toggle row. Optimistic like the volume slider's fix: flip the local
+     * flag immediately for a snappy UI, and let the real state (read back
+     * via widget_update_wifi() on the normal periodic tick, or right here
+     * when turning back on) catch up. */
+    run_detached_shell(wifi_blocked ? "rfkill unblock wifi" : "rfkill block wifi");
+    wifi_blocked = !wifi_blocked;
+    wifi_status_msg[0] = '\0';
+    wifi_password_mode = 0;
+    if (!wifi_blocked) {
+      wifi_networks_len = 0;
+      wifi_start_scan();
+    }
+    wifi_popup_position(wifi_mon);
+    wifi_popup_draw();
+    drawbars();
+    return 1;
+  }
+
+  if (wifi_blocked || wifi_password_mode) {
+    return 1;
+  }
+
+  row_y = bh + 1;
+  {
+    size_t shown = wifi_networks_len < MAX_WIFI_LIST_ROWS ? wifi_networks_len : (size_t)MAX_WIFI_LIST_ROWS;
+    size_t i;
+    for (i = 0; i < shown; i++) {
+      if (ev->y >= row_y && ev->y < row_y + bh) {
+        wifi_sel = (int)i;
+        if (!wifi_networks[i].active && !wifi_connecting) {
+          wifi_start_connect(wifi_networks[i].ssid, NULL);
+          wifi_popup_position(wifi_mon);
+        }
+        wifi_popup_draw();
+        return 1;
+      }
+      row_y += bh;
+    }
+  }
+  return 1;
+}
+
+/* }}} wifi popup */
+
 /* {{{ desktop icons */
 
 static void get_desktop_dir(char *buf, size_t size) {
@@ -10540,6 +11168,11 @@ void cleanup(void) {
     XDestroyWindow(dpy, keybind_help_win);
     keybind_help_win = None;
   }
+  if (wifi_win != None) {
+    XDestroyWindow(dpy, wifi_win);
+    wifi_win = None;
+  }
+  wifi_job_reset();
   for (i = 0; i < projects_len; i++) {
     free(projects[i]);
   }
@@ -11162,6 +11795,10 @@ void expose(XEvent *e) {
     keybind_help_draw();
     return;
   }
+  if (wifi_visible && ev->window == wifi_win) {
+    wifi_popup_draw();
+    return;
+  }
   if (ev->window == deskwin) {
     desktop_draw();
     return;
@@ -11610,6 +12247,9 @@ void keypress(XEvent *e) {
   XKeyEvent *ev;
   ev = &e->xkey;
   if (keybind_help_visible && keybind_help_handle_keypress(ev)) {
+    return;
+  }
+  if (wifi_visible && wifi_handle_keypress(ev)) {
     return;
   }
   if (project_visible && project_handle_keypress(ev)) {
@@ -12338,6 +12978,12 @@ void run(void) {
         maxfd = dbus_fd;
       }
     }
+    if (wifi_job_fd >= 0) {
+      FD_SET(wifi_job_fd, &readfds);
+      if (wifi_job_fd > maxfd) {
+        maxfd = wifi_job_fd;
+      }
+    }
     if (notif_anim_state != SidebarAnimIdle || todo_anim_state != SidebarAnimIdle ||
         agent_anim_state != SidebarAnimIdle) {
       tv.tv_sec = 0;
@@ -12365,6 +13011,7 @@ void run(void) {
     notif_sidebar_advance_animation();
     todo_sidebar_advance_animation();
     agent_sidebar_advance_animation();
+    wifi_job_poll();
     while (XPending(dpy)) {
       XNextEvent(dpy, &ev);
       if (handler[ev.type]) {
