@@ -1297,6 +1297,7 @@ static void projects_move_to_front(size_t idx);
 static void project_collapse_home(const char *path, char *out, size_t outsz);
 static int project_has_running_agent(const char *path);
 static void project_basename(const char *path, char *out, size_t outsz);
+static void project_workspace_name(int n, char *out, size_t outsz);
 static int project_find_for_path(const char *path);
 static void project_label_for_path(const char *path, char *out, size_t outsz);
 static int project_index_for_workspace_name(const char *wsname);
@@ -1544,7 +1545,6 @@ static void tagnth(const Arg *arg);
 static Client *wintoclient(Window w);
 static Client *wintosystrayicon(Window w);
 static Workspace *workspace_by_index(size_t index);
-static size_t workspace_count_visible(void);
 static size_t workspace_ensure(const char *name);
 static size_t workspace_find(const char *name);
 static size_t focus_workspace_by_name(Monitor *m, const char *name);
@@ -2615,25 +2615,15 @@ static int widget_git_int_after(const char *s, const char *marker) {
 }
 
 static void widget_update_git(void) {
-  const char *wsname = NULL;
-  int idx;
   char out[512];
   char *nl;
   char *line;
   char header[400];
   const char *argv_status[] = {"git", "status", "--porcelain=v1", "--branch", NULL};
 
-  if (!selmon) {
+  if (!selmon || active_project_path[0] == '\0') {
     git_valid = 0;
     git_project_path[0] = '\0';
-    return;
-  }
-  wsname = workspace_name_from_mask(selmon->tagset[selmon->seltags]);
-  idx = wsname ? project_index_for_workspace_name(wsname) : -1;
-  if (idx < 0) {
-    git_valid = 0;
-    git_project_path[0] = '\0';
-    git_last_project_path[0] = '\0';
     return;
   }
 
@@ -2642,11 +2632,11 @@ static void widget_update_git(void) {
    * single call, but there's no need to pay even the bounded cost every
    * 2s tick. Refresh immediately when the project changes (so switching
    * feels instant) and otherwise only every ~10s. */
-  if (strcmp(projects[idx], git_last_project_path) == 0 && widget_tick < git_next_tick) {
+  if (strcmp(active_project_path, git_last_project_path) == 0 && widget_tick < git_next_tick) {
     return;
   }
   git_next_tick = widget_tick + 5; /* ~10s at the 2s tick cadence */
-  snprintf(git_last_project_path, sizeof(git_last_project_path), "%s", projects[idx]);
+  snprintf(git_last_project_path, sizeof(git_last_project_path), "%s", active_project_path);
 
   git_valid = 0;
   git_branch[0] = '\0';
@@ -2655,7 +2645,7 @@ static void widget_update_git(void) {
   git_behind = 0;
   git_project_path[0] = '\0';
 
-  if (!run_capture_argv(projects[idx], (char *const *)argv_status, out, sizeof(out), 300)) {
+  if (!run_capture_argv(active_project_path, (char *const *)argv_status, out, sizeof(out), 300)) {
     return; /* not a git repo, git isn't installed, or it timed out */
   }
 
@@ -2685,7 +2675,7 @@ static void widget_update_git(void) {
     *end = '\0';
     snprintf(git_branch, sizeof(git_branch), "%s", line);
   }
-  snprintf(git_project_path, sizeof(git_project_path), "%s", projects[idx]);
+  snprintf(git_project_path, sizeof(git_project_path), "%s", active_project_path);
   git_valid = 1;
 }
 
@@ -3827,10 +3817,13 @@ static const Button buttons[] = {
     {ClkClientWin, MODKEY, Button1, movemouse, {0}},
     {ClkClientWin, MODKEY, Button2, togglefloating, {0}},
     {ClkClientWin, MODKEY, Button3, resizemouse, {0}},
-    {ClkTagBar, 0, Button1, view, {0}},
-    {ClkTagBar, 0, Button3, toggleview, {0}},
-    {ClkTagBar, MODKEY, Button1, tag, {0}},
-    {ClkTagBar, MODKEY, Button3, toggletag, {0}},
+    /* *nth, not the plain mask-based versions -- buttonpress() hands these
+     * arg.i = the clicked slot (0-8) within the active project's own 9,
+     * same convention WORKSPACEKEYS uses for Mod+1-9. */
+    {ClkTagBar, 0, Button1, viewnth, {0}},
+    {ClkTagBar, 0, Button3, toggleviewnth, {0}},
+    {ClkTagBar, MODKEY, Button1, tagnth, {0}},
+    {ClkTagBar, MODKEY, Button3, toggletagnth, {0}},
     {ClkClock, 0, Button1, calendar_toggle_key, {0}},
 };
 
@@ -3910,8 +3903,6 @@ static const char *workspace_name_from_mask(WorkspaceMask mask) {
   }
   return "";
 }
-
-static size_t workspace_count_visible(void) { return workspaces_len; }
 
 static size_t workspace_find(const char *name) {
   size_t i;
@@ -4425,29 +4416,39 @@ void buttonpress(XEvent *e) {
     char project_label[288];
     char base[256];
 
-    i = 0;
-    /* Must match drawbar()'s layout exactly: project label, then tags,
-     * starting past it rather than at the left edge. */
+    /* Must match drawbar()'s layout exactly: project label, then the
+     * active project's 9 fixed slots ("1".."9", always all of them,
+     * whether or not each has actually been created yet), starting past
+     * the label rather than at the left edge. */
     project_basename(active_project_path, base, sizeof(base));
     snprintf(project_label, sizeof(project_label), "%s %s", icon_projects, base);
     x = (int)TEXTW(project_label);
     statusw = TEXTW(stext);
     trayw = (showsystray && systray && selmon == m) ? getsystraywidth() : 0;
     clockw = (unsigned int)clock_reserved_w;
-    while (i < workspace_count_visible()) {
-      Workspace *ws = workspace_by_index(i);
-      if (!ws) {
-        break;
-      }
-      x += TEXTW(ws->name);
+    i = 10; /* sentinel: no slot matched */
+    for (size_t n = 1; n <= 9; n++) {
+      char label[4];
+      snprintf(label, sizeof(label), "%zu", n);
+      x += TEXTW(label);
       if (ev->x < x) {
+        i = n - 1; /* 0-8, same convention as WORKSPACEKEYS' arg.i */
         break;
       }
-      i++;
     }
-    if (i < workspace_count_visible()) {
+    if (i < 9) {
+      char name[300];
+      size_t idx;
+
       click = ClkTagBar;
-      arg.ull = workspace_mask_from_index(i);
+      arg.i = (int)i;
+      /* Materialize the slot now, mainly so the lua_buttons[] path below
+       * has a real mask to turn back into a name -- the *nth function
+       * this ultimately dispatches to (see the buttons[] table) will just
+       * find it already there via its own workspace_ensure() call. */
+      project_workspace_name((int)i + 1, name, sizeof(name));
+      idx = workspace_ensure(name);
+      arg.ull = idx == SIZE_MAX ? 0 : workspace_mask_from_index(idx);
     } else if (ev->x < x + TEXTW(selmon->ltsymbol)) {
       click = ClkLtSymbol;
     } else if (ev->x > selmon->ww - (int)clockw) {
@@ -5431,18 +5432,15 @@ static int lua_mwm_list_workspaces(lua_State *L) {
  * current workspace isn't a known project. Lets an agent-status hook (or an
  * agent itself, via mwm-cli) ask "what project am I in". */
 static int lua_mwm_current_project(lua_State *L) {
-  const char *wsname = NULL;
-  int idx;
-
-  if (selmon) {
-    wsname = workspace_name_from_mask(selmon->tagset[selmon->seltags]);
-  }
-  idx = wsname ? project_index_for_workspace_name(wsname) : -1;
-  if (idx < 0) {
+  /* active_project_path is the authoritative "which project am I in" now
+   * -- decoupled from whatever workspace/tag happens to be in view (see
+   * project_set_active()), and always set (defaults to $HOME), so this
+   * never actually returns nil in practice anymore. */
+  if (active_project_path[0] == '\0') {
     lua_pushnil(L);
     return 1;
   }
-  lua_pushstring(L, projects[idx]);
+  lua_pushstring(L, active_project_path);
   return 1;
 }
 
@@ -8718,6 +8716,33 @@ static void project_basename(const char *path, char *out, size_t outsz) {
   snprintf(out, outsz, "%s", base ? base + 1 : tmp);
 }
 
+/* "<active project>/<n>" -- the underlying workspace name for numbered
+ * slot n (1-9) of whichever project is currently active. This is what
+ * nests each project's own 9 numbered workspaces under it instead of
+ * every project sharing one flat global set: switching projects changes
+ * what active_project_path resolves to, so the *same* Mod+1 lands on a
+ * different real workspace depending on which project you're in. Only the
+ * "n" part is ever shown in the bar (see the tag-rendering loop in
+ * drawbar()) -- this qualified name is purely the internal handle. */
+static void project_workspace_name(int n, char *out, size_t outsz) {
+  char base[256];
+  project_basename(active_project_path, base, sizeof(base));
+  snprintf(out, outsz, "%s/%d", base, n);
+}
+
+/* The mask for slot n (1-9) of the active project's workspaces, or 0 if
+ * that slot hasn't been created yet (never visited, or GC'd empty after
+ * switching away) -- see project_workspace_name(). A 0 mask is safe to AND
+ * against occ/urg/tagset elsewhere: it just never matches, same as "empty
+ * and not selected", which is exactly right for a slot that doesn't exist. */
+static WorkspaceMask project_workspace_slot_mask(int n) {
+  char name[300];
+  size_t idx;
+  project_workspace_name(n, name, sizeof(name));
+  idx = workspace_find(name);
+  return idx == SIZE_MAX ? 0 : workspace_mask_from_index(idx);
+}
+
 /* Longest-prefix match of `path` against the saved project list, e.g. an
  * agent cwd of ~/code/foo/sub matches project ~/code/foo. Returns -1 if no
  * project contains this path. */
@@ -8799,9 +8824,15 @@ static int project_index_for_workspace_name(const char *wsname) {
  * after -- same auto-GC as any other workspace). This is what makes
  * "switch to a project" mean "scope to that project's workspace" instead of
  * just opening a terminal in its directory. */
+/* Switches to slot 1 of `path`'s own 9 workspaces -- built straight from
+ * `path` rather than via project_workspace_name() (which reads the
+ * active_project_path global) since this runs as part of *becoming* the
+ * active project, before that global necessarily reflects it yet. */
 static void project_switch_workspace(Monitor *m, const char *path) {
-  char wsname[256];
-  project_basename(path, wsname, sizeof(wsname));
+  char base[256];
+  char wsname[300];
+  project_basename(path, base, sizeof(base));
+  snprintf(wsname, sizeof(wsname), "%s/1", base);
   focus_workspace_by_name(m, wsname);
 }
 
@@ -8925,18 +8956,14 @@ static void project_launch(int with_agent) {
 }
 
 static void widget_format_projects(char *buf, size_t size) {
-  const char *wsname = NULL;
+  char base[256];
 
-  if (selmon) {
-    wsname = workspace_name_from_mask(selmon->tagset[selmon->seltags]);
-  }
-  if (wsname && project_index_for_workspace_name(wsname) >= 0) {
-    snprintf(buf, size, "%s %s", icon_projects, wsname);
-  } else if (projects_len > 0) {
-    snprintf(buf, size, "%s %zu", icon_projects, projects_len);
-  } else {
+  if (active_project_path[0] == '\0') {
     snprintf(buf, size, "%s", icon_projects);
+    return;
   }
+  project_basename(active_project_path, base, sizeof(base));
+  snprintf(buf, size, "%s %s", icon_projects, base);
 }
 
 /* Subsequence fuzzy match a la fzf: -1 if needle isn't a subsequence of hay,
@@ -12300,27 +12327,28 @@ void drawbar(Monitor *m) {
       urg |= c->tags;
     }
   }
+  /* Always all 9 slots of the active project, in order -- not
+   * workspaces[] directly, since a slot that hasn't been visited yet (or
+   * got GC'd empty) has no entry there at all. project_workspace_slot_mask
+   * returns 0 for those, which reads as "empty, unselected" below exactly
+   * as it should. */
   x = project_labelw;
-  for (i = 0; i < workspace_count_visible(); i++) {
-    WorkspaceMask mask = workspace_mask_from_index(i);
-    Workspace *ws = workspace_by_index(i);
-    if (!ws) {
-      continue;
-    }
-    w = TEXTW(ws->name);
+  for (i = 1; i <= 9; i++) {
+    WorkspaceMask mask = project_workspace_slot_mask((int)i);
+    char label[4];
+    snprintf(label, sizeof(label), "%d", (int)i);
+    w = TEXTW(label);
     drw_setscheme(drw,
                   scheme[m->tagset[m->seltags] & mask ? SchemeSel : SchemeNorm]);
-    drw_text(drw, x, 0, w, bh, lrpad / 2, ws->name, urg & mask);
-    if (occ & mask) {
+    drw_text(drw, x, 0, w, bh, lrpad / 2, label, mask && (urg & mask));
+    if (mask && (occ & mask)) {
       drw_rect(drw, x + boxs, boxs, boxw, boxw,
                m == selmon && selmon->sel && (selmon->sel->tags & mask),
                urg & mask);
     }
     x += w;
   }
-  if (workspace_count_visible() > 0) {
-    draw_vdivider(x, bh / 4, bh - bh / 2);
-  }
+  draw_vdivider(x, bh / 4, bh - bh / 2);
   w = TEXTW(m->ltsymbol);
   drw_setscheme(drw, scheme[SchemeNorm]);
   x = drw_text(drw, x, 0, w, bh, lrpad / 2, m->ltsymbol, 0);
@@ -14211,7 +14239,6 @@ void setup(void) {
   calendar_w = 7 * bh;
   load_theme_mode_state();
   set_default_bar_theme();
-  workspace_set_defaults();
   load_theme_from_lua();
   /* A previously picked named theme wins over both of the above -- it's
    * the user's last explicit choice via the picker, not a fallback. */
@@ -14230,6 +14257,17 @@ void setup(void) {
   updatewidgets();
   widgets_last_refresh = time(NULL);
   updategeom();
+  /* Every project gets its own set of 9 numbered workspaces, created lazily
+   * as they're actually visited (see viewnth()) -- but a monitor needs
+   * *some* workspace selected from the moment it exists, or a client that
+   * opens before the user ever presses Mod+1 would land on tags=0 and
+   * never become visible. This creates just slot 1 of the active
+   * ("default") project, not all 9. */
+  {
+    char name[300];
+    project_workspace_name(1, name, sizeof(name));
+    focus_workspace_by_name(selmon, name);
+  }
   /* init atoms */
   utf8string = XInternAtom(dpy, "UTF8_STRING", False);
   xatom[Manager] = XInternAtom(dpy, "MANAGER", False);
@@ -14493,18 +14531,56 @@ void toggleview(const Arg *arg) {
 }
 // }}} void toggleview(const Arg *arg)
 
+/* arg->i is 0-8 (from WORKSPACEKEYS/the tag-bar click handling), naming a
+ * slot within the *active project's own* set of 9 -- see
+ * project_workspace_name(). Lazily created via workspace_ensure() the
+ * first time it's actually navigated to or tagged, same as any other
+ * workspace; nothing pre-creates all 9 up front. */
 void tagnth(const Arg *arg) {
-  Arg next = {.ull = workspace_mask_from_index((size_t)arg->i)};
+  char name[300];
+  size_t idx;
+  Arg next = {0};
+
+  if (!selmon->sel) {
+    return;
+  }
+  project_workspace_name(arg->i + 1, name, sizeof(name));
+  idx = workspace_ensure(name);
+  if (idx == SIZE_MAX) {
+    return;
+  }
+  next.ull = workspace_mask_from_index(idx);
   tag(&next);
 }
 
 void toggletagnth(const Arg *arg) {
-  Arg next = {.ull = workspace_mask_from_index((size_t)arg->i)};
+  char name[300];
+  size_t idx;
+  Arg next = {0};
+
+  if (!selmon->sel) {
+    return;
+  }
+  project_workspace_name(arg->i + 1, name, sizeof(name));
+  idx = workspace_ensure(name);
+  if (idx == SIZE_MAX) {
+    return;
+  }
+  next.ull = workspace_mask_from_index(idx);
   toggletag(&next);
 }
 
 void toggleviewnth(const Arg *arg) {
-  Arg next = {.ull = workspace_mask_from_index((size_t)arg->i)};
+  char name[300];
+  size_t idx;
+  Arg next = {0};
+
+  project_workspace_name(arg->i + 1, name, sizeof(name));
+  idx = workspace_ensure(name);
+  if (idx == SIZE_MAX) {
+    return;
+  }
+  next.ull = workspace_mask_from_index(idx);
   toggleview(&next);
 }
 
@@ -15016,8 +15092,9 @@ void view(const Arg *arg) {
 // }}} void view(const Arg *arg)
 
 void viewnth(const Arg *arg) {
-  Arg next = {.ull = workspace_mask_from_index((size_t)arg->i)};
-  view(&next);
+  char name[300];
+  project_workspace_name(arg->i + 1, name, sizeof(name));
+  focus_workspace_by_name(selmon, name);
 }
 
 // {{{ Client *wintoclient(Window w)
