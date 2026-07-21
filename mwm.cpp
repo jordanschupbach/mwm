@@ -3480,7 +3480,7 @@ static const int topbar = 1;            /* 0 means bottom bar */
 /* Second entry is a fallback used only for glyphs missing from the primary
  * font -- widget icons live in the Nerd Font Private Use Area ranges, so a
  * Nerd Font must be installed for them to render instead of tofu boxes. */
-static const char *fonts[] = {"monospace:size=12", "UbuntuMono Nerd Font Mono:size=12"};
+static const char *fonts[] = {"monospace:size=20", "UbuntuMono Nerd Font Mono:size=20"};
 static const char dmenufont[] = "monospace:size=10";
 static const char default_col_gray1[] = "#222222";
 static const char default_col_gray2[] = "#444444";
@@ -8152,11 +8152,11 @@ static int project_resolve_selected_path(char *out, size_t outsz) {
 
 /* Enter/Ctrl+Enter from the picker. Three cases, in order: the selected row
  * is an app -- just launch it, with_agent doesn't apply. The selected row
- * (or the typed query) is a project directory -- switch to its workspace
- * and open a terminal there, with a coding agent already running in it
- * when with_agent is set. Otherwise -- nothing matched and it's not a
- * directory either -- run the typed query as a shell command, the same
- * fallback dmenu/rofi's "run" mode offers. */
+ * (or the typed query) is a project directory -- switch to its workspace,
+ * opening a terminal with a coding agent running in it only when with_agent
+ * is set (Ctrl+Enter); plain Enter just switches. Otherwise -- nothing
+ * matched and it's not a directory either -- run the typed query as a shell
+ * command, the same fallback dmenu/rofi's "run" mode offers. */
 static void project_launch(int with_agent) {
   Arg a = {0};
   const char *argv_term[5];
@@ -8198,17 +8198,15 @@ static void project_launch(int with_agent) {
 
   project_switch_workspace(project_mon ? project_mon : selmon, path_buf);
 
-  argv_term[0] = terminal_cmd;
-  argv_term[1] = "-d";
-  argv_term[2] = path_buf;
   if (with_agent) {
+    argv_term[0] = terminal_cmd;
+    argv_term[1] = "-d";
+    argv_term[2] = path_buf;
     argv_term[3] = agent_launch_command;
     argv_term[4] = NULL;
-  } else {
-    argv_term[3] = NULL;
+    a.v = argv_term;
+    spawn(&a);
   }
-  a.v = argv_term;
-  spawn(&a);
   project_close();
 }
 
