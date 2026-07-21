@@ -2743,7 +2743,96 @@ static const char icon_media[] = "\U0000F001";
 static const char icon_keyboard[] = "\U0000F11C";
 static const char icon_firefox[] = "\U0000F269";
 static const char icon_terminal[] = "\U0000F120";
+static const char icon_info[] = "\U0000F05A";              /* fa-info_circle */
+static const char icon_layout_tile[] = "\U0000F00A";       /* fa-th */
+static const char icon_layout_floating[] = "\U0000F2D2";   /* fa-window_restore */
+static const char icon_layout_monocle[] = "\U0000F2D0";    /* fa-window_maximize */
+static const char icon_layout_other[] = "\U0000F009";      /* fa-th_large (lua layouts) */
+static const char icon_os_tux[] = "\U0000F31A";            /* linux-tux (generic fallback) */
+static const char icon_os_nixos[] = "\U0000F313";          /* linux-nixos */
+static const char icon_os_archlinux[] = "\U0000F303";      /* linux-archlinux */
+static const char icon_os_ubuntu[] = "\U0000F31B";         /* linux-ubuntu */
+static const char icon_os_fedora[] = "\U0000F30A";         /* linux-fedora */
+static const char icon_os_debian[] = "\U0000F306";         /* linux-debian */
+static const char icon_os_opensuse[] = "\U0000F314";       /* linux-opensuse */
+static const char icon_os_void[] = "\U0000F32E";           /* linux-void */
+static const char icon_os_manjaro[] = "\U0000F312";        /* linux-manjaro */
 /* }}} widget icons */
+
+/* {{{ corner buttons (OS logo + layout symbol; see drawleftbar/drawrightbar) */
+/* Reads /etc/os-release once and caches the matching distro glyph so the
+ * bottom-left corner shows the right logo without hardcoding one distro. */
+static const char *os_logo_glyph(void) {
+  static const char *cached = NULL;
+  static int initialized = 0;
+  char id[64] = "";
+  FILE *f;
+  char line[256];
+
+  if (initialized) {
+    return cached;
+  }
+  initialized = 1;
+  cached = icon_os_tux;
+
+  f = fopen("/etc/os-release", "r");
+  if (f) {
+    while (fgets(line, sizeof line, f)) {
+      if (!strncmp(line, "ID=", 3)) {
+        char *v = line + 3;
+        size_t len;
+        if (*v == '"') {
+          v++;
+        }
+        len = strcspn(v, "\"\n");
+        if (len >= sizeof id) {
+          len = sizeof id - 1;
+        }
+        memcpy(id, v, len);
+        id[len] = '\0';
+        break;
+      }
+    }
+    fclose(f);
+  }
+
+  if (!strcmp(id, "nixos")) {
+    cached = icon_os_nixos;
+  } else if (!strcmp(id, "arch")) {
+    cached = icon_os_archlinux;
+  } else if (!strcmp(id, "ubuntu")) {
+    cached = icon_os_ubuntu;
+  } else if (!strcmp(id, "fedora")) {
+    cached = icon_os_fedora;
+  } else if (!strcmp(id, "debian")) {
+    cached = icon_os_debian;
+  } else if (!strncmp(id, "opensuse", 8)) {
+    cached = icon_os_opensuse;
+  } else if (!strcmp(id, "void")) {
+    cached = icon_os_void;
+  } else if (!strcmp(id, "manjaro")) {
+    cached = icon_os_manjaro;
+  }
+
+  return cached;
+}
+
+/* Maps a layout's ltsymbol (see setlayout()) to a corner-button glyph; any
+ * symbol outside the three compiled-in layouts (Lua layouts included) falls
+ * back to a generic layout icon. */
+static const char *layout_symbol_glyph(const char *ltsymbol) {
+  if (!strcmp(ltsymbol, "[]=")) {
+    return icon_layout_tile;
+  }
+  if (!strcmp(ltsymbol, "><>")) {
+    return icon_layout_floating;
+  }
+  if (!strcmp(ltsymbol, "[M]")) {
+    return icon_layout_monocle;
+  }
+  return icon_layout_other;
+}
+/* }}} corner buttons */
 
 /* MPRIS via playerctl -- it already does the DBus property/variant
  * unpacking for us, so there's no player running, or playerctl isn't
@@ -12082,8 +12171,8 @@ void configurenotify(XEvent *e) {
         }
         XMoveResizeWindow(dpy, m->barwin, m->wx, m->by, m->ww, bh);
         XMoveResizeWindow(dpy, m->widgetbarwin, m->wx, m->bby, m->ww, bh);
-        XMoveResizeWindow(dpy, m->leftbarwin, m->lbx, m->wy, vbarw, m->wh);
-        XMoveResizeWindow(dpy, m->rightbarwin, m->rbx, m->wy, vbarw, m->wh);
+        XMoveResizeWindow(dpy, m->leftbarwin, m->lbx, m->my, vbarw, m->mh);
+        XMoveResizeWindow(dpy, m->rightbarwin, m->rbx, m->my, vbarw, m->mh);
       }
       if (slider_popup_visible && slider_popup_mon) {
         widget_position_slider_popup(slider_popup_mon);
@@ -12510,8 +12599,13 @@ static int dockbar_icon_lpad(const char *icon) {
   return lpad > 0 ? lpad : 0;
 }
 
+/* leftbarwin now spans the full monitor height (m->my..m->my+m->mh), not
+ * just the space between the two horizontal bars, so it can also draw the
+ * top-left and bottom-left corner buttons that sit in the bh-tall strips
+ * the top/bottom bars leave empty (they're inset by vbarw on each side). */
 void drawleftbar(Monitor *m) {
   static const char *const icons[] = {icon_firefox, icon_terminal};
+  const char *os_icon = os_logo_glyph();
   size_t i;
 
   if (!m->showbar) {
@@ -12519,19 +12613,30 @@ void drawleftbar(Monitor *m) {
   }
 
   drw_setscheme(drw, scheme[SchemeNorm]);
-  drw_rect(drw, 0, 0, vbarw, m->wh, 1, 1);
+  drw_rect(drw, 0, 0, vbarw, m->mh, 1, 1);
+
+  /* top-left corner: project/app picker, same button as the widget-bar rocket */
+  drw_setscheme(drw, scheme[project_visible ? SchemeSel : SchemeNorm]);
+  drw_text(drw, 0, 0, vbarw, bh, dockbar_icon_lpad(icon_launcher), icon_launcher, 0);
+  draw_hdivider(0, bh, vbarw);
 
   for (i = 0; i < LENGTH(icons); i++) {
-    int y = (int)i * vbarw;
+    int y = bh + (int)i * vbarw;
     drw_setscheme(drw, scheme[SchemeNorm]);
     drw_text(drw, 0, y, vbarw, vbarw, dockbar_icon_lpad(icons[i]), icons[i], 0);
     if (i > 0) {
       draw_hdivider(0, y, vbarw);
     }
   }
-  draw_vdivider(vbarw - 1, 0, m->wh);
 
-  drw_map(drw, m->leftbarwin, 0, 0, vbarw, m->wh);
+  /* bottom-left corner: OS logo (distro-detected, see os_logo_glyph()) */
+  drw_setscheme(drw, scheme[SchemeNorm]);
+  draw_hdivider(0, m->mh - bh, vbarw);
+  drw_text(drw, 0, m->mh - bh, vbarw, bh, dockbar_icon_lpad(os_icon), os_icon, 0);
+
+  draw_vdivider(vbarw - 1, 0, m->mh);
+
+  drw_map(drw, m->leftbarwin, 0, 0, vbarw, m->mh);
 }
 // }}} void drawleftbar(Monitor *m)
 
@@ -12541,11 +12646,14 @@ void drawleftbar(Monitor *m) {
  * were there (unread count / incomplete count / needs-input), just as a
  * plain icon rather than icon+count text since these cells are square and
  * narrow. */
+/* rightbarwin now spans the full monitor height (m->my..m->my+m->mh) for
+ * the same reason leftbarwin does -- see the comment on drawleftbar(). */
 void drawrightbar(Monitor *m) {
   struct {
     const char *icon;
     int highlighted;
   } rows[3];
+  const char *layout_icon;
   size_t i;
 
   if (!m->showbar) {
@@ -12560,25 +12668,39 @@ void drawrightbar(Monitor *m) {
   rows[2].highlighted = agent_needs_input > 0;
 
   drw_setscheme(drw, scheme[SchemeNorm]);
-  drw_rect(drw, 0, 0, vbarw, m->wh, 1, 1);
+  drw_rect(drw, 0, 0, vbarw, m->mh, 1, 1);
+
+  /* top-right corner: current dynamic layout, click to cycle (see
+   * cyclelayout(), same action as Mod+Ctrl+space / Mod+Ctrl+Shift+space) */
+  layout_icon = layout_symbol_glyph(m->ltsymbol);
+  drw_setscheme(drw, scheme[SchemeNorm]);
+  drw_text(drw, 0, 0, vbarw, bh, dockbar_icon_lpad(layout_icon), layout_icon, 0);
+  draw_hdivider(0, bh, vbarw);
 
   for (i = 0; i < LENGTH(rows); i++) {
-    int y = (int)i * vbarw;
+    int y = bh + (int)i * vbarw;
     drw_setscheme(drw, scheme[rows[i].highlighted ? SchemeSel : SchemeNorm]);
     drw_text(drw, 0, y, vbarw, vbarw, dockbar_icon_lpad(rows[i].icon), rows[i].icon, 0);
     if (i > 0) {
       draw_hdivider(0, y, vbarw);
     }
   }
-  draw_vdivider(0, 0, m->wh);
 
-  drw_map(drw, m->rightbarwin, 0, 0, vbarw, m->wh);
+  /* bottom-right corner: info -> keybindings help popup (same as Mod+s) */
+  drw_setscheme(drw, scheme[keybind_help_visible ? SchemeSel : SchemeNorm]);
+  draw_hdivider(0, m->mh - bh, vbarw);
+  drw_text(drw, 0, m->mh - bh, vbarw, bh, dockbar_icon_lpad(icon_info), icon_info, 0);
+
+  draw_vdivider(0, 0, m->mh);
+
+  drw_map(drw, m->rightbarwin, 0, 0, vbarw, m->mh);
 }
 // }}} void drawrightbar(Monitor *m)
 
-/* Both dock bars share the same row layout (vbarw-tall cells, top-down),
- * so hit-testing is just ev->y / vbarw -- this is that shared lookup,
- * returning -1 past the last row. */
+/* Both dock bars share the same row layout below the top corner cell
+ * (vbarw-tall cells, top-down), so hit-testing is just ev->y / vbarw --
+ * this is that shared lookup, returning -1 past the last row. Callers pass
+ * ev->y already relative to the bottom of the top corner cell (y - bh). */
 static int dockbar_row_at(int y, size_t nrows) {
   int row = y / vbarw;
   if (row < 0 || (size_t)row >= nrows) {
@@ -12594,10 +12716,21 @@ int leftbar_handle_button(Monitor *m, XButtonPressedEvent *ev) {
   if (!m || ev->window != m->leftbarwin) {
     return 0;
   }
+  /* top-left corner: project/app picker */
+  if (ev->y < bh) {
+    if (ev->button == Button1) {
+      project_toggle(m, PickerModeCombined);
+    }
+    return 1;
+  }
+  /* bottom-left corner: OS logo, decorative only */
+  if (ev->y >= m->mh - bh) {
+    return 1;
+  }
   if (ev->button != Button1) {
     return 1;
   }
-  row = dockbar_row_at(ev->y, 2);
+  row = dockbar_row_at(ev->y - bh, 2);
   if (row == 0) {
     a.v = firefoxcmd;
     spawn(&a);
@@ -12609,15 +12742,35 @@ int leftbar_handle_button(Monitor *m, XButtonPressedEvent *ev) {
 }
 
 int rightbar_handle_button(Monitor *m, XButtonPressedEvent *ev) {
+  Arg a;
   int row;
 
   if (!m || ev->window != m->rightbarwin) {
     return 0;
   }
+  /* top-right corner: cycle the dynamic layout (Button1 forward, Button3
+   * back), same as Mod+Ctrl+space / Mod+Ctrl+Shift+space. */
+  if (ev->y < bh) {
+    if (ev->button == Button1) {
+      a.i = +1;
+      cyclelayout(&a);
+    } else if (ev->button == Button3) {
+      a.i = -1;
+      cyclelayout(&a);
+    }
+    return 1;
+  }
+  /* bottom-right corner: info -> keybindings help popup */
+  if (ev->y >= m->mh - bh) {
+    if (ev->button == Button1) {
+      keybind_help_toggle(m);
+    }
+    return 1;
+  }
   if (ev->button != Button1) {
     return 1;
   }
-  row = dockbar_row_at(ev->y, 3);
+  row = dockbar_row_at(ev->y - bh, 3);
   if (row == 0) {
     notif_sidebar_toggle(m);
   } else if (row == 1) {
@@ -14475,10 +14628,10 @@ void togglebar(const Arg *arg) {
                     bh);
   XMoveResizeWindow(dpy, selmon->widgetbarwin, selmon->wx, selmon->bby,
                     selmon->ww, bh);
-  XMoveResizeWindow(dpy, selmon->leftbarwin, selmon->lbx, selmon->wy, vbarw,
-                    selmon->wh);
-  XMoveResizeWindow(dpy, selmon->rightbarwin, selmon->rbx, selmon->wy, vbarw,
-                    selmon->wh);
+  XMoveResizeWindow(dpy, selmon->leftbarwin, selmon->lbx, selmon->my, vbarw,
+                    selmon->mh);
+  XMoveResizeWindow(dpy, selmon->rightbarwin, selmon->rbx, selmon->my, vbarw,
+                    selmon->mh);
   updatesystray();
   arrange(selmon);
 }
@@ -14671,7 +14824,7 @@ void updatebars(void) {
       }
       if (!m->leftbarwin) {
         m->leftbarwin = XCreateWindow(
-            dpy, root, m->lbx, m->wy, vbarw, m->wh, 0, DefaultDepth(dpy, screen),
+            dpy, root, m->lbx, m->my, vbarw, m->mh, 0, DefaultDepth(dpy, screen),
             CopyFromParent, DefaultVisual(dpy, screen),
             CWOverrideRedirect | CWBackPixmap | CWEventMask, &wa);
         XDefineCursor(dpy, m->leftbarwin, cursor[CurNormal]->cursor);
@@ -14680,7 +14833,7 @@ void updatebars(void) {
       }
       if (!m->rightbarwin) {
         m->rightbarwin = XCreateWindow(
-            dpy, root, m->rbx, m->wy, vbarw, m->wh, 0, DefaultDepth(dpy, screen),
+            dpy, root, m->rbx, m->my, vbarw, m->mh, 0, DefaultDepth(dpy, screen),
             CopyFromParent, DefaultVisual(dpy, screen),
             CWOverrideRedirect | CWBackPixmap | CWEventMask, &wa);
         XDefineCursor(dpy, m->rightbarwin, cursor[CurNormal]->cursor);
@@ -14698,11 +14851,11 @@ void updatebars(void) {
         CopyFromParent, DefaultVisual(dpy, screen),
         CWOverrideRedirect | CWBackPixmap | CWEventMask, &wa);
     m->leftbarwin = XCreateWindow(
-        dpy, root, m->lbx, m->wy, vbarw, m->wh, 0, DefaultDepth(dpy, screen),
+        dpy, root, m->lbx, m->my, vbarw, m->mh, 0, DefaultDepth(dpy, screen),
         CopyFromParent, DefaultVisual(dpy, screen),
         CWOverrideRedirect | CWBackPixmap | CWEventMask, &wa);
     m->rightbarwin = XCreateWindow(
-        dpy, root, m->rbx, m->wy, vbarw, m->wh, 0, DefaultDepth(dpy, screen),
+        dpy, root, m->rbx, m->my, vbarw, m->mh, 0, DefaultDepth(dpy, screen),
         CopyFromParent, DefaultVisual(dpy, screen),
         CWOverrideRedirect | CWBackPixmap | CWEventMask, &wa);
     XDefineCursor(dpy, m->barwin, cursor[CurNormal]->cursor);
