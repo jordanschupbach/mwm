@@ -50,13 +50,18 @@ mwm.rule({ class = "Pavucontrol", floating = true })
 -- knows (Return, q, F1, XF86AudioMute, ...). These stack with (don't
 -- replace) mwm's compiled-in bindings; re-running this on a config reload
 -- (Mod+r) is safe, the old ones are dropped first.
+--
+-- The optional third argument is a description -- it's what shows up next
+-- to this binding in the Mod+s keybinding-help overlay. It's fine to leave
+-- off (the binding still works, it just shows "(no description)" there),
+-- but a real one makes that overlay actually useful as a cheat sheet.
 mwm.keybind("mod4+shift+Return", function()
   mwm.exec("kitty --title scratchpad &")
-end)
+end, "Open a scratchpad terminal")
 
 mwm.keybind("mod4+g", function()
   mwm.switch_project("~/code/nix-mep2")
-end)
+end, "Switch to the nix-mep2 project")
 
 -- Mod4+Ctrl+space / Mod4+Ctrl+Shift+space cycle forward/backward through
 -- *every* switchable layout -- mwm's compiled tile/floating/monocle plus
@@ -67,9 +72,9 @@ end)
 -- mwm.set_layout()/Mod4+t/f/m (also already built in) jump straight to one
 -- by name instead of cycling. The same is easy to do for any layout,
 -- compiled or custom, with mwm.keybind():
-mwm.keybind("mod4+ctrl+t", function() mwm.set_layout("tile") end)
-mwm.keybind("mod4+ctrl+f", function() mwm.set_layout("floating") end)
-mwm.keybind("mod4+ctrl+m", function() mwm.set_layout("monocle") end)
+mwm.keybind("mod4+ctrl+t", function() mwm.set_layout("tile") end, "Switch to tile layout")
+mwm.keybind("mod4+ctrl+f", function() mwm.set_layout("floating") end, "Switch to floating layout")
+mwm.keybind("mod4+ctrl+m", function() mwm.set_layout("monocle") end, "Switch to monocle layout")
 
 -- Custom layout algorithms: `arrange` gets called with the currently-tiled
 -- clients (floating/hidden ones are already excluded, same as tile()) and
@@ -114,7 +119,7 @@ mwm.layout({
   end,
 })
 
-mwm.keybind("mod4+ctrl+b", function() mwm.set_layout("bstack") end)
+mwm.keybind("mod4+ctrl+b", function() mwm.set_layout("bstack") end, "Switch to bstack layout")
 
 -- "grid": every client in a roughly-square grid, rows filled left to
 -- right. A partial last row still splits the full width evenly among
@@ -149,7 +154,7 @@ mwm.layout({
   end,
 })
 
-mwm.keybind("mod4+ctrl+g", function() mwm.set_layout("grid") end)
+mwm.keybind("mod4+ctrl+g", function() mwm.set_layout("grid") end, "Switch to grid layout")
 
 -- "spiral": classic fibonacci/dwindle tiling -- each client takes half of
 -- whatever space is left, rotating left/top/right/bottom, spiraling
@@ -190,7 +195,7 @@ mwm.layout({
   end,
 })
 
-mwm.keybind("mod4+ctrl+s", function() mwm.set_layout("spiral") end)
+mwm.keybind("mod4+ctrl+s", function() mwm.set_layout("spiral") end, "Switch to spiral layout")
 
 -- Mouse bindings -- context is one of tagbar, layout, status, title,
 -- client, root; spec parses the same as mwm.keybind but with "buttonN"

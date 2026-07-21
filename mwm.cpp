@@ -811,6 +811,7 @@ typedef struct {
   KeySym keysym;
   void (*func)(const Arg *);
   const Arg arg;
+  const char *desc; /* shown in the Mod+s keybinding-help overlay */
 } Key;
 
 typedef struct {
@@ -916,7 +917,19 @@ typedef struct {
   unsigned int mod;
   KeySym keysym;
   int callback_ref;
+  char desc[128]; /* shown in the Mod+s keybinding-help overlay; may be empty */
 } LuaKey;
+
+/* One row of the Mod+s keybinding-help overlay -- built fresh from keys[]
+ * and lua_keys[] every time it opens (see keybind_help_collect()), not
+ * stored persistently. */
+typedef struct {
+  unsigned int mod;
+  KeySym keysym;
+  const char *desc;
+} KeybindHelpEntry;
+
+#define MAX_KEYBIND_HELP_ENTRIES 256
 
 #define MAX_LUA_RULES 64
 
@@ -1276,6 +1289,19 @@ static void project_remove_selected(void);
 static int project_handle_keypress(XKeyEvent *ev);
 static int project_handle_button(XButtonPressedEvent *ev);
 /* }}} project picker declarations */
+
+/* {{{ keybinding help declarations */
+static void keybind_help_mod_string(unsigned int mod, char *out, size_t outsz);
+static void keybind_help_key_string(KeySym keysym, char *out, size_t outsz);
+static size_t keybind_help_collect(KeybindHelpEntry *out, size_t cap);
+static void keybind_help_open(Monitor *m);
+static void keybind_help_close(void);
+static void keybind_help_toggle(Monitor *m);
+static void keybind_help_toggle_key(const Arg *arg);
+static void keybind_help_draw(void);
+static int keybind_help_handle_keypress(XKeyEvent *ev);
+static int keybind_help_handle_button(XButtonPressedEvent *ev);
+/* }}} keybinding help declarations */
 
 /* {{{ desktop icons declarations */
 static void get_desktop_dir(char *buf, size_t size);
@@ -1657,6 +1683,12 @@ static const int project_w = 560;
 static ProjectRowLayout project_row_layout[PROJECT_MAX_RESULTS];
 static char agent_launch_command[64] = "claude";
 /* }}} project picker globals */
+
+/* {{{ keybinding help globals */
+static Window keybind_help_win = None;
+static int keybind_help_visible = 0;
+static Monitor *keybind_help_mon = NULL;
+/* }}} keybinding help globals */
 
 /* {{{ desktop icons globals */
 static Atom xdndatom[XdndLast];
@@ -3565,11 +3597,14 @@ static const Layout layouts[] = {
 
 /* key definitions */
 #define MODKEY Mod4Mask
-#define WORKSPACEKEYS(KEY, INDEX)                                              \
-  {MODKEY, KEY, viewnth, {.i = INDEX}},                                        \
-      {MODKEY | ControlMask, KEY, toggleviewnth, {.i = INDEX}},                \
-      {MODKEY | ShiftMask, KEY, tagnth, {.i = INDEX}},                         \
-      {MODKEY | ControlMask | ShiftMask, KEY, toggletagnth, {.i = INDEX}},
+#define WORKSPACEKEYS(KEY, INDEX, LABEL)                                       \
+  {MODKEY, KEY, viewnth, {.i = INDEX}, "View workspace " LABEL},               \
+      {MODKEY | ControlMask, KEY, toggleviewnth, {.i = INDEX},                 \
+       "Toggle workspace " LABEL " in view"},                                  \
+      {MODKEY | ShiftMask, KEY, tagnth, {.i = INDEX},                          \
+       "Move focused window to workspace " LABEL},                            \
+      {MODKEY | ControlMask | ShiftMask, KEY, toggletagnth, {.i = INDEX},      \
+       "Toggle focused window on workspace " LABEL},
 
 /* helper for spawning shell commands in the pre dwm-5.0 fashion */
 #define SHCMD(cmd)                                                             \
@@ -3598,63 +3633,69 @@ static const Key keys[] = {
      * jumps straight to a project, Mod4+o is the original combined search
      * across both, and Mod4+Shift+t (further down, by the layout keys)
      * browses color themes. */
-    {MODKEY, XK_p, project_toggle_key, {.i = PickerModeAppOnly}},
-    {MODKEY, XK_Return, spawn, {.v = termcmd}},
-    {MODKEY, XK_o, project_toggle_key, {.i = PickerModeCombined}},
-    {MODKEY, XK_a, agent_jump_next_needs_input, {0}},
-    {MODKEY, XK_b, togglebar, {0}},
-    {MODKEY, XK_r, reloadconfig, {0}},
-    {MODKEY, XK_h, focusdir, {.i = DIR_LEFT}},
-    {MODKEY, XK_j, focusdir, {.i = DIR_DOWN}},
-    {MODKEY, XK_k, focusdir, {.i = DIR_UP}},
-    {MODKEY, XK_l, focusdir, {.i = DIR_RIGHT}},
-    {MODKEY | ShiftMask, XK_r, restartwm, {0}},
-    {MODKEY | ShiftMask, XK_h, resizebydir, {.i = DIR_LEFT}},
-    {MODKEY | ShiftMask, XK_j, resizebydir, {.i = DIR_DOWN}},
-    {MODKEY | ShiftMask, XK_k, resizebydir, {.i = DIR_UP}},
-    {MODKEY | ShiftMask, XK_l, resizebydir, {.i = DIR_RIGHT}},
-    {MODKEY | ControlMask, XK_j, focusstack, {.i = +1}},
-    {MODKEY | ControlMask, XK_k, focusstack, {.i = -1}},
-    {MODKEY, XK_i, incnmaster, {.i = +1}},
-    {MODKEY, XK_d, incnmaster, {.i = -1}},
-    {MODKEY | ControlMask, XK_h, setmfact, {.f = -0.05}},
-    {MODKEY | ControlMask, XK_l, setmfact, {.f = +0.05}},
+    {MODKEY, XK_p, project_toggle_key, {.i = PickerModeAppOnly}, "Open app launcher"},
+    {MODKEY, XK_Return, spawn, {.v = termcmd}, "Open a terminal"},
+    {MODKEY, XK_o, project_toggle_key, {.i = PickerModeCombined},
+     "Open combined project/app picker"},
+    {MODKEY, XK_a, agent_jump_next_needs_input, {0}, "Jump to next agent needing input"},
+    {MODKEY, XK_b, togglebar, {0}, "Toggle the bars"},
+    {MODKEY, XK_r, reloadconfig, {0}, "Reload Lua config"},
+    {MODKEY, XK_h, focusdir, {.i = DIR_LEFT}, "Focus window to the left"},
+    {MODKEY, XK_j, focusdir, {.i = DIR_DOWN}, "Focus window below"},
+    {MODKEY, XK_k, focusdir, {.i = DIR_UP}, "Focus window above"},
+    {MODKEY, XK_l, focusdir, {.i = DIR_RIGHT}, "Focus window to the right"},
+    {MODKEY | ShiftMask, XK_r, restartwm, {0}, "Restart mwm"},
+    {MODKEY | ShiftMask, XK_h, resizebydir, {.i = DIR_LEFT}, "Grow/shrink window to the left"},
+    {MODKEY | ShiftMask, XK_j, resizebydir, {.i = DIR_DOWN}, "Grow/shrink window downward"},
+    {MODKEY | ShiftMask, XK_k, resizebydir, {.i = DIR_UP}, "Grow/shrink window upward"},
+    {MODKEY | ShiftMask, XK_l, resizebydir, {.i = DIR_RIGHT}, "Grow/shrink window to the right"},
+    {MODKEY | ControlMask, XK_j, focusstack, {.i = +1}, "Focus next window in stack"},
+    {MODKEY | ControlMask, XK_k, focusstack, {.i = -1}, "Focus previous window in stack"},
+    {MODKEY, XK_i, incnmaster, {.i = +1}, "Increase number of master windows"},
+    {MODKEY, XK_d, incnmaster, {.i = -1}, "Decrease number of master windows"},
+    {MODKEY | ControlMask, XK_h, setmfact, {.f = -0.05}, "Shrink master area"},
+    {MODKEY | ControlMask, XK_l, setmfact, {.f = +0.05}, "Grow master area"},
     /* zoom (swap the focused client with master) previously had no
      * keyboard binding at all -- only the ClkWinTitle middle-click below,
      * which nobody discovers on their own. */
-    {MODKEY, XK_z, zoom, {0}},
+    {MODKEY, XK_z, zoom, {0}, "Swap focused window with master"},
     /* Scratchpad: designate a window (Shift+minus), then show/hide it from
      * anywhere with plain minus -- it keeps running in the background
      * between toggles, same as i3's scratchpad. */
-    {MODKEY, XK_minus, scratchpad_toggle, {0}},
-    {MODKEY | ShiftMask, XK_minus, scratchpad_set, {0}},
-    {MODKEY, XK_Tab, view, {0}},
-    {MODKEY | ShiftMask, XK_c, killclient, {0}},
-    {MODKEY | ShiftMask, XK_colon, promptcommand, {0}},
-    {MODKEY, XK_t, setlayout, {.v = &layouts[0]}},
-    {MODKEY, XK_f, setlayout, {.v = &layouts[1]}},
-    {MODKEY, XK_m, setlayout, {.v = &layouts[2]}},
+    {MODKEY, XK_minus, scratchpad_toggle, {0}, "Show/hide scratchpad window"},
+    {MODKEY | ShiftMask, XK_minus, scratchpad_set, {0}, "Designate focused window as scratchpad"},
+    {MODKEY, XK_Tab, view, {0}, "View previous workspace"},
+    {MODKEY | ShiftMask, XK_c, killclient, {0}, "Close focused window"},
+    {MODKEY | ShiftMask, XK_colon, promptcommand, {0}, "Open Lua command prompt"},
+    {MODKEY, XK_t, setlayout, {.v = &layouts[0]}, "Switch to tiled layout"},
+    {MODKEY, XK_f, setlayout, {.v = &layouts[1]}, "Switch to floating layout"},
+    {MODKEY, XK_m, setlayout, {.v = &layouts[2]}, "Switch to monocle layout"},
     /* Same picker, fourth scope: browse and apply the named color themes in
      * color_themes[] (also reachable by middle-clicking the theme widget). */
-    {MODKEY | ShiftMask, XK_t, project_toggle_key, {.i = PickerModeTheme}},
+    {MODKEY | ShiftMask, XK_t, project_toggle_key, {.i = PickerModeTheme},
+     "Open color theme picker"},
     /* Used to be setlayout({0})'s "toggle to the other layout" -- redundant
      * with Ctrl+Mod+space (cyclelayout) and Mod+t/f/m (pick one directly),
      * so it's free for the project picker instead. */
-    {MODKEY, XK_space, project_toggle_key, {.i = PickerModeProjectOnly}},
-    {MODKEY | ShiftMask, XK_space, togglefloating, {0}},
-    {MODKEY | ControlMask, XK_space, cyclelayout, {.i = +1}},
-    {MODKEY | ControlMask | ShiftMask, XK_space, cyclelayout, {.i = -1}},
-    {MODKEY, XK_0, view, {.ull = ~0ULL}},
-    {MODKEY | ShiftMask, XK_0, tag, {.ull = ~0ULL}},
-    {MODKEY, XK_comma, focusmon, {.i = -1}},
-    {MODKEY, XK_period, focusmon, {.i = +1}},
-    {MODKEY | ShiftMask, XK_comma, tagmon, {.i = -1}},
-    {MODKEY | ShiftMask, XK_period, tagmon, {.i = +1}},
-    WORKSPACEKEYS(XK_1, 0) WORKSPACEKEYS(XK_2, 1) WORKSPACEKEYS(XK_3, 2)
-        WORKSPACEKEYS(XK_4, 3) WORKSPACEKEYS(XK_5, 4)
-            WORKSPACEKEYS(XK_6, 5) WORKSPACEKEYS(XK_7, 6)
-                WORKSPACEKEYS(XK_8, 7) WORKSPACEKEYS(XK_9, 8){
-                    MODKEY | ShiftMask, XK_q, quit, {0}},
+    {MODKEY, XK_space, project_toggle_key, {.i = PickerModeProjectOnly}, "Open project picker"},
+    {MODKEY | ShiftMask, XK_space, togglefloating, {0}, "Toggle focused window floating"},
+    {MODKEY | ControlMask, XK_space, cyclelayout, {.i = +1}, "Cycle to next layout"},
+    {MODKEY | ControlMask | ShiftMask, XK_space, cyclelayout, {.i = -1},
+     "Cycle to previous layout"},
+    {MODKEY, XK_0, view, {.ull = ~0ULL}, "View all workspaces"},
+    {MODKEY | ShiftMask, XK_0, tag, {.ull = ~0ULL}, "Put focused window on all workspaces"},
+    {MODKEY, XK_comma, focusmon, {.i = -1}, "Focus previous monitor"},
+    {MODKEY, XK_period, focusmon, {.i = +1}, "Focus next monitor"},
+    {MODKEY | ShiftMask, XK_comma, tagmon, {.i = -1}, "Move focused window to previous monitor"},
+    {MODKEY | ShiftMask, XK_period, tagmon, {.i = +1}, "Move focused window to next monitor"},
+    /* Mod+s, mnemonic "show shortcuts" -- see keybind_help_toggle_key() and
+     * the "keybinding help" section further down. */
+    {MODKEY, XK_s, keybind_help_toggle_key, {0}, "Show this keybinding help"},
+    WORKSPACEKEYS(XK_1, 0, "1") WORKSPACEKEYS(XK_2, 1, "2") WORKSPACEKEYS(XK_3, 2, "3")
+        WORKSPACEKEYS(XK_4, 3, "4") WORKSPACEKEYS(XK_5, 4, "5")
+            WORKSPACEKEYS(XK_6, 5, "6") WORKSPACEKEYS(XK_7, 6, "7")
+                WORKSPACEKEYS(XK_8, 7, "8") WORKSPACEKEYS(XK_9, 8, "9"){
+                    MODKEY | ShiftMask, XK_q, quit, {0}, "Quit mwm"},
 };
 
 /* button definitions */
@@ -4219,6 +4260,9 @@ void buttonpress(XEvent *e) {
   unsigned int statusw, trayw, clockw;
 
   click = ClkRootWin;
+  if (keybind_help_handle_button(ev)) {
+    return;
+  }
   if (project_handle_button(ev)) {
     return;
   }
@@ -5278,12 +5322,15 @@ static void lua_key_invoke(size_t index) {
   }
 }
 
-/* mwm.keybind("mod4+shift+Return", function() ... end) -- adds a global
- * keybinding without recompiling. Re-grabs immediately so it (and any
- * removal via a config reload) takes effect right away, including when
- * called live over the control socket. */
+/* mwm.keybind("mod4+shift+Return", function() ... end, "Open a terminal") --
+ * adds a global keybinding without recompiling. The description is optional
+ * (defaults to empty) but is what shows up next to this binding in the
+ * Mod+s keybinding-help overlay -- see keybind_help_open(). Re-grabs
+ * immediately so it (and any removal via a config reload) takes effect
+ * right away, including when called live over the control socket. */
 static int lua_mwm_keybind(lua_State *L) {
   const char *spec = luaL_checkstring(L, 1);
+  const char *desc = lua_isstring(L, 3) ? lua_tostring(L, 3) : "";
   unsigned int mod;
   KeySym keysym;
 
@@ -5300,6 +5347,7 @@ static int lua_mwm_keybind(lua_State *L) {
   lua_keys[lua_keys_len].mod = mod;
   lua_keys[lua_keys_len].keysym = keysym;
   lua_keys[lua_keys_len].callback_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+  snprintf(lua_keys[lua_keys_len].desc, sizeof(lua_keys[lua_keys_len].desc), "%s", desc);
   lua_keys_len++;
 
   grabkeys();
@@ -8919,6 +8967,293 @@ static int project_handle_button(XButtonPressedEvent *ev) {
 
 /* }}} project picker */
 
+/* {{{ keybinding help (Mod+s) */
+
+/* "Super+Shift+" style prefix for a modifier mask -- mirrors the modifier
+ * names lua_parse_mods() accepts, so a binding's on-screen label matches
+ * what you'd type in mwm.keybind(). */
+static void keybind_help_mod_string(unsigned int mod, char *out, size_t outsz) {
+  size_t len = 0;
+
+  out[0] = '\0';
+  if (mod & Mod4Mask) {
+    len += (size_t)snprintf(out + len, outsz - len, "Super+");
+  }
+  if (mod & ControlMask) {
+    len += (size_t)snprintf(out + len, outsz - len, "Ctrl+");
+  }
+  if (mod & ShiftMask) {
+    len += (size_t)snprintf(out + len, outsz - len, "Shift+");
+  }
+  if (mod & Mod1Mask) {
+    len += (size_t)snprintf(out + len, outsz - len, "Alt+");
+  }
+}
+
+/* XKeysymToString() gives X's internal names ("space", "Return", "minus")
+ * -- translate the common ones to what a person would actually call the
+ * key, and capitalize bare lowercase letters ("p" -> "P"). */
+static void keybind_help_key_string(KeySym keysym, char *out, size_t outsz) {
+  const char *raw = XKeysymToString(keysym);
+
+  if (!raw) {
+    snprintf(out, outsz, "?");
+    return;
+  }
+  if (!strcmp(raw, "space")) {
+    raw = "Space";
+  } else if (!strcmp(raw, "Return")) {
+    raw = "Enter";
+  } else if (!strcmp(raw, "minus")) {
+    raw = "-";
+  } else if (!strcmp(raw, "comma")) {
+    raw = ",";
+  } else if (!strcmp(raw, "period")) {
+    raw = ".";
+  } else if (!strcmp(raw, "colon")) {
+    raw = ":";
+  } else if (!strcmp(raw, "Escape")) {
+    raw = "Esc";
+  }
+  snprintf(out, outsz, "%s", raw);
+  if (out[0] != '\0' && out[1] == '\0' && out[0] >= 'a' && out[0] <= 'z') {
+    out[0] = (char)(out[0] - 'a' + 'A');
+  }
+}
+
+/* Builds the flat list of every keybinding to show: the compiled-in keys[]
+ * (all of which carry a real description) plus any live mwm.keybind()
+ * registrations -- a blank description there gets a placeholder rather
+ * than being hidden, since an undocumented binding is still worth knowing
+ * exists. Returns the count written to `out`. */
+static size_t keybind_help_collect(KeybindHelpEntry *out, size_t cap) {
+  size_t n = 0;
+  size_t i;
+
+  for (i = 0; i < LENGTH(keys) && n < cap; i++) {
+    out[n].mod = keys[i].mod;
+    out[n].keysym = keys[i].keysym;
+    out[n].desc = keys[i].desc && keys[i].desc[0] ? keys[i].desc : "(no description)";
+    n++;
+  }
+  for (i = 0; i < lua_keys_len && n < cap; i++) {
+    out[n].mod = lua_keys[i].mod;
+    out[n].keysym = lua_keys[i].keysym;
+    out[n].desc = lua_keys[i].desc[0] ? lua_keys[i].desc : "(no description)";
+    n++;
+  }
+  return n;
+}
+
+/* Lays every entry out column-major (fills column 0 top-to-bottom before
+ * starting column 1) so related bindings declared near each other in
+ * keys[] end up in the same or adjacent column instead of scattered by
+ * row-major wraparound. Column count follows from how many rows fit in the
+ * monitor's height; key-combo width is one shared column across the whole
+ * table so every description lines up, but each column gets its own
+ * description width so a handful of long entries in one column don't
+ * stretch every other column too. */
+static void keybind_help_draw(void) {
+  static KeybindHelpEntry entries[MAX_KEYBIND_HELP_ENTRIES];
+  size_t total;
+  size_t idx;
+  int keycombo_w = 0;
+  int gap;
+  int rows_per_col;
+  int columns;
+  int col_desc_w[32] = {0};
+  int col_x[32];
+  int win_w, win_h;
+  int win_x, win_y;
+  int cx;
+  Monitor *m = keybind_help_mon ? keybind_help_mon : selmon;
+
+  if (keybind_help_win == None || !m) {
+    return;
+  }
+
+  total = keybind_help_collect(entries, LENGTH(entries));
+  gap = lrpad;
+
+  for (idx = 0; idx < total; idx++) {
+    char modstr[32], keystr[32], combo[64];
+    int w;
+
+    keybind_help_mod_string(entries[idx].mod, modstr, sizeof(modstr));
+    keybind_help_key_string(entries[idx].keysym, keystr, sizeof(keystr));
+    snprintf(combo, sizeof(combo), "%s%s", modstr, keystr);
+    w = (int)TEXTW(combo);
+    if (w > keycombo_w) {
+      keycombo_w = w;
+    }
+  }
+
+  /* rows_per_col is derived straight from the height budget the window is
+   * later clamped to (m->wh - 2*gap), so win_h never has to be shrunk out
+   * from under a row layout that already assumed more space -- that
+   * mismatch would otherwise clip the bottom rows of the last column. */
+  rows_per_col = (m->wh - 2 * gap - bh) / bh;
+  if (rows_per_col < 8) {
+    rows_per_col = 8;
+  }
+
+  /* Column count follows from rows_per_col, but a table with many columns
+   * of short rows can end up wider than the screen; if so, trade columns
+   * for rows (up to a generous cap) until the natural width fits, rather
+   * than clamping win_w afterward and clipping the rightmost column(s). */
+  for (;;) {
+    columns = total == 0 ? 1 : (int)((total + (size_t)rows_per_col - 1) / (size_t)rows_per_col);
+    if (columns < 1) {
+      columns = 1;
+    }
+    if (columns > (int)LENGTH(col_desc_w)) {
+      columns = (int)LENGTH(col_desc_w);
+      rows_per_col = (int)((total + (size_t)columns - 1) / (size_t)columns);
+    }
+
+    for (idx = 0; idx < (size_t)columns; idx++) {
+      col_desc_w[idx] = 0;
+    }
+    for (idx = 0; idx < total; idx++) {
+      int col = (int)(idx / (size_t)rows_per_col);
+      int w = (int)TEXTW(entries[idx].desc);
+      if (col >= columns) {
+        col = columns - 1;
+      }
+      if (w > col_desc_w[col]) {
+        col_desc_w[col] = w;
+      }
+    }
+
+    cx = gap;
+    for (idx = 0; idx < (size_t)columns; idx++) {
+      col_x[idx] = cx;
+      cx += keycombo_w + gap + col_desc_w[idx] + gap;
+    }
+
+    if (cx <= m->ww - 2 * gap || columns <= 1 || rows_per_col >= (int)total) {
+      break;
+    }
+    rows_per_col += 4;
+  }
+
+  win_w = cx;
+  win_h = bh + 2 * gap + rows_per_col * bh;
+  if (win_w > m->ww - 2 * gap) {
+    win_w = m->ww - 2 * gap;
+  }
+  win_x = m->wx + (m->ww - win_w) / 2;
+  win_y = m->wy + (m->wh - win_h) / 2;
+  if (win_y < m->wy) {
+    win_y = m->wy; /* very many entries on a short monitor -- better clipped at the bottom than off the top */
+  }
+  XMoveResizeWindow(dpy, keybind_help_win, win_x, win_y, win_w, win_h);
+
+  drw_setscheme(drw, scheme[SchemeNorm]);
+  drw_rect(drw, 0, 0, win_w, win_h, 1, 1);
+  drw_setscheme(drw, scheme[SchemeSel]);
+  drw_text(drw, 0, 0, win_w, bh, lrpad / 2, "Keybindings -- press any key to close", 0);
+  draw_hdivider(0, bh, win_w);
+
+  for (idx = 0; idx < total; idx++) {
+    int col = (int)(idx / (size_t)rows_per_col);
+    int row;
+    int cy;
+    char modstr[32], keystr[32], combo[64];
+
+    if (col >= columns) {
+      col = columns - 1;
+    }
+    row = (int)(idx - (size_t)col * (size_t)rows_per_col);
+    cy = bh + gap + row * bh;
+
+    keybind_help_mod_string(entries[idx].mod, modstr, sizeof(modstr));
+    keybind_help_key_string(entries[idx].keysym, keystr, sizeof(keystr));
+    snprintf(combo, sizeof(combo), "%s%s", modstr, keystr);
+
+    drw_setscheme(drw, scheme[SchemeSel]);
+    drw_text(drw, col_x[col], cy, keycombo_w, bh, 0, combo, 0);
+    drw_setscheme(drw, scheme[SchemeNorm]);
+    drw_text(drw, col_x[col] + keycombo_w + gap, cy, col_desc_w[col], bh, 0,
+             entries[idx].desc, 0);
+  }
+
+  drw_map(drw, keybind_help_win, 0, 0, win_w, win_h);
+}
+
+static void keybind_help_open(Monitor *m) {
+  XSetWindowAttributes wa = {};
+
+  if (!m) {
+    return;
+  }
+  if (keybind_help_win == None) {
+    wa.override_redirect = True;
+    wa.background_pixel = scheme[SchemeNorm][ColBg].pixel;
+    wa.border_pixel = scheme[SchemeSel][ColBorder].pixel;
+    wa.event_mask = ExposureMask | ButtonPressMask | KeyPressMask;
+    keybind_help_win = XCreateWindow(
+        dpy, root, 0, 0, 1, 1, 1, DefaultDepth(dpy, screen), CopyFromParent,
+        DefaultVisual(dpy, screen),
+        CWOverrideRedirect | CWBackPixel | CWBorderPixel | CWEventMask, &wa);
+    XDefineCursor(dpy, keybind_help_win, cursor[CurNormal]->cursor);
+  }
+  if (XGrabKeyboard(dpy, root, True, GrabModeAsync, GrabModeAsync, CurrentTime) !=
+      GrabSuccess) {
+    return;
+  }
+  keybind_help_mon = m;
+  keybind_help_visible = 1;
+  keybind_help_draw();
+  XMapRaised(dpy, keybind_help_win);
+}
+
+static void keybind_help_close(void) {
+  if (!keybind_help_visible) {
+    return;
+  }
+  keybind_help_visible = 0;
+  XUngrabKeyboard(dpy, CurrentTime);
+  if (keybind_help_win != None) {
+    XUnmapWindow(dpy, keybind_help_win);
+  }
+}
+
+static void keybind_help_toggle(Monitor *m) {
+  if (keybind_help_visible) {
+    keybind_help_close();
+  } else {
+    keybind_help_open(m ? m : selmon);
+  }
+}
+
+static void keybind_help_toggle_key(const Arg *arg) {
+  (void)arg;
+  keybind_help_toggle(selmon);
+}
+
+/* Read-only overlay -- any key or click just dismisses it rather than
+ * needing Escape or Mod+s specifically. */
+static int keybind_help_handle_keypress(XKeyEvent *ev) {
+  (void)ev;
+  if (!keybind_help_visible) {
+    return 0;
+  }
+  keybind_help_close();
+  return 1;
+}
+
+static int keybind_help_handle_button(XButtonPressedEvent *ev) {
+  (void)ev;
+  if (!keybind_help_visible) {
+    return 0;
+  }
+  keybind_help_close();
+  return 1;
+}
+
+/* }}} keybinding help */
+
 /* {{{ desktop icons */
 
 static void get_desktop_dir(char *buf, size_t size) {
@@ -10164,6 +10499,10 @@ void cleanup(void) {
     XDestroyWindow(dpy, project_win);
     project_win = None;
   }
+  if (keybind_help_win != None) {
+    XDestroyWindow(dpy, keybind_help_win);
+    keybind_help_win = None;
+  }
   for (i = 0; i < projects_len; i++) {
     free(projects[i]);
   }
@@ -10782,6 +11121,10 @@ void expose(XEvent *e) {
     project_draw();
     return;
   }
+  if (keybind_help_visible && ev->window == keybind_help_win) {
+    keybind_help_draw();
+    return;
+  }
   if (ev->window == deskwin) {
     desktop_draw();
     return;
@@ -11229,6 +11572,9 @@ void keypress(XEvent *e) {
   KeySym keysym;
   XKeyEvent *ev;
   ev = &e->xkey;
+  if (keybind_help_visible && keybind_help_handle_keypress(ev)) {
+    return;
+  }
   if (project_visible && project_handle_keypress(ev)) {
     return;
   }
