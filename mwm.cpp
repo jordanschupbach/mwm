@@ -1404,6 +1404,7 @@ static void updatewindowtype(Client *c);
 static void updatewmhints(Client *c);
 static void widget_close_slider_popup(void);
 static void widget_init_paths(void);
+static void widget_update_backlight(void);
 static void widget_format_backlight(char *buf, size_t size);
 static void widget_format_battery(char *buf, size_t size);
 static void widget_format_clock(char *buf, size_t size);
@@ -1447,6 +1448,7 @@ static void widget_slider_label(enum SliderWidget kind, char *buf, size_t size);
 static void widget_slider_set_absolute(enum SliderWidget kind, int percent);
 static void widget_set_backlight_percent_absolute(int percent);
 static int widget_set_backlight_percent(int delta_percent);
+static void run_detached_shell(const char *cmd);
 static void widget_set_volume_percent_absolute(int percent);
 static int widget_set_volume_percent(int delta_percent);
 static void widget_toggle_volume_mute(void);
@@ -1994,20 +1996,31 @@ static void widget_init_paths(void) {
   }
 }
 
-static void updatewidgets(void) {
-  FILE *fp;
-  char status[64];
+/* Standalone (not folded into updatewidgets()) so the volume/backlight
+ * slider popups can refresh just the one value they care about after a
+ * drag motion event, instead of paying for every other widget's refresh
+ * (several of which shell out or hit the network) on every mouse move --
+ * see widget_set_backlight_percent_absolute(). */
+static void widget_update_backlight(void) {
   long value;
   long max_value;
-
-  widget_tick++;
-  widget_init_paths();
 
   backlight_percent = -1;
   if (read_long_from_file(backlight_brightness_path, &value) &&
       read_long_from_file(backlight_max_path, &max_value) && max_value > 0) {
     backlight_percent = (int)((value * 100 + (max_value / 2)) / max_value);
   }
+}
+
+static void updatewidgets(void) {
+  FILE *fp;
+  char status[64];
+  long value;
+
+  widget_tick++;
+  widget_init_paths();
+
+  widget_update_backlight();
 
   battery_percent = -1;
   battery_charging = 0;
@@ -3015,7 +3028,7 @@ static void widget_set_backlight_percent_absolute(int percent) {
   }
   fprintf(fp, "%ld\n", next_brightness);
   fclose(fp);
-  updatewidgets();
+  widget_update_backlight();
   drawbars();
   draw_slider_popup();
 }
@@ -3047,10 +3060,32 @@ static int widget_set_backlight_percent(int delta_percent) {
   }
   fprintf(fp, "%ld\n", next_brightness);
   fclose(fp);
-  updatewidgets();
+  widget_update_backlight();
   drawbars();
   draw_slider_popup();
   return 1;
+}
+
+/* Fire-and-forget: forks and execs `cmd` via /bin/sh -c, but -- unlike
+ * system() -- never waits for it, so the caller isn't blocked on however
+ * long the child takes to run. setup() ignores SIGCHLD with SA_NOCLDWAIT,
+ * so the kernel reaps the child on its own; nothing here needs to wait()
+ * it. Needed for anything that can fire many times a second, like the
+ * volume slider while dragging -- system()'s blocking fork+exec+wait per
+ * call was slow enough (tens of ms for amixer) that a fast drag queued up
+ * a visible backlog of motion/release events, making the slider look like
+ * it kept moving on its own for a moment after the button was actually
+ * released. */
+static void run_detached_shell(const char *cmd) {
+  pid_t pid = fork();
+  if (pid == 0) {
+    if (dpy) {
+      close(ConnectionNumber(dpy));
+    }
+    setsid();
+    execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
+    _exit(127);
+  }
 }
 
 static void widget_set_volume_percent_absolute(int percent) {
@@ -3058,12 +3093,14 @@ static void widget_set_volume_percent_absolute(int percent) {
 
   percent = MAX(0, MIN(100, percent));
   snprintf(cmd, sizeof(cmd), "amixer -q set Master %d%% unmute", percent);
-  /* setup() ignores SIGCHLD with SA_NOCLDWAIT so spawned clients never
-   * zombie; that also makes system()'s internal wait() fail with ECHILD
-   * even when the command ran fine, so its return value can't be trusted
-   * here. */
-  system(cmd);
-  updatewidgets();
+  run_detached_shell(cmd);
+  /* Optimistic: the amixer call above is fire-and-forget, so re-querying it
+   * with an immediate widget_update_volume() would just race the still-
+   * running child and often read back the stale value. We already know
+   * what we asked for; the next periodic refresh (~2s) reconciles with
+   * whatever amixer actually landed on. */
+  volume_percent = percent;
+  volume_muted = 0;
   drawbars();
   draw_slider_popup();
 }
