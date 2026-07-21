@@ -23,7 +23,12 @@ static void usage(FILE *stream) {
           "  # focus_workspace(name) creates the workspace if needed,\n"
           "  # and removes the workspace you leave if it has no clients.\n"
           "  mwm-cli -m 'for i, name in ipairs(mwm.list_workspaces()) do "
-          "print(i, name) end'\n");
+          "print(i, name) end'\n"
+          "  mwm-cli -m 'print(mwm.current_project())'\n"
+          "  # nil unless the focused workspace is a saved project's.\n"
+          "  mwm-cli -m 'mwm.switch_project(\"~/code/foo\")'\n"
+          "  # like picking it in the project picker: adds it if new,\n"
+          "  # switches to its workspace.\n");
 }
 
 static void get_socket_path(char *buf, size_t size) {

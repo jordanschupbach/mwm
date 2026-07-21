@@ -6,6 +6,206 @@ mwm.workspaces({
   "chat",
 })
 
+-- Projects (Mod+o, or the projects widget) each get their own workspace,
+-- named after the project directory's basename, created on first switch and
+-- reused after. Enter switches to it and opens a terminal there; Ctrl+Enter
+-- also launches a coding agent in that terminal. Defaults to "claude" --
+-- call this to use something else, e.g. "codex".
+mwm.agent_command("claude")
+
+-- Behavior/appearance -- all optional, these are the compiled-in defaults.
+-- Changing them here takes effect immediately, including on config reload
+-- (Mod+r), not just at startup.
+mwm.set_terminal("kitty")   -- also what the project picker and git widget open
+mwm.set_mfact(0.55)         -- master area width, as a fraction of the screen [0.05-0.95]
+mwm.set_nmaster(1)          -- number of clients kept in the master area
+mwm.set_snap(32)            -- pixel distance at which dragged windows snap to edges
+mwm.set_border_width(1)     -- applied to every live window immediately, not just new ones
+mwm.set_gaps(0)             -- gap in pixels around every tiled window, in every layout (incl. custom Lua ones)
+
+-- Scratchpad -- a dropdown-terminal-style window that keeps running in the
+-- background between toggles, rather than being closed and reopened. These
+-- are already bound to Mod4+minus (toggle) / Mod4+Shift+minus (designate
+-- the focused window); mwm.scratchpad_toggle()/mwm.scratchpad_set() are
+-- there if you want it on a different key too, e.g. a scroll-wheel mousebind:
+mwm.mousebind("root", "button4", function() mwm.scratchpad_toggle() end)
+
+-- Basic window actions -- already bound to Mod4+z (zoom)/Shift+space
+-- (float)/Shift+c (kill)/b (bar), same idea as the scratchpad functions
+-- above: there if you want them on another key, a widget click, a mouse
+-- gesture, or driven from mwm-cli. All four act on whatever's currently
+-- focused (mwm.zoom, mwm.toggle_floating, mwm.kill_client) or the
+-- currently-focused monitor (mwm.toggle_bar) -- none take arguments.
+mwm.mousebind("title", "button3", function() mwm.kill_client() end)
+
+-- Window rules -- applied on top of (and after) mwm's compiled-in defaults,
+-- so these always win for windows they match. class/instance/title
+-- substring-match like xprop's WM_CLASS/WM_NAME (case-sensitive); give at
+-- least one. `workspace` is created on demand, same as switching a project.
+mwm.rule({ class = "firefox", workspace = "web" })
+mwm.rule({ class = "Pavucontrol", floating = true })
+
+-- Keybindings -- "mod4+shift+q" style: zero or more of mod4/super (Mod4),
+-- shift, ctrl/control, alt/mod1, joined with "+", then a key name X already
+-- knows (Return, q, F1, XF86AudioMute, ...). These stack with (don't
+-- replace) mwm's compiled-in bindings; re-running this on a config reload
+-- (Mod+r) is safe, the old ones are dropped first.
+mwm.keybind("mod4+shift+Return", function()
+  mwm.exec("kitty --title scratchpad &")
+end)
+
+mwm.keybind("mod4+g", function()
+  mwm.switch_project("~/code/nix-mep2")
+end)
+
+-- Mod4+Ctrl+space / Mod4+Ctrl+Shift+space cycle forward/backward through
+-- *every* switchable layout -- mwm's compiled tile/floating/monocle plus
+-- whatever's registered with mwm.layout() below, in that order, wrapping
+-- around. That's built in already, no config needed for it; it's the
+-- AwesomeWM-style "just keep pressing the key" way to explore layouts.
+--
+-- mwm.set_layout()/Mod4+t/f/m (also already built in) jump straight to one
+-- by name instead of cycling. The same is easy to do for any layout,
+-- compiled or custom, with mwm.keybind():
+mwm.keybind("mod4+ctrl+t", function() mwm.set_layout("tile") end)
+mwm.keybind("mod4+ctrl+f", function() mwm.set_layout("floating") end)
+mwm.keybind("mod4+ctrl+m", function() mwm.set_layout("monocle") end)
+
+-- Custom layout algorithms: `arrange` gets called with the currently-tiled
+-- clients (floating/hidden ones are already excluded, same as tile()) and
+-- the monitor's usable area, and must return one { x, y, w, h } per client,
+-- same order, in outer (border-inclusive) coordinates -- mwm subtracts the
+-- border itself before resizing. A client left out of the returned table
+-- keeps its current geometry. Each of these becomes selectable the moment
+-- it's registered, both via mwm.set_layout(name) and by cycling.
+
+-- "bstack": master windows across the top, everything else in a row along
+-- the bottom.
+mwm.layout({
+  name = "bstack",
+  symbol = "[⊥]",
+  arrange = function(clients, area)
+    local n = #clients
+    local geoms = {}
+    local nmaster = math.min(area.nmaster, n)
+    local master_h = nmaster > 0 and math.floor(area.h * area.mfact) or 0
+
+    if nmaster > 0 then
+      local mw = math.floor(area.w / nmaster)
+      for i = 1, nmaster do
+        local w = (i == nmaster) and (area.w - mw * (nmaster - 1)) or mw
+        geoms[i] = { x = area.x + mw * (i - 1), y = area.y, w = w, h = master_h }
+      end
+    end
+
+    local nstack = n - nmaster
+    if nstack > 0 then
+      local sw = math.floor(area.w / nstack)
+      for i = 1, nstack do
+        local w = (i == nstack) and (area.w - sw * (nstack - 1)) or sw
+        geoms[nmaster + i] = {
+          x = area.x + sw * (i - 1), y = area.y + master_h,
+          w = w, h = area.h - master_h,
+        }
+      end
+    end
+
+    return geoms
+  end,
+})
+
+mwm.keybind("mod4+ctrl+b", function() mwm.set_layout("bstack") end)
+
+-- "grid": every client in a roughly-square grid, rows filled left to
+-- right. A partial last row still splits the full width evenly among
+-- however many clients actually landed in it, rather than leaving a gap.
+mwm.layout({
+  name = "grid",
+  symbol = "[#]",
+  arrange = function(clients, area)
+    local n = #clients
+    local geoms = {}
+    if n == 0 then
+      return geoms
+    end
+
+    local cols = 1
+    while cols * cols < n do
+      cols = cols + 1
+    end
+    local rows = math.ceil(n / cols)
+
+    for i = 1, n do
+      local col = (i - 1) % cols
+      local row = math.floor((i - 1) / cols)
+      local row_count = math.min(cols, n - row * cols)
+      local cw = math.floor(area.w / row_count)
+      local ch = math.floor(area.h / rows)
+      local w = (col == row_count - 1) and (area.w - cw * (row_count - 1)) or cw
+      local h = (row == rows - 1) and (area.h - ch * (rows - 1)) or ch
+      geoms[i] = { x = area.x + col * cw, y = area.y + row * ch, w = w, h = h }
+    end
+    return geoms
+  end,
+})
+
+mwm.keybind("mod4+ctrl+g", function() mwm.set_layout("grid") end)
+
+-- "spiral": classic fibonacci/dwindle tiling -- each client takes half of
+-- whatever space is left, rotating left/top/right/bottom, spiraling
+-- inward. The last client takes all of whatever remains.
+mwm.layout({
+  name = "spiral",
+  symbol = "[@]",
+  arrange = function(clients, area)
+    local n = #clients
+    local geoms = {}
+    local x, y, w, h = area.x, area.y, area.w, area.h
+
+    for i = 1, n do
+      if i == n then
+        geoms[i] = { x = x, y = y, w = w, h = h }
+      else
+        local dir = (i - 1) % 4
+        if dir == 0 then
+          local hw = math.floor(w / 2)
+          geoms[i] = { x = x, y = y, w = hw, h = h }
+          x, w = x + hw, w - hw
+        elseif dir == 1 then
+          local hh = math.floor(h / 2)
+          geoms[i] = { x = x, y = y, w = w, h = hh }
+          y, h = y + hh, h - hh
+        elseif dir == 2 then
+          local hw = math.floor(w / 2)
+          geoms[i] = { x = x + w - hw, y = y, w = hw, h = h }
+          w = w - hw
+        else
+          local hh = math.floor(h / 2)
+          geoms[i] = { x = x, y = y + h - hh, w = w, h = hh }
+          h = h - hh
+        end
+      end
+    end
+    return geoms
+  end,
+})
+
+mwm.keybind("mod4+ctrl+s", function() mwm.set_layout("spiral") end)
+
+-- Mouse bindings -- context is one of tagbar, layout, status, title,
+-- client, root; spec parses the same as mwm.keybind but with "buttonN"
+-- (1-5) instead of a key name. "client"-context bindings need mwm to grab
+-- that button+modifier combo on every window, which happens automatically
+-- but does mean there's a bit more work behind a mousebind call than a
+-- keybind one. A tagbar callback receives the clicked workspace's name.
+mwm.mousebind("client", "mod4+ctrl+button1", function()
+  mwm.exec("notify-send 'clicked with mod4+ctrl+left-click'")
+end)
+
+mwm.mousebind("tagbar", "button2", function(workspace)
+  mwm.exec("notify-send 'middle-clicked workspace: " .. workspace .. "'")
+end)
+
 mwm.theme({
   -- Used in dark mode (and as the fallback when no light variant is given).
   topbar = {
