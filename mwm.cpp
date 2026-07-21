@@ -1023,14 +1023,20 @@ enum SidebarAnim { SidebarAnimIdle, SidebarAnimOpening, SidebarAnimClosing };
  * system) -- only the top PROJECT_MAX_RESULTS survive to be shown. */
 #define MAX_PICK_CANDIDATES (MAX_PROJECTS + 4096)
 
-enum PickResultKind { PickResultProject, PickResultApp };
+enum PickResultKind { PickResultProject, PickResultApp, PickResultTheme };
 
 /* What the picker is scoped to for this invocation -- Combined is the
  * original "search everything" behavior (still reachable via Mod+o);
  * ProjectOnly/AppOnly restrict it to one kind, like a dedicated project
- * switcher or a rofi-style drun launcher, while still sharing the same
- * picker window, filtering, and keyboard handling. */
-enum PickerMode { PickerModeCombined, PickerModeProjectOnly, PickerModeAppOnly };
+ * switcher or a rofi-style drun launcher; Theme lists the named color
+ * themes below. All four share the same picker window, filtering, and
+ * keyboard handling. */
+enum PickerMode {
+  PickerModeCombined,
+  PickerModeProjectOnly,
+  PickerModeAppOnly,
+  PickerModeTheme
+};
 
 typedef struct {
   int index; /* into projects[] or launcher_apps[], per kind */
@@ -1251,6 +1257,8 @@ static int project_find_for_path(const char *path);
 static void project_label_for_path(const char *path, char *out, size_t outsz);
 static int project_index_for_workspace_name(const char *wsname);
 static void project_switch_workspace(Monitor *m, const char *path);
+static void project_set_active(const char *path);
+static void project_init_default(void);
 static int project_resolve_selected_path(char *out, size_t outsz);
 static void project_launch(int with_agent);
 static void widget_format_projects(char *buf, size_t size);
@@ -1437,6 +1445,8 @@ static void widget_refresh_client_borders(void);
 static void get_theme_state_path(char *buf, size_t size);
 static void load_theme_mode_state(void);
 static void save_theme_mode_state(void);
+static int color_theme_find_by_name(const char *name);
+static void color_theme_apply(size_t idx);
 static void view(const Arg *arg);
 static void viewnth(const Arg *arg);
 static void tagnth(const Arg *arg);
@@ -1483,6 +1493,11 @@ static int screen;
 static int sw, sh; /* X display screen geometry width, height */
 static int bh;     /* bar height */
 static int lrpad;  /* sum of left and right padding for text */
+/* Pixels drawbar() reserves for the clock at the far right of the top bar,
+ * past the systray -- updatesystray() shifts the tray left by this much so
+ * the two never overlap. Set in drawbar() just before it calls
+ * updatesystray(); 0 on any monitor that isn't selmon (no clock drawn there). */
+static int clock_reserved_w = 0;
 static int (*xerrorxlib)(Display *, XErrorEvent *);
 static unsigned int numlockmask = 0;
 static const std::array<void (*)(XEvent *), LASTEvent> handler =
@@ -1506,6 +1521,11 @@ static BarThemeConfig bar_theme_dark;
 static BarThemeConfig bar_theme_light;
 static enum ThemeMode theme_mode = ThemeModeSystem;
 static int theme_resolved_dark = 1;
+/* -1 means "no named theme picked -- just following theme_mode's plain
+ * dark/light/system default"; otherwise an index into color_themes[] whose
+ * colors were copied into both bar_theme_dark and bar_theme_light (a named
+ * theme is one complete look, not a dark/light pair) by color_theme_apply(). */
+static int active_color_theme = -1;
 static LuaWidget lua_widgets[MAX_LUA_WIDGETS];
 static size_t lua_widgets_len = 0;
 static LuaKey lua_keys[MAX_LUA_KEYS];
@@ -1615,6 +1635,14 @@ static char **projects = NULL;
 static size_t projects_len = 0;
 static size_t projects_cap = 0;
 static int projects_loaded = 0;
+/* The project shown in drawbar()'s top-left corner -- independent of
+ * whichever workspace/tag happens to be in view, so it doesn't disappear
+ * just because you've switched to a plain numbered workspace. Always
+ * non-empty: set to $HOME at every startup (see project_init_default() in
+ * setup()) and updated whenever the picker or mwm.switch_project() actually
+ * switches projects (project_set_active()). Deliberately not persisted --
+ * every session starts on "default" again, per the user's request. */
+static char active_project_path[PATH_MAX] = "";
 
 static Window project_win = None;
 static Monitor *project_mon = NULL;
@@ -1729,11 +1757,14 @@ static time_t widgets_last_refresh = 0;
  * tracking its own wall-clock timer. */
 static unsigned long widget_tick = 0;
 static WidgetLayout widget_layout[WidgetCount];
+/* WidgetClock is deliberately absent -- it's drawn directly in drawbar()
+ * instead, at the far right of the top bar past the systray, rather than
+ * among these in the bottom widget bar. */
 static const enum WidgetId widget_draw_order[] = {
     WidgetBattery, WidgetBacklight, WidgetVolume,    WidgetMic,   WidgetMedia,
     WidgetTheme,   WidgetNotif,     WidgetTodo,      WidgetAgents, WidgetGit,
     WidgetProjects, WidgetLoad,     WidgetCpu,       WidgetMem,   WidgetDisk,
-    WidgetNet,     WidgetWifi,      WidgetBluetooth, WidgetKbLayout, WidgetClock,
+    WidgetNet,     WidgetWifi,      WidgetBluetooth, WidgetKbLayout,
 };
 static Window slider_popup_win = None;
 static Monitor *slider_popup_mon = NULL;
@@ -2743,11 +2774,7 @@ static void widget_cycle_kblayout(void) {
 }
 
 static void widget_format_backlight(char *buf, size_t size) {
-  if (backlight_percent < 0) {
-    snprintf(buf, size, "%s n/a", icon_backlight);
-    return;
-  }
-  snprintf(buf, size, "%s %d%%", icon_backlight, backlight_percent);
+  snprintf(buf, size, "%s", icon_backlight);
 }
 
 static void widget_format_battery(char *buf, size_t size) {
@@ -2777,21 +2804,15 @@ static void widget_format_volume(char *buf, size_t size) {
   const char *icon;
 
   if (volume_percent < 0) {
-    snprintf(buf, size, "%s n/a", icon_volume_high);
-    return;
-  }
-  if (volume_muted || volume_percent == 0) {
+    icon = icon_volume_high;
+  } else if (volume_muted || volume_percent == 0) {
     icon = icon_volume_muted;
   } else if (volume_percent < 50) {
     icon = icon_volume_low;
   } else {
     icon = icon_volume_high;
   }
-  if (volume_muted) {
-    snprintf(buf, size, "%s %d%% muted", icon, volume_percent);
-    return;
-  }
-  snprintf(buf, size, "%s %d%%", icon, volume_percent);
+  snprintf(buf, size, "%s", icon);
 }
 
 /* Blank (not "n/a") when there's no capture device at all -- unlike output
@@ -3340,6 +3361,10 @@ static int widget_handle_button(Monitor *m, XButtonPressedEvent *ev) {
       widget_cycle_theme_mode(-1);
       return 1;
     }
+    if (ev->button == Button2) {
+      project_toggle(m, PickerModeTheme);
+      return 1;
+    }
     return 1;
   }
 
@@ -3568,10 +3593,11 @@ static const char *termcmd[] = {terminal_cmd, NULL};
 
 static const Key keys[] = {
     /* modifier                     key        function        argument */
-    /* One picker window (see "project picker" further down), three scopes:
+    /* One picker window (see "project picker" further down), four scopes:
      * Mod4+p is a rofi-style app launcher (search $PATH only), Mod4+space
-     * jumps straight to a project, and Mod4+o is the original combined
-     * search across both. */
+     * jumps straight to a project, Mod4+o is the original combined search
+     * across both, and Mod4+Shift+t (further down, by the layout keys)
+     * browses color themes. */
     {MODKEY, XK_p, project_toggle_key, {.i = PickerModeAppOnly}},
     {MODKEY, XK_Return, spawn, {.v = termcmd}},
     {MODKEY, XK_o, project_toggle_key, {.i = PickerModeCombined}},
@@ -3608,6 +3634,9 @@ static const Key keys[] = {
     {MODKEY, XK_t, setlayout, {.v = &layouts[0]}},
     {MODKEY, XK_f, setlayout, {.v = &layouts[1]}},
     {MODKEY, XK_m, setlayout, {.v = &layouts[2]}},
+    /* Same picker, fourth scope: browse and apply the named color themes in
+     * color_themes[] (also reachable by middle-clicking the theme widget). */
+    {MODKEY | ShiftMask, XK_t, project_toggle_key, {.i = PickerModeTheme}},
     /* Used to be setlayout({0})'s "toggle to the other layout" -- redundant
      * with Ctrl+Mod+space (cyclelayout) and Mod+t/f/m (pick one directly),
      * so it's free for the project picker instead. */
@@ -4187,7 +4216,7 @@ void buttonpress(XEvent *e) {
   Client *c;
   Monitor *m;
   XButtonPressedEvent *ev = &e->xbutton;
-  unsigned int statusw, trayw;
+  unsigned int statusw, trayw, clockw;
 
   click = ClkRootWin;
   if (project_handle_button(ev)) {
@@ -4219,9 +4248,18 @@ void buttonpress(XEvent *e) {
   }
   // If the window is equal to the selected monitor's bar window
   if (ev->window == selmon->barwin) {
-    i = x = 0;
+    char project_label[288];
+    char base[256];
+
+    i = 0;
+    /* Must match drawbar()'s layout exactly: project label, then tags,
+     * starting past it rather than at the left edge. */
+    project_basename(active_project_path, base, sizeof(base));
+    snprintf(project_label, sizeof(project_label), "%s %s", icon_projects, base);
+    x = (int)TEXTW(project_label);
     statusw = TEXTW(stext);
     trayw = (showsystray && systray && selmon == m) ? getsystraywidth() : 0;
+    clockw = (unsigned int)clock_reserved_w;
     while (i < workspace_count_visible()) {
       Workspace *ws = workspace_by_index(i);
       if (!ws) {
@@ -4238,7 +4276,7 @@ void buttonpress(XEvent *e) {
       arg.ull = workspace_mask_from_index(i);
     } else if (ev->x < x + TEXTW(selmon->ltsymbol)) {
       click = ClkLtSymbol;
-    } else if (ev->x > selmon->ww - (int)statusw - (int)trayw) {
+    } else if (ev->x > selmon->ww - (int)statusw - (int)trayw - (int)clockw) {
       click = ClkStatusText;
     } else {
       click = ClkWinTitle;
@@ -4337,6 +4375,77 @@ static void set_default_bar_theme(void) {
   copy_color_value(bar_theme_light.selected.fg, default_col_light_accent_fg);
   copy_color_value(bar_theme_light.selected.bg, default_col_light_accent);
   copy_color_value(bar_theme_light.selected.border, default_col_light_accent);
+}
+
+typedef struct {
+  const char *name;
+  int is_light;
+  BarThemeConfig colors; /* {normal{fg,bg,border}, selected{fg,bg,border}} */
+} ColorTheme;
+
+/* Picked from the Mod+Shift+t / theme-widget-middle-click picker (see
+ * PickerModeTheme in project_filter()/project_launch()) -- selecting one
+ * copies .colors into both bar_theme_dark and bar_theme_light via
+ * color_theme_apply(), since each entry here is one complete look rather
+ * than a dark/light pair. "Default Dark"/"Default Light" are the original
+ * hardcoded scheme from set_default_bar_theme(), kept as entries 0 and 1 so
+ * they're reachable from the same list. */
+static const ColorTheme color_themes[] = {
+    {"Default Dark", 0, {{"#bbbbbb", "#222222", "#444444"}, {"#eeeeee", "#005577", "#005577"}}},
+    {"Default Light", 1, {{"#24292f", "#f4f5f7", "#d0d5dd"}, {"#ffffff", "#2d6cdf", "#2d6cdf"}}},
+    {"Dracula", 0, {{"#6272a4", "#282a36", "#44475a"}, {"#f8f8f2", "#bd93f9", "#bd93f9"}}},
+    {"Nord", 0, {{"#4c566a", "#2e3440", "#3b4252"}, {"#2e3440", "#88c0d0", "#88c0d0"}}},
+    {"Gruvbox Dark", 0, {{"#928374", "#282828", "#3c3836"}, {"#282828", "#fabd2f", "#fabd2f"}}},
+    {"Gruvbox Light", 1, {{"#928374", "#fbf1c7", "#ebdbb2"}, {"#fbf1c7", "#d65d0e", "#d65d0e"}}},
+    {"Solarized Dark", 0, {{"#586e75", "#002b36", "#073642"}, {"#002b36", "#268bd2", "#268bd2"}}},
+    {"Solarized Light", 1, {{"#93a1a1", "#fdf6e3", "#eee8d5"}, {"#fdf6e3", "#268bd2", "#268bd2"}}},
+    {"One Dark", 0, {{"#5c6370", "#282c34", "#3e4451"}, {"#282c34", "#61afef", "#61afef"}}},
+    {"One Light", 1, {{"#a0a1a7", "#fafafa", "#e5e5e6"}, {"#fafafa", "#4078f2", "#4078f2"}}},
+    {"Tokyo Night", 0, {{"#565f89", "#1a1b26", "#24283b"}, {"#1a1b26", "#7aa2f7", "#7aa2f7"}}},
+    {"Tokyo Night Storm", 0, {{"#565f89", "#24283b", "#414868"}, {"#24283b", "#7aa2f7", "#7aa2f7"}}},
+    {"Catppuccin Mocha", 0, {{"#6c7086", "#1e1e2e", "#313244"}, {"#1e1e2e", "#cba6f7", "#cba6f7"}}},
+    {"Catppuccin Latte", 1, {{"#9ca0b0", "#eff1f5", "#ccd0da"}, {"#eff1f5", "#8839ef", "#8839ef"}}},
+    {"Catppuccin Frappe", 0, {{"#737994", "#303446", "#414559"}, {"#303446", "#ca9ee6", "#ca9ee6"}}},
+    {"Catppuccin Macchiato", 0, {{"#6e738d", "#24273a", "#363a4f"}, {"#24273a", "#c6a0f6", "#c6a0f6"}}},
+    {"Monokai", 0, {{"#75715e", "#272822", "#3e3d32"}, {"#f8f8f2", "#f92672", "#f92672"}}},
+    {"Everforest Dark", 0, {{"#859289", "#2d353b", "#343f44"}, {"#2d353b", "#a7c080", "#a7c080"}}},
+    {"Everforest Light", 1, {{"#939f91", "#fffbef", "#f4f0d9"}, {"#fffbef", "#8da101", "#8da101"}}},
+    {"Rose Pine", 0, {{"#6e6a86", "#191724", "#1f1d2e"}, {"#191724", "#c4a7e7", "#c4a7e7"}}},
+    {"Rose Pine Dawn", 1, {{"#797593", "#faf4ed", "#f2e9e1"}, {"#faf4ed", "#907aa9", "#907aa9"}}},
+    {"Ayu Dark", 0, {{"#5c6773", "#0a0e14", "#131721"}, {"#0a0e14", "#ffb454", "#ffb454"}}},
+    {"Kanagawa", 0, {{"#727169", "#16161d", "#1f1f28"}, {"#16161d", "#7e9cd8", "#7e9cd8"}}},
+    {"Github Dark", 0, {{"#8b949e", "#0d1117", "#30363d"}, {"#0d1117", "#58a6ff", "#58a6ff"}}},
+    {"Github Light", 1, {{"#57606a", "#ffffff", "#d0d7de"}, {"#ffffff", "#0969da", "#0969da"}}},
+    {"Material Palenight", 0, {{"#676e95", "#292d3e", "#32374a"}, {"#292d3e", "#c792ea", "#c792ea"}}},
+    {"Nightfox", 0, {{"#738091", "#192330", "#29394f"}, {"#192330", "#719cd6", "#719cd6"}}},
+};
+
+static int color_theme_find_by_name(const char *name) {
+  size_t i;
+  if (!name || !name[0]) {
+    return -1;
+  }
+  for (i = 0; i < LENGTH(color_themes); i++) {
+    if (!strcmp(color_themes[i].name, name)) {
+      return (int)i;
+    }
+  }
+  return -1;
+}
+
+/* Applies one complete look to both bar_theme_dark and bar_theme_light (see
+ * the ColorTheme comment above), persists the choice, and repaints. Safe to
+ * call during setup() before selmon exists -- widget_apply_theme() already
+ * guards that. */
+static void color_theme_apply(size_t idx) {
+  if (idx >= LENGTH(color_themes)) {
+    return;
+  }
+  bar_theme_dark = color_themes[idx].colors;
+  bar_theme_light = color_themes[idx].colors;
+  active_color_theme = (int)idx;
+  save_theme_mode_state();
+  widget_apply_theme();
 }
 
 static const BarThemeConfig *active_bar_theme(void) {
@@ -4452,31 +4561,27 @@ static void widget_update_theme(void) {
 }
 
 static void widget_format_theme(char *buf, size_t size) {
-  const char *mode_name;
   const char *icon;
+
+  if (active_color_theme >= 0) {
+    icon = color_themes[active_color_theme].is_light ? icon_theme_light : icon_theme_dark;
+    snprintf(buf, size, "%s", icon);
+    return;
+  }
 
   switch (theme_mode) {
   case ThemeModeDark:
-    mode_name = "dark";
     icon = icon_theme_dark;
     break;
   case ThemeModeLight:
-    mode_name = "light";
     icon = icon_theme_light;
     break;
   case ThemeModeSystem:
   default:
-    mode_name = "auto";
     icon = icon_theme_auto;
     break;
   }
-
-  if (theme_mode == ThemeModeSystem) {
-    snprintf(buf, size, "%s %s (%s)", icon, mode_name,
-             theme_resolved_dark ? "dark" : "light");
-    return;
-  }
-  snprintf(buf, size, "%s %s", icon, mode_name);
+  snprintf(buf, size, "%s", icon);
 }
 
 static void get_theme_state_path(char *buf, size_t size) {
@@ -4499,12 +4604,16 @@ static void get_theme_state_path(char *buf, size_t size) {
   buf[0] = '\0';
 }
 
+/* Second line, if present, is the last color_themes[] entry picked from the
+ * theme picker -- see color_theme_apply(). Absent/unrecognized just means
+ * "none", not an error; older state files predate this line entirely. */
 static void load_theme_mode_state(void) {
   char path[PATH_MAX];
-  char line[32];
+  char line[64];
   FILE *fp;
 
   theme_mode = ThemeModeSystem;
+  active_color_theme = -1;
   get_theme_state_path(path, sizeof(path));
   if (path[0] == '\0') {
     return;
@@ -4523,6 +4632,10 @@ static void load_theme_mode_state(void) {
     } else {
       theme_mode = ThemeModeSystem;
     }
+  }
+  if (fgets(line, sizeof(line), fp)) {
+    line[strcspn(line, "\n")] = '\0';
+    active_color_theme = color_theme_find_by_name(line);
   }
   fclose(fp);
 }
@@ -4564,14 +4677,23 @@ static void save_theme_mode_state(void) {
     return;
   }
   fprintf(fp, "%s\n", name);
+  fprintf(fp, "%s\n", active_color_theme >= 0 ? color_themes[active_color_theme].name : "none");
   fclose(fp);
 }
 
+/* The classic 3-way toggle always means "plain dark/light/auto" -- so
+ * clicking/scrolling it while a named theme from the picker is active
+ * clears that override back to the original hardcoded look rather than
+ * leaving stale picked colors that this toggle can no longer see. */
 static void widget_cycle_theme_mode(int direction) {
   int next = (((int)theme_mode + direction) % ThemeModeCount + ThemeModeCount) %
              ThemeModeCount;
 
   theme_mode = (enum ThemeMode)next;
+  if (active_color_theme >= 0) {
+    active_color_theme = -1;
+    set_default_bar_theme();
+  }
   theme_resolved_dark = theme_resolve_prefers_dark();
   save_theme_mode_state();
   widget_apply_theme();
@@ -4856,6 +4978,7 @@ static int lua_mwm_switch_project(lua_State *L) {
   if (index == SIZE_MAX) {
     return luaL_error(L, "unable to switch project");
   }
+  project_set_active(path_buf);
   lua_pushinteger(L, (lua_Integer)index + 1);
   return 1;
 }
@@ -8053,11 +8176,20 @@ static void projects_ensure_loaded(void) {
 }
 
 /* Last path component, with any trailing slashes ignored. This is the
- * workspace name a project switches to: ~/code/foo -> workspace "foo". */
+ * workspace name a project switches to: ~/code/foo -> workspace "foo". $HOME
+ * itself is special-cased to "default" -- its basename would otherwise just
+ * be the username, and the whole point of the default project is that it's
+ * called "default". */
 static void project_basename(const char *path, char *out, size_t outsz) {
   char tmp[PATH_MAX];
   size_t len;
   const char *base;
+  const char *home = getenv("HOME");
+
+  if (path && home && home[0] && !strcmp(path, home)) {
+    snprintf(out, outsz, "default");
+    return;
+  }
 
   snprintf(tmp, sizeof(tmp), "%s", path ? path : "");
   len = strlen(tmp);
@@ -8155,6 +8287,34 @@ static void project_switch_workspace(Monitor *m, const char *path) {
   focus_workspace_by_name(m, wsname);
 }
 
+/* Records `path` as the active project shown in drawbar()'s top-left corner
+ * (see active_project_path) and repaints immediately. Separate from
+ * project_switch_workspace() -- the two usually happen together on a real
+ * project switch, but the label tracks "which project am I working in"
+ * independent of whatever workspace/tag is currently in view. */
+static void project_set_active(const char *path) {
+  if (!path) {
+    return;
+  }
+  snprintf(active_project_path, sizeof(active_project_path), "%s", path);
+  drawbars();
+}
+
+/* Called once from setup(): $HOME is always the active project at startup
+ * (project_basename() displays it as "default"), and saved to projects[] so
+ * it also shows up in the picker. Deliberately doesn't touch workspaces --
+ * unlike a real project switch, there's no workspace to jump to yet, and no
+ * "default" workspace is pre-created either (only a later, explicit switch
+ * to it creates one, same as any other project). */
+static void project_init_default(void) {
+  const char *home = getenv("HOME");
+  if (!home || !home[0]) {
+    return;
+  }
+  projects_add(home);
+  snprintf(active_project_path, sizeof(active_project_path), "%s", home);
+}
+
 /* Resolves what Enter/Ctrl+Enter in the picker should act on: the selected
  * row, or -- if the query doesn't match anything -- the typed path, added as
  * a new project. */
@@ -8167,28 +8327,35 @@ static int project_resolve_selected_path(char *out, size_t outsz) {
     snprintf(out, outsz, "%s", projects[project_filtered[project_sel].index]);
     return 1;
   }
-  /* AppOnly has no notion of "add as a project" -- an unmatched query there
-   * should just fall through to project_launch()'s run-as-shell-command
-   * case, the same as rofi's drun mode. */
-  if (project_mode != PickerModeAppOnly && project_filtered_len == 0 &&
-      project_query_len > 0) {
+  /* AppOnly and Theme have no notion of "add as a project" -- an unmatched
+   * query there should just fall through to project_launch()'s
+   * run-as-shell-command case, the same as rofi's drun mode. */
+  if ((project_mode == PickerModeCombined || project_mode == PickerModeProjectOnly) &&
+      project_filtered_len == 0 && project_query_len > 0) {
     project_expand_path(project_query, out, outsz);
     return projects_add(project_query);
   }
   return 0;
 }
 
-/* Enter/Ctrl+Enter from the picker. Three cases, in order: the selected row
- * is an app -- just launch it, with_agent doesn't apply. The selected row
- * (or the typed query) is a project directory -- switch to its workspace,
- * opening a terminal with a coding agent running in it only when with_agent
- * is set (Ctrl+Enter); plain Enter just switches. Otherwise -- nothing
- * matched and it's not a directory either -- run the typed query as a shell
- * command, the same fallback dmenu/rofi's "run" mode offers. */
+/* Enter/Ctrl+Enter from the picker. In order: the selected row is a theme --
+ * apply it and close, with_agent doesn't apply. The selected row is an app
+ * -- just launch it. The selected row (or the typed query) is a project
+ * directory -- switch to its workspace, opening a terminal with a coding
+ * agent running in it only when with_agent is set (Ctrl+Enter); plain Enter
+ * just switches. Otherwise -- nothing matched and it's not a directory
+ * either -- run the typed query as a shell command, the same fallback
+ * dmenu/rofi's "run" mode offers. */
 static void project_launch(int with_agent) {
   Arg a = {0};
   const char *argv_term[5];
   char path_buf[PATH_MAX];
+
+  if (project_filtered_len > 0 && project_filtered[project_sel].kind == PickResultTheme) {
+    color_theme_apply((size_t)project_filtered[project_sel].index);
+    project_close();
+    return;
+  }
 
   if (project_filtered_len > 0 && project_filtered[project_sel].kind == PickResultApp) {
     const char *argv_app[2];
@@ -8225,6 +8392,7 @@ static void project_launch(int with_agent) {
   }
 
   project_switch_workspace(project_mon ? project_mon : selmon, path_buf);
+  project_set_active(path_buf);
 
   if (with_agent) {
     argv_term[0] = terminal_cmd;
@@ -8314,27 +8482,45 @@ static int project_match_cmp(const void *a, const void *b) {
  * fuzzy matcher and merged into one ranked list, so the single most
  * relevant result wins regardless of which kind it is.
  *
- * project_mode narrows all of the above to a single kind: ProjectOnly skips
- * the apps loop entirely (and lists nothing extra on an empty query, same
- * as before); AppOnly skips the projects loop, and on an empty query lists
- * apps in their scanned (alphabetical) order instead, since there's no
- * saved/MRU app list to fall back to. */
+ * project_mode narrows all of the above to a single kind: ProjectOnly and
+ * AppOnly each pull from just their own loop below (AppOnly's empty-query
+ * case lists apps in their scanned/alphabetical order, since there's no
+ * saved/MRU app list to fall back to); Theme is exclusive of both and only
+ * ever matches color_themes[]. Combined is the only mode that runs both the
+ * project and app loops together. */
 static void project_filter(void) {
   static ProjectMatch all[MAX_PICK_CANDIDATES];
   size_t all_len = 0;
   size_t i;
+  int want_projects = project_mode == PickerModeCombined || project_mode == PickerModeProjectOnly;
+  int want_apps = project_mode == PickerModeCombined || project_mode == PickerModeAppOnly;
 
   project_sel = 0;
 
-  if (project_query_len == 0) {
-    if (project_mode != PickerModeAppOnly) {
+  if (project_mode == PickerModeTheme) {
+    for (i = 0; i < LENGTH(color_themes) && all_len < MAX_PICK_CANDIDATES; i++) {
+      int score = project_query_len > 0
+                      ? project_fuzzy_score(project_query, project_query_len, color_themes[i].name)
+                      : 0;
+      if (score >= 0) {
+        all[all_len].index = (int)i;
+        all[all_len].score = score;
+        all[all_len].kind = PickResultTheme;
+        all_len++;
+      }
+    }
+    if (project_query_len > 0) {
+      qsort(all, all_len, sizeof(ProjectMatch), project_match_cmp);
+    }
+  } else if (project_query_len == 0) {
+    if (want_projects) {
       for (i = 0; i < projects_len && all_len < MAX_PICK_CANDIDATES; i++) {
         all[all_len].index = (int)i;
         all[all_len].score = 0;
         all[all_len].kind = PickResultProject;
         all_len++;
       }
-    } else {
+    } else if (want_apps) {
       for (i = 0; i < launcher_apps_len && all_len < MAX_PICK_CANDIDATES; i++) {
         all[all_len].index = (int)i;
         all[all_len].score = 0;
@@ -8343,7 +8529,7 @@ static void project_filter(void) {
       }
     }
   } else {
-    if (project_mode != PickerModeAppOnly) {
+    if (want_projects) {
       for (i = 0; i < projects_len && all_len < MAX_PICK_CANDIDATES; i++) {
         int score = project_fuzzy_score(project_query, project_query_len, projects[i]);
         if (score >= 0) {
@@ -8354,7 +8540,7 @@ static void project_filter(void) {
         }
       }
     }
-    if (project_mode != PickerModeProjectOnly) {
+    if (want_apps) {
       for (i = 0; i < launcher_apps_len && all_len < MAX_PICK_CANDIDATES; i++) {
         int score = project_fuzzy_score(project_query, project_query_len, launcher_apps[i]);
         if (score >= 0) {
@@ -8426,9 +8612,11 @@ static void project_draw(void) {
 
   /* Combined keeps the plain "> " prompt it's always had; the single-scope
    * modes get their icon as a prefix so it's visually obvious which picker
-   * came up, since Mod+space/Mod+p/Mod+o now open three different ones. */
+   * came up, since Mod+space/Mod+p/Mod+o/Mod+Shift+t now open four
+   * different ones. */
   prefix = project_mode == PickerModeProjectOnly ? icon_projects
            : project_mode == PickerModeAppOnly  ? icon_launcher
+           : project_mode == PickerModeTheme    ? icon_theme_auto
                                                  : ">";
   snprintf(display, sizeof(display), "%s %s", prefix, project_query);
   drw_setscheme(drw, scheme[SchemeSel]);
@@ -8443,6 +8631,8 @@ static void project_draw(void) {
     if (project_mode == PickerModeAppOnly) {
       hint = project_query_len > 0 ? "No matching apps -- Enter runs this as a command"
                                     : "No apps found";
+    } else if (project_mode == PickerModeTheme) {
+      hint = "No matching themes";
     } else if (project_mode == PickerModeProjectOnly) {
       hint = project_query_len > 0 ? "No matching projects -- Enter adds this path as one"
              : projects_len == 0   ? "No projects yet -- type a path to add one"
@@ -8462,14 +8652,21 @@ static void project_draw(void) {
 
     for (i = 0; i < project_filtered_len; i++) {
       const ProjectMatch *match = &project_filtered[i];
-      int is_app = match->kind == PickResultApp;
       char row_text[PATH_MAX + 384];
-      int close_w = is_app ? 0 : bh;
+      /* Only saved projects are removable via the close button -- apps come
+       * from $PATH and themes from the built-in table, neither of which is
+       * "yours" to delete. */
+      int close_w = match->kind == PickResultProject ? bh : 0;
       int close_x = project_w - close_w;
 
-      if (is_app) {
+      if (match->kind == PickResultApp) {
         snprintf(row_text, sizeof(row_text), "%s %s", icon_launcher,
                  launcher_apps[match->index]);
+      } else if (match->kind == PickResultTheme) {
+        const ColorTheme *ct = &color_themes[match->index];
+        snprintf(row_text, sizeof(row_text), "%s %s%s",
+                 ct->is_light ? icon_theme_light : icon_theme_dark, ct->name,
+                 match->index == active_color_theme ? " (active)" : "");
       } else {
         const char *path = projects[match->index];
         char base[256];
@@ -8496,7 +8693,7 @@ static void project_draw(void) {
       project_row_layout[i].close_y = y;
       project_row_layout[i].close_w = close_w;
       project_row_layout[i].close_h = bh;
-      if (!is_app) {
+      if (match->kind == PickResultProject) {
         drw_setscheme(drw, scheme[SchemeNorm]);
         drw_text(drw, close_x, y, bh, bh, 0, icon_close, 0);
       }
@@ -10328,6 +10525,10 @@ void drawbar(Monitor *m) {
   int boxs = drw->fonts->h / 9;
   int boxw = drw->fonts->h / 6 + 2;
   char prompt_display[sizeof(command_prompt) + 16];
+  char project_label[288];
+  char clock_text[64];
+  int clockw = 0;
+  int project_labelw = 0;
   const char *center_text = NULL;
   size_t i;
   WorkspaceMask occ = 0, urg = 0;
@@ -10340,16 +10541,37 @@ void drawbar(Monitor *m) {
   if (m == selmon) { /* status is only drawn on selected monitor */
     drw_setscheme(drw, scheme[SchemeNorm]);
     trayw = showsystray && systray ? getsystraywidth() : 0;
+    widget_format_clock(clock_text, sizeof(clock_text));
+    clockw = (int)TEXTW(clock_text);
+    clock_reserved_w = clockw;
     tw = TEXTW(stext) - lrpad + 2; /* 2px right padding */
-    drw_text(drw, m->ww - tw - trayw, 0, tw, bh, 0, stext, 0);
+    drw_text(drw, m->ww - tw - trayw - clockw, 0, tw, bh, 0, stext, 0);
+    drw_text(drw, m->ww - clockw, 0, clockw, bh, lrpad / 2, clock_text, 0);
   }
+  /* Not reset on the else path -- clock_reserved_w only means anything for
+   * selmon's bar (where the clock/tray actually live), so a non-selmon
+   * monitor's redraw should just leave the last real value alone rather
+   * than transiently zeroing it out from under a same-tick updatesystray(). */
+
+  /* Active project in the far left corner -- independent of whichever
+   * workspace/tag is currently viewed (see active_project_path); there's
+   * always one, defaulting to "default" (tied to $HOME) at startup. */
+  {
+    char base[256];
+    project_basename(active_project_path, base, sizeof(base));
+    snprintf(project_label, sizeof(project_label), "%s %s", icon_projects, base);
+  }
+  project_labelw = (int)TEXTW(project_label);
+  drw_setscheme(drw, scheme[SchemeSel]);
+  drw_text(drw, 0, 0, project_labelw, bh, lrpad / 2, project_label, 0);
+  draw_vdivider(project_labelw, bh / 4, bh - bh / 2);
   for (c = m->clients; c; c = c->next) {
     occ |= c->tags;
     if (c->isurgent) {
       urg |= c->tags;
     }
   }
-  x = 0;
+  x = project_labelw;
   for (i = 0; i < workspace_count_visible(); i++) {
     WorkspaceMask mask = workspace_mask_from_index(i);
     Workspace *ws = workspace_by_index(i);
@@ -10373,7 +10595,7 @@ void drawbar(Monitor *m) {
   w = TEXTW(m->ltsymbol);
   drw_setscheme(drw, scheme[SchemeNorm]);
   x = drw_text(drw, x, 0, w, bh, lrpad / 2, m->ltsymbol, 0);
-  if ((w = m->ww - tw - trayw - x) > bh) {
+  if ((w = m->ww - tw - trayw - clockw - x) > bh) {
     if (m == selmon && command_prompt_active) {
       snprintf(prompt_display, sizeof(prompt_display), "lua> %s", command_prompt);
       center_text = prompt_display;
@@ -10444,7 +10666,6 @@ void drawwidgetbar(Monitor *m) {
   widget_format_wifi(text[WidgetWifi], sizeof(text[WidgetWifi]));
   widget_format_bluetooth(text[WidgetBluetooth], sizeof(text[WidgetBluetooth]));
   widget_format_kblayout(text[WidgetKbLayout], sizeof(text[WidgetKbLayout]));
-  widget_format_clock(text[WidgetClock], sizeof(text[WidgetClock]));
 
   x = m->ww;
   {
@@ -11622,6 +11843,13 @@ void reloadconfig(const Arg *arg) {
 
   set_default_bar_theme();
   load_config_from_lua();
+  /* A theme picked from the picker takes precedence over both the
+   * hardcoded default just restored above and whatever Lua just set --
+   * same "last explicit choice wins" rule setup() follows at startup. */
+  if (active_color_theme >= 0) {
+    bar_theme_dark = color_themes[active_color_theme].colors;
+    bar_theme_light = color_themes[active_color_theme].colors;
+  }
   setcolorscheme();
   /* Unconditional even though mwm.keybind()/mwm.mousebind() already
    * re-grab on each call: a reload that registers fewer (or zero) Lua
@@ -12077,10 +12305,17 @@ void setup(void) {
   set_default_bar_theme();
   workspace_set_defaults();
   load_theme_from_lua();
+  /* A previously picked named theme wins over both of the above -- it's
+   * the user's last explicit choice via the picker, not a fallback. */
+  if (active_color_theme >= 0) {
+    bar_theme_dark = color_themes[active_color_theme].colors;
+    bar_theme_light = color_themes[active_color_theme].colors;
+  }
   notif_dbus_init();
   todo_seed_fake();
   projects_load();
   projects_loaded = 1;
+  project_init_default();
   get_agent_status_dir(agent_status_dir, sizeof(agent_status_dir));
   mkdir(agent_status_dir, 0700);
   agents_refresh();
@@ -12699,7 +12934,9 @@ void updatesystray(void) {
     x += i->w + systrayspacing;
   }
 
-  wc.x = selmon->mx + selmon->ww - (int)width;
+  /* Shifted left by clock_reserved_w so the tray never overlaps the clock
+   * drawbar() just drew past it, at the true right edge of the bar. */
+  wc.x = selmon->mx + selmon->ww - (int)width - clock_reserved_w;
   wc.y = selmon->by;
   wc.width = width;
   wc.height = bh;
