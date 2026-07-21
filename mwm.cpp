@@ -1025,6 +1025,13 @@ enum SidebarAnim { SidebarAnimIdle, SidebarAnimOpening, SidebarAnimClosing };
 
 enum PickResultKind { PickResultProject, PickResultApp };
 
+/* What the picker is scoped to for this invocation -- Combined is the
+ * original "search everything" behavior (still reachable via Mod+o);
+ * ProjectOnly/AppOnly restrict it to one kind, like a dedicated project
+ * switcher or a rofi-style drun launcher, while still sharing the same
+ * picker window, filtering, and keyboard handling. */
+enum PickerMode { PickerModeCombined, PickerModeProjectOnly, PickerModeAppOnly };
+
 typedef struct {
   int index; /* into projects[] or launcher_apps[], per kind */
   int score;
@@ -1251,9 +1258,9 @@ static void project_filter(void);
 static int project_total_h(void);
 static void project_position(Monitor *m);
 static void project_draw(void);
-static void project_open(Monitor *m);
+static void project_open(Monitor *m, enum PickerMode mode);
 static void project_close(void);
-static void project_toggle(Monitor *m);
+static void project_toggle(Monitor *m, enum PickerMode mode);
 static void project_toggle_key(const Arg *arg);
 static void project_submit(void);
 static void project_submit_agent(void);
@@ -1612,6 +1619,7 @@ static int projects_loaded = 0;
 static Window project_win = None;
 static Monitor *project_mon = NULL;
 static int project_visible = 0;
+static enum PickerMode project_mode = PickerModeCombined;
 static char project_query[PICKER_QUERY_MAX];
 static size_t project_query_len = 0;
 static ProjectMatch project_filtered[PROJECT_MAX_RESULTS];
@@ -3253,7 +3261,7 @@ static int widget_handle_button(Monitor *m, XButtonPressedEvent *ev) {
 
   if (ev->x >= launcher_btn_x && ev->x < launcher_btn_x + launcher_btn_w) {
     if (ev->button == Button1) {
-      project_toggle(m);
+      project_toggle(m, PickerModeCombined);
     }
     return 1;
   }
@@ -3365,7 +3373,7 @@ static int widget_handle_button(Monitor *m, XButtonPressedEvent *ev) {
 
   if (widget_hit(WidgetProjects, ev->x)) {
     if (ev->button == Button1) {
-      project_toggle(m);
+      project_toggle(m, PickerModeProjectOnly);
     }
     return 1;
   }
@@ -3405,6 +3413,18 @@ static int widget_handle_button(Monitor *m, XButtonPressedEvent *ev) {
   return 1;
 }
 
+/* Interning this on every save/restore call cost a server round trip per
+ * client -- with several clients open, GC'ing an empty workspace on switch
+ * (which re-saves every client's tags, see workspace_remove_index) turned
+ * into a burst of blocking round trips and made switching feel laggy. */
+static Atom workspace_tags_atom(void) {
+  static Atom atom = None;
+  if (atom == None) {
+    atom = XInternAtom(dpy, "_MWM_WORKSPACE_TAGS", False);
+  }
+  return atom;
+}
+
 static void client_save_workspace_tags(const Client *c) {
   Atom property;
   unsigned long data[2];
@@ -3412,7 +3432,7 @@ static void client_save_workspace_tags(const Client *c) {
   if (!c) {
     return;
   }
-  property = XInternAtom(dpy, "_MWM_WORKSPACE_TAGS", False);
+  property = workspace_tags_atom();
   data[0] = (unsigned long)(c->tags & 0xFFFFFFFFULL);
   data[1] = (unsigned long)((c->tags >> 32) & 0xFFFFFFFFULL);
   XChangeProperty(dpy, c->win, property, XA_CARDINAL, 32, PropModeReplace,
@@ -3433,7 +3453,7 @@ static int client_restore_workspace_tags(Window w, WorkspaceMask *tags) {
     return 0;
   }
 
-  property = XInternAtom(dpy, "_MWM_WORKSPACE_TAGS", False);
+  property = workspace_tags_atom();
   if (XGetWindowProperty(dpy, w, property, 0, 2, False, XA_CARDINAL,
                          &actual_type, &actual_format, &nitems, &bytes_after,
                          &data) != Success) {
@@ -3548,12 +3568,13 @@ static const char *termcmd[] = {terminal_cmd, NULL};
 
 static const Key keys[] = {
     /* modifier                     key        function        argument */
-    /* The project picker doubles as an app launcher (see "project picker"
-     * further down) -- typing searches both saved projects and $PATH, so
-     * Mod4+p no longer needs an external rofi/dmenu. */
-    {MODKEY, XK_p, project_toggle_key, {0}},
+    /* One picker window (see "project picker" further down), three scopes:
+     * Mod4+p is a rofi-style app launcher (search $PATH only), Mod4+space
+     * jumps straight to a project, and Mod4+o is the original combined
+     * search across both. */
+    {MODKEY, XK_p, project_toggle_key, {.i = PickerModeAppOnly}},
     {MODKEY, XK_Return, spawn, {.v = termcmd}},
-    {MODKEY, XK_o, project_toggle_key, {0}},
+    {MODKEY, XK_o, project_toggle_key, {.i = PickerModeCombined}},
     {MODKEY, XK_a, agent_jump_next_needs_input, {0}},
     {MODKEY, XK_b, togglebar, {0}},
     {MODKEY, XK_r, reloadconfig, {0}},
@@ -3587,7 +3608,10 @@ static const Key keys[] = {
     {MODKEY, XK_t, setlayout, {.v = &layouts[0]}},
     {MODKEY, XK_f, setlayout, {.v = &layouts[1]}},
     {MODKEY, XK_m, setlayout, {.v = &layouts[2]}},
-    {MODKEY, XK_space, setlayout, {0}},
+    /* Used to be setlayout({0})'s "toggle to the other layout" -- redundant
+     * with Ctrl+Mod+space (cyclelayout) and Mod+t/f/m (pick one directly),
+     * so it's free for the project picker instead. */
+    {MODKEY, XK_space, project_toggle_key, {.i = PickerModeProjectOnly}},
     {MODKEY | ShiftMask, XK_space, togglefloating, {0}},
     {MODKEY | ControlMask, XK_space, cyclelayout, {.i = +1}},
     {MODKEY | ControlMask | ShiftMask, XK_space, cyclelayout, {.i = -1}},
@@ -8143,7 +8167,11 @@ static int project_resolve_selected_path(char *out, size_t outsz) {
     snprintf(out, outsz, "%s", projects[project_filtered[project_sel].index]);
     return 1;
   }
-  if (project_filtered_len == 0 && project_query_len > 0) {
+  /* AppOnly has no notion of "add as a project" -- an unmatched query there
+   * should just fall through to project_launch()'s run-as-shell-command
+   * case, the same as rofi's drun mode. */
+  if (project_mode != PickerModeAppOnly && project_filtered_len == 0 &&
+      project_query_len > 0) {
     project_expand_path(project_query, out, outsz);
     return projects_add(project_query);
   }
@@ -8284,7 +8312,13 @@ static int project_match_cmp(const void *a, const void *b) {
  * dumping every $PATH executable the moment it opens would bury it in
  * noise. Once you start typing, projects and apps are scored with the same
  * fuzzy matcher and merged into one ranked list, so the single most
- * relevant result wins regardless of which kind it is. */
+ * relevant result wins regardless of which kind it is.
+ *
+ * project_mode narrows all of the above to a single kind: ProjectOnly skips
+ * the apps loop entirely (and lists nothing extra on an empty query, same
+ * as before); AppOnly skips the projects loop, and on an empty query lists
+ * apps in their scanned (alphabetical) order instead, since there's no
+ * saved/MRU app list to fall back to. */
 static void project_filter(void) {
   static ProjectMatch all[MAX_PICK_CANDIDATES];
   size_t all_len = 0;
@@ -8293,29 +8327,42 @@ static void project_filter(void) {
   project_sel = 0;
 
   if (project_query_len == 0) {
-    for (i = 0; i < projects_len && all_len < MAX_PICK_CANDIDATES; i++) {
-      all[all_len].index = (int)i;
-      all[all_len].score = 0;
-      all[all_len].kind = PickResultProject;
-      all_len++;
-    }
-  } else {
-    for (i = 0; i < projects_len && all_len < MAX_PICK_CANDIDATES; i++) {
-      int score = project_fuzzy_score(project_query, project_query_len, projects[i]);
-      if (score >= 0) {
+    if (project_mode != PickerModeAppOnly) {
+      for (i = 0; i < projects_len && all_len < MAX_PICK_CANDIDATES; i++) {
         all[all_len].index = (int)i;
-        all[all_len].score = score;
+        all[all_len].score = 0;
         all[all_len].kind = PickResultProject;
         all_len++;
       }
-    }
-    for (i = 0; i < launcher_apps_len && all_len < MAX_PICK_CANDIDATES; i++) {
-      int score = project_fuzzy_score(project_query, project_query_len, launcher_apps[i]);
-      if (score >= 0) {
+    } else {
+      for (i = 0; i < launcher_apps_len && all_len < MAX_PICK_CANDIDATES; i++) {
         all[all_len].index = (int)i;
-        all[all_len].score = score;
+        all[all_len].score = 0;
         all[all_len].kind = PickResultApp;
         all_len++;
+      }
+    }
+  } else {
+    if (project_mode != PickerModeAppOnly) {
+      for (i = 0; i < projects_len && all_len < MAX_PICK_CANDIDATES; i++) {
+        int score = project_fuzzy_score(project_query, project_query_len, projects[i]);
+        if (score >= 0) {
+          all[all_len].index = (int)i;
+          all[all_len].score = score;
+          all[all_len].kind = PickResultProject;
+          all_len++;
+        }
+      }
+    }
+    if (project_mode != PickerModeProjectOnly) {
+      for (i = 0; i < launcher_apps_len && all_len < MAX_PICK_CANDIDATES; i++) {
+        int score = project_fuzzy_score(project_query, project_query_len, launcher_apps[i]);
+        if (score >= 0) {
+          all[all_len].index = (int)i;
+          all[all_len].score = score;
+          all[all_len].kind = PickResultApp;
+          all_len++;
+        }
       }
     }
     qsort(all, all_len, sizeof(ProjectMatch), project_match_cmp);
@@ -8368,6 +8415,7 @@ static void project_draw(void) {
   int y;
   size_t i;
   char display[PICKER_QUERY_MAX + 4];
+  const char *prefix;
 
   if (project_win == None) {
     return;
@@ -8376,7 +8424,13 @@ static void project_draw(void) {
   drw_setscheme(drw, scheme[SchemeNorm]);
   drw_rect(drw, 0, 0, project_w, total_h, 1, 1);
 
-  snprintf(display, sizeof(display), "> %s", project_query);
+  /* Combined keeps the plain "> " prompt it's always had; the single-scope
+   * modes get their icon as a prefix so it's visually obvious which picker
+   * came up, since Mod+space/Mod+p/Mod+o now open three different ones. */
+  prefix = project_mode == PickerModeProjectOnly ? icon_projects
+           : project_mode == PickerModeAppOnly  ? icon_launcher
+                                                 : ">";
+  snprintf(display, sizeof(display), "%s %s", prefix, project_query);
   drw_setscheme(drw, scheme[SchemeSel]);
   drw_text(drw, 0, 0, project_w, bh, lrpad / 2, display, 0);
 
@@ -8386,7 +8440,14 @@ static void project_draw(void) {
   y = bh + 1;
   if (project_filtered_len == 0) {
     const char *hint;
-    if (projects_len == 0 && project_query_len == 0) {
+    if (project_mode == PickerModeAppOnly) {
+      hint = project_query_len > 0 ? "No matching apps -- Enter runs this as a command"
+                                    : "No apps found";
+    } else if (project_mode == PickerModeProjectOnly) {
+      hint = project_query_len > 0 ? "No matching projects -- Enter adds this path as one"
+             : projects_len == 0   ? "No projects yet -- type a path to add one"
+                                   : "No projects";
+    } else if (projects_len == 0 && project_query_len == 0) {
       hint = "No projects yet -- type a path to add one, or search for an app";
     } else if (project_query_len > 0) {
       hint = "No matches -- Enter runs this as a command, or adds it as a project";
@@ -8446,7 +8507,7 @@ static void project_draw(void) {
   drw_map(drw, project_win, 0, 0, project_w, total_h);
 }
 
-static void project_open(Monitor *m) {
+static void project_open(Monitor *m, enum PickerMode mode) {
   XSetWindowAttributes wa = {};
 
   if (!m) {
@@ -8473,6 +8534,7 @@ static void project_open(Monitor *m) {
   }
 
   project_mon = m;
+  project_mode = mode;
   project_visible = 1;
   project_query[0] = '\0';
   project_query_len = 0;
@@ -8494,17 +8556,20 @@ static void project_close(void) {
   drawbars();
 }
 
-static void project_toggle(Monitor *m) {
-  if (project_visible) {
+/* Same mode pressed again closes it; a different mode's key while it's
+ * already open switches the picker to that mode instead of stacking or
+ * requiring a close first -- e.g. Mod+p while the project picker is up
+ * jumps straight to the app launcher. */
+static void project_toggle(Monitor *m, enum PickerMode mode) {
+  if (project_visible && project_mode == mode) {
     project_close();
   } else {
-    project_open(m ? m : selmon);
+    project_open(m ? m : selmon, mode);
   }
 }
 
 static void project_toggle_key(const Arg *arg) {
-  (void)arg;
-  project_toggle(selmon);
+  project_toggle(selmon, (enum PickerMode)arg->i);
 }
 
 static void project_submit(void) { project_launch(0); }
@@ -8573,6 +8638,21 @@ static int project_handle_keypress(XKeyEvent *ev) {
   }
   if (state == ControlMask && (keysym == XK_d || keysym == XK_x)) {
     project_remove_selected();
+    return 1;
+  }
+  if (state == ControlMask && keysym == XK_p) {
+    if (project_filtered_len > 0) {
+      project_sel = (int)((project_sel - 1 + (int)project_filtered_len) %
+                          (int)project_filtered_len);
+      project_draw();
+    }
+    return 1;
+  }
+  if (state == ControlMask && keysym == XK_n) {
+    if (project_filtered_len > 0) {
+      project_sel = (int)((project_sel + 1) % (int)project_filtered_len);
+      project_draw();
+    }
     return 1;
   }
 
