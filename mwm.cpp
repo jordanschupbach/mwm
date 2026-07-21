@@ -752,6 +752,7 @@ enum {
   ClkWidgetBar,
   ClkClientWin,
   ClkRootWin,
+  ClkClock,
   ClkLast
 }; /* clicks */
 
@@ -1459,6 +1460,18 @@ static void widget_update_backlight(void);
 static void widget_format_backlight(char *buf, size_t size);
 static void widget_format_battery(char *buf, size_t size);
 static void widget_format_clock(char *buf, size_t size);
+static int calendar_days_in_month(int year, int month);
+static int calendar_first_weekday(int year, int month);
+static void calendar_open(Monitor *m);
+static void calendar_close(void);
+static void calendar_toggle(Monitor *m);
+static void calendar_toggle_key(const Arg *arg);
+static void calendar_shift_month(int delta);
+static void calendar_position(Monitor *m);
+static int calendar_total_h(void);
+static void calendar_draw(void);
+static int calendar_handle_keypress(XKeyEvent *ev);
+static int calendar_handle_button(XButtonPressedEvent *ev);
 static void widget_format_cpu(char *buf, size_t size);
 static void widget_format_disk(char *buf, size_t size);
 static void widget_format_mem(char *buf, size_t size);
@@ -1577,6 +1590,15 @@ static int lrpad;  /* sum of left and right padding for text */
  * the two never overlap. Set in drawbar() just before it calls
  * updatesystray(); 0 on any monitor that isn't selmon (no clock drawn there). */
 static int clock_reserved_w = 0;
+
+/* {{{ calendar popup globals */
+static Window calendar_win = None;
+static int calendar_visible = 0;
+static Monitor *calendar_mon = NULL;
+static int calendar_month = 0; /* 0-11, currently displayed */
+static int calendar_year = 0;  /* e.g. 2026 */
+static int calendar_w;         /* 7 columns wide; set to 7*bh in setup() */
+/* }}} calendar popup globals */
 static int (*xerrorxlib)(Display *, XErrorEvent *);
 static unsigned int numlockmask = 0;
 static const std::array<void (*)(XEvent *), LASTEvent> handler =
@@ -3069,7 +3091,7 @@ static void widget_format_clock(char *buf, size_t size) {
   char timebuf[48];
 
   localtime_r(&now, &tm_buf);
-  strftime(timebuf, sizeof(timebuf), "%a %Y-%m-%d %H:%M", &tm_buf);
+  strftime(timebuf, sizeof(timebuf), "%a %m-%d %H:%M", &tm_buf);
   snprintf(buf, size, "%s %s", icon_clock, timebuf);
 }
 
@@ -3809,6 +3831,7 @@ static const Button buttons[] = {
     {ClkTagBar, 0, Button3, toggleview, {0}},
     {ClkTagBar, MODKEY, Button1, tag, {0}},
     {ClkTagBar, MODKEY, Button3, toggletag, {0}},
+    {ClkClock, 0, Button1, calendar_toggle_key, {0}},
 };
 
 // }}} config
@@ -4358,6 +4381,9 @@ void buttonpress(XEvent *e) {
   if (keybind_help_handle_button(ev)) {
     return;
   }
+  if (calendar_handle_button(ev)) {
+    return;
+  }
   if (wifi_handle_button(ev)) {
     return;
   }
@@ -4424,6 +4450,8 @@ void buttonpress(XEvent *e) {
       arg.ull = workspace_mask_from_index(i);
     } else if (ev->x < x + TEXTW(selmon->ltsymbol)) {
       click = ClkLtSymbol;
+    } else if (ev->x > selmon->ww - (int)clockw) {
+      click = ClkClock;
     } else if (ev->x > selmon->ww - (int)statusw - (int)trayw - (int)clockw) {
       click = ClkStatusText;
     } else {
@@ -10316,6 +10344,287 @@ static int wifi_handle_button(XButtonPressedEvent *ev) {
 
 /* }}} wifi popup */
 
+/* {{{ calendar popup */
+
+/* Number of days in `month` (0-11) of `year`, via the standard mktime
+ * normalization trick: asking for day 0 of the *next* month rolls back to
+ * the last day of *this* one. */
+static int calendar_days_in_month(int year, int month) {
+  struct tm tm_buf = {0};
+  tm_buf.tm_year = year - 1900;
+  tm_buf.tm_mon = month + 1;
+  tm_buf.tm_mday = 0;
+  mktime(&tm_buf);
+  return tm_buf.tm_mday;
+}
+
+/* 0 (Sunday) .. 6 (Saturday) for the 1st of `month`/`year`. */
+static int calendar_first_weekday(int year, int month) {
+  struct tm tm_buf = {0};
+  tm_buf.tm_year = year - 1900;
+  tm_buf.tm_mon = month;
+  tm_buf.tm_mday = 1;
+  mktime(&tm_buf);
+  return tm_buf.tm_wday;
+}
+
+static int calendar_total_h(void) {
+  int first_wd = calendar_first_weekday(calendar_year, calendar_month);
+  int days = calendar_days_in_month(calendar_year, calendar_month);
+  int rows = (first_wd + days + 6) / 7;
+  return bh /* month/year header, with prev/next zones */
+         + bh /* weekday-abbreviation header */
+         + rows * bh;
+}
+
+static void calendar_position(Monitor *m) {
+  int h = calendar_total_h();
+  int x, y;
+
+  if (!m || calendar_win == None) {
+    return;
+  }
+  x = m->wx + m->ww - calendar_w - 8;
+  if (x < m->wx) {
+    x = m->wx;
+  }
+  /* Clock lives on the same bar drawbar() puts the tags/title on -- drop
+   * down below it if that bar is on top, or above it if dwm's classic
+   * bottom-bar option is in play. */
+  if (m->topbar) {
+    y = m->by + bh + 4;
+  } else {
+    y = m->by - h - 4;
+  }
+  if (y < m->my) {
+    y = m->my;
+  }
+  XMoveResizeWindow(dpy, calendar_win, x, y, calendar_w, h);
+}
+
+static void calendar_draw(void) {
+  int total_h = calendar_total_h();
+  int first_wd, days, today_day;
+  int today_year, today_month;
+  time_t now;
+  struct tm tm_now;
+  char header[32];
+  static const char *const wdays[7] = {"Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"};
+  static const char *const months[12] = {"January", "February", "March",     "April",
+                                          "May",     "June",     "July",      "August",
+                                          "September", "October", "November", "December"};
+  int col_w = calendar_w / 7;
+  int i, y, day;
+
+  if (calendar_win == None) {
+    return;
+  }
+
+  now = time(NULL);
+  localtime_r(&now, &tm_now);
+  today_year = tm_now.tm_year + 1900;
+  today_month = tm_now.tm_mon;
+  today_day = tm_now.tm_mday;
+
+  drw_setscheme(drw, scheme[SchemeNorm]);
+  drw_rect(drw, 0, 0, calendar_w, total_h, 1, 1);
+
+  /* Header: "<" and ">" in the outer columns jump a month either way (see
+   * calendar_handle_button()); clicking the label itself jumps back to the
+   * month "today" falls in. */
+  snprintf(header, sizeof(header), "%s %d", months[calendar_month], calendar_year);
+  drw_setscheme(drw, scheme[SchemeSel]);
+  drw_text(drw, 0, 0, col_w, bh, lrpad / 2, "<", 0);
+  drw_text(drw, col_w, 0, calendar_w - 2 * col_w, bh, 0, header, 0);
+  drw_text(drw, calendar_w - col_w, 0, col_w, bh, 0, ">", 0);
+
+  y = bh;
+  drw_setscheme(drw, scheme[SchemeNorm]);
+  drw_rect(drw, 0, y, calendar_w, bh, 1, 1);
+  for (i = 0; i < 7; i++) {
+    char cell[4];
+    snprintf(cell, sizeof(cell), "%s", wdays[i]);
+    drw_text(drw, i * col_w, y, col_w, bh, 0, cell, 0);
+  }
+
+  y += bh;
+  first_wd = calendar_first_weekday(calendar_year, calendar_month);
+  days = calendar_days_in_month(calendar_year, calendar_month);
+  day = 1;
+  while (day <= days) {
+    for (i = 0; i < 7 && day <= days; i++) {
+      char cell[4];
+      int is_today;
+
+      if (day == 1 && i < first_wd) {
+        continue; /* leading blank cells before the 1st falls on this weekday */
+      }
+      is_today = calendar_year == today_year && calendar_month == today_month &&
+                 day == today_day;
+      snprintf(cell, sizeof(cell), "%d", day);
+      drw_setscheme(drw, scheme[is_today ? SchemeSel : SchemeNorm]);
+      drw_text(drw, i * col_w, y, col_w, bh, 0, cell, 0);
+      day++;
+    }
+    y += bh;
+  }
+
+  draw_hdivider(0, bh, calendar_w);
+  draw_hdivider(0, 2 * bh, calendar_w);
+
+  drw_map(drw, calendar_win, 0, 0, calendar_w, total_h);
+}
+
+static void calendar_shift_month(int delta) {
+  calendar_month += delta;
+  while (calendar_month < 0) {
+    calendar_month += 12;
+    calendar_year--;
+  }
+  while (calendar_month > 11) {
+    calendar_month -= 12;
+    calendar_year++;
+  }
+  calendar_position(calendar_mon);
+  calendar_draw();
+}
+
+static void calendar_open(Monitor *m) {
+  XSetWindowAttributes wa = {};
+  time_t now;
+  struct tm tm_now;
+
+  if (!m) {
+    return;
+  }
+  if (calendar_win == None) {
+    wa.override_redirect = True;
+    wa.background_pixel = scheme[SchemeNorm][ColBg].pixel;
+    wa.border_pixel = scheme[SchemeSel][ColBorder].pixel;
+    wa.event_mask = ExposureMask | ButtonPressMask | KeyPressMask;
+    calendar_win = XCreateWindow(dpy, root, 0, 0, calendar_w, bh, 1,
+                                 DefaultDepth(dpy, screen), CopyFromParent,
+                                 DefaultVisual(dpy, screen),
+                                 CWOverrideRedirect | CWBackPixel | CWBorderPixel | CWEventMask,
+                                 &wa);
+    XDefineCursor(dpy, calendar_win, cursor[CurNormal]->cursor);
+  }
+  if (XGrabKeyboard(dpy, root, True, GrabModeAsync, GrabModeAsync, CurrentTime) !=
+      GrabSuccess) {
+    return;
+  }
+
+  now = time(NULL);
+  localtime_r(&now, &tm_now);
+  calendar_year = tm_now.tm_year + 1900;
+  calendar_month = tm_now.tm_mon;
+
+  calendar_mon = m;
+  calendar_visible = 1;
+  calendar_position(m);
+  calendar_draw();
+  XMapRaised(dpy, calendar_win);
+}
+
+static void calendar_close(void) {
+  if (!calendar_visible) {
+    return;
+  }
+  calendar_visible = 0;
+  XUngrabKeyboard(dpy, CurrentTime);
+  if (calendar_win != None) {
+    XUnmapWindow(dpy, calendar_win);
+  }
+}
+
+static void calendar_toggle(Monitor *m) {
+  if (calendar_visible) {
+    calendar_close();
+  } else {
+    calendar_open(m ? m : selmon);
+  }
+}
+
+static void calendar_toggle_key(const Arg *arg) {
+  (void)arg;
+  calendar_toggle(selmon);
+}
+
+static int calendar_handle_keypress(XKeyEvent *ev) {
+  KeySym keysym = NoSymbol;
+  char buf[8];
+
+  if (!calendar_visible) {
+    return 0;
+  }
+  XLookupString(ev, buf, sizeof(buf), &keysym, NULL);
+
+  if (keysym == XK_Escape || keysym == XK_q) {
+    calendar_close();
+    return 1;
+  }
+  if (keysym == XK_Left) {
+    calendar_shift_month(-1);
+    return 1;
+  }
+  if (keysym == XK_Right) {
+    calendar_shift_month(+1);
+    return 1;
+  }
+  if (keysym == XK_t) {
+    time_t now = time(NULL);
+    struct tm tm_now;
+    localtime_r(&now, &tm_now);
+    calendar_year = tm_now.tm_year + 1900;
+    calendar_month = tm_now.tm_mon;
+    calendar_position(calendar_mon);
+    calendar_draw();
+    return 1;
+  }
+  return 1; /* swallow everything else while it's up */
+}
+
+static int calendar_handle_button(XButtonPressedEvent *ev) {
+  int col_w = calendar_w / 7;
+
+  if (!calendar_visible) {
+    return 0;
+  }
+  if (ev->window != calendar_win) {
+    calendar_close();
+    return 0;
+  }
+  if (ev->button == Button4) {
+    calendar_shift_month(-1);
+    return 1;
+  }
+  if (ev->button == Button5) {
+    calendar_shift_month(+1);
+    return 1;
+  }
+  if (ev->button != Button1) {
+    return 1;
+  }
+  if (ev->y < bh) {
+    if (ev->x < col_w) {
+      calendar_shift_month(-1);
+    } else if (ev->x >= calendar_w - col_w) {
+      calendar_shift_month(+1);
+    } else {
+      time_t now = time(NULL);
+      struct tm tm_now;
+      localtime_r(&now, &tm_now);
+      calendar_year = tm_now.tm_year + 1900;
+      calendar_month = tm_now.tm_mon;
+      calendar_position(calendar_mon);
+      calendar_draw();
+    }
+  }
+  return 1;
+}
+
+/* }}} calendar popup */
+
 /* {{{ desktop icons */
 
 static void get_desktop_dir(char *buf, size_t size) {
@@ -11569,6 +11878,10 @@ void cleanup(void) {
     XDestroyWindow(dpy, wifi_win);
     wifi_win = None;
   }
+  if (calendar_win != None) {
+    XDestroyWindow(dpy, calendar_win);
+    calendar_win = None;
+  }
   wifi_job_reset();
   for (i = 0; i < projects_len; i++) {
     free(projects[i]);
@@ -12158,6 +12471,18 @@ void drawwidgetbar(Monitor *m) {
  * for their own bh-square icon buttons (e.g. the close "x" next to a saved
  * project), rather than the auto-sized-to-text width normal bar widgets
  * use. */
+/* vbarw is sized off the font's line height (see setup()), not any
+ * particular glyph's width, so a dock icon drawn flush-left (lpad=0)
+ * leftover slack all lands on the right -- right up against the cell
+ * boundary, which is what was reading as the icon getting clipped/covered
+ * there. Right-aligning instead (slack pushed to the left) keeps every
+ * icon clear of that edge. */
+static int dockbar_icon_lpad(const char *icon) {
+  int glyphw = (int)drw_fontset_getwidth(drw, icon);
+  int lpad = vbarw - glyphw;
+  return lpad > 0 ? lpad : 0;
+}
+
 void drawleftbar(Monitor *m) {
   static const char *const icons[] = {icon_firefox, icon_terminal};
   size_t i;
@@ -12172,7 +12497,7 @@ void drawleftbar(Monitor *m) {
   for (i = 0; i < LENGTH(icons); i++) {
     int y = (int)i * vbarw;
     drw_setscheme(drw, scheme[SchemeNorm]);
-    drw_text(drw, 0, y, vbarw, vbarw, 0, icons[i], 0);
+    drw_text(drw, 0, y, vbarw, vbarw, dockbar_icon_lpad(icons[i]), icons[i], 0);
     if (i > 0) {
       draw_hdivider(0, y, vbarw);
     }
@@ -12213,7 +12538,7 @@ void drawrightbar(Monitor *m) {
   for (i = 0; i < LENGTH(rows); i++) {
     int y = (int)i * vbarw;
     drw_setscheme(drw, scheme[rows[i].highlighted ? SchemeSel : SchemeNorm]);
-    drw_text(drw, 0, y, vbarw, vbarw, 0, rows[i].icon, 0);
+    drw_text(drw, 0, y, vbarw, vbarw, dockbar_icon_lpad(rows[i].icon), rows[i].icon, 0);
     if (i > 0) {
       draw_hdivider(0, y, vbarw);
     }
@@ -12324,6 +12649,10 @@ void expose(XEvent *e) {
   }
   if (wifi_visible && ev->window == wifi_win) {
     wifi_popup_draw();
+    return;
+  }
+  if (calendar_visible && ev->window == calendar_win) {
+    calendar_draw();
     return;
   }
   if (ev->window == deskwin) {
@@ -12778,6 +13107,9 @@ void keypress(XEvent *e) {
   XKeyEvent *ev;
   ev = &e->xkey;
   if (keybind_help_visible && keybind_help_handle_keypress(ev)) {
+    return;
+  }
+  if (calendar_visible && calendar_handle_keypress(ev)) {
     return;
   }
   if (wifi_visible && wifi_handle_keypress(ev)) {
@@ -13863,6 +14195,7 @@ void setup(void) {
   lrpad = drw->fonts->h;
   bh = drw->fonts->h + 2;
   vbarw = bh;
+  calendar_w = 7 * bh;
   load_theme_mode_state();
   set_default_bar_theme();
   workspace_set_defaults();
