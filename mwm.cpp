@@ -1029,11 +1029,17 @@ enum SidebarAnim { SidebarAnimIdle, SidebarAnimOpening, SidebarAnimClosing };
 
 #define PICKER_QUERY_MAX 256
 
+/* Visible rows in the popup at once -- not a cap on how many matches can be
+ * browsed. project_filtered[] holds every match (up to MAX_PICK_CANDIDATES);
+ * project_scroll picks which PROJECT_MAX_RESULTS-row window of it is on
+ * screen, so Up/Down/Ctrl+P/N walk the whole list instead of wrapping
+ * inside the first screenful (see project_ensure_sel_visible()). */
 #define PROJECT_MAX_RESULTS 8
 #define MAX_PROJECTS 500
 /* Upper bound on candidates scored per keystroke: saved projects plus a
  * generous ceiling on $PATH-scanned executables (a few thousand on a large
- * system) -- only the top PROJECT_MAX_RESULTS survive to be shown. */
+ * system) -- also the storage cap for project_filtered[] now that it keeps
+ * every match, not just the first screenful. */
 #define MAX_PICK_CANDIDATES (MAX_PROJECTS + 4096)
 
 enum PickResultKind { PickResultProject, PickResultApp, PickResultTheme };
@@ -1292,6 +1298,8 @@ static int project_resolve_selected_path(char *out, size_t outsz);
 static void project_launch(int with_agent);
 static void widget_format_projects(char *buf, size_t size);
 static void project_filter(void);
+static void project_ensure_sel_visible(void);
+static void project_move_sel(int delta);
 static int project_total_h(void);
 static void project_position(Monitor *m);
 static void project_draw(void);
@@ -1712,9 +1720,10 @@ static int project_visible = 0;
 static enum PickerMode project_mode = PickerModeCombined;
 static char project_query[PICKER_QUERY_MAX];
 static size_t project_query_len = 0;
-static ProjectMatch project_filtered[PROJECT_MAX_RESULTS];
+static ProjectMatch project_filtered[MAX_PICK_CANDIDATES];
 static size_t project_filtered_len = 0;
 static int project_sel = 0;
+static size_t project_scroll = 0; /* index of the first visible row */
 static const int project_w = 560;
 static ProjectRowLayout project_row_layout[PROJECT_MAX_RESULTS];
 static char agent_launch_command[64] = "claude";
@@ -9033,15 +9042,54 @@ static void project_filter(void) {
     qsort(all, all_len, sizeof(ProjectMatch), project_match_cmp);
   }
 
-  project_filtered_len = all_len < PROJECT_MAX_RESULTS ? all_len : PROJECT_MAX_RESULTS;
+  /* Keep every match, not just the first screenful -- project_scroll picks
+   * which PROJECT_MAX_RESULTS-row window of this is on screen. */
+  project_filtered_len = all_len;
   for (i = 0; i < project_filtered_len; i++) {
     project_filtered[i] = all[i];
   }
+  project_scroll = 0;
 
   /* The result count just changed, so the popup's height needs to follow --
    * every caller of project_filter() gets this for free instead of having
    * to remember to reposition itself. */
   project_position(project_mon);
+}
+
+/* Slides project_scroll so project_sel's row is inside the visible
+ * PROJECT_MAX_RESULTS-row window -- called after every selection change.
+ * Also re-clamps scroll on its own (a shrinking list, e.g. after Ctrl+D
+ * removes a project, can leave it past the new end). */
+static void project_ensure_sel_visible(void) {
+  if (project_filtered_len == 0) {
+    project_scroll = 0;
+    return;
+  }
+  if ((size_t)project_sel < project_scroll) {
+    project_scroll = (size_t)project_sel;
+  } else if ((size_t)project_sel >= project_scroll + PROJECT_MAX_RESULTS) {
+    project_scroll = (size_t)project_sel - PROJECT_MAX_RESULTS + 1;
+  }
+  if (project_filtered_len <= PROJECT_MAX_RESULTS) {
+    project_scroll = 0;
+  } else if (project_scroll > project_filtered_len - PROJECT_MAX_RESULTS) {
+    project_scroll = project_filtered_len - PROJECT_MAX_RESULTS;
+  }
+}
+
+/* Moves the selection by `delta` (+1/-1 for arrow keys or Ctrl+N/P),
+ * wrapping around the *entire* filtered list rather than just the visible
+ * window -- that's what lets Ctrl+N walk past the first screenful instead
+ * of cycling the same 8 rows forever. */
+static void project_move_sel(int delta) {
+  int len;
+
+  if (project_filtered_len == 0) {
+    return;
+  }
+  len = (int)project_filtered_len;
+  project_sel = ((project_sel + delta) % len + len) % len;
+  project_ensure_sel_visible();
 }
 
 /* Sized to fit the actual result count (at least one row, for the hint
@@ -9079,7 +9127,7 @@ static void project_draw(void) {
   int total_h = project_total_h();
   int y;
   size_t i;
-  char display[PICKER_QUERY_MAX + 4];
+  char display[PICKER_QUERY_MAX + 32];
   const char *prefix;
 
   if (project_win == None) {
@@ -9097,7 +9145,15 @@ static void project_draw(void) {
            : project_mode == PickerModeAppOnly  ? icon_launcher
            : project_mode == PickerModeTheme    ? icon_theme_auto
                                                  : ">";
-  snprintf(display, sizeof(display), "%s %s", prefix, project_query);
+  /* "(sel/total)" only shows up once there's more than one screenful --
+   * it's the only hint that Ctrl+N/P keep going past row 8 instead of
+   * wrapping, so it matters most exactly when the list is long. */
+  if (project_filtered_len > PROJECT_MAX_RESULTS) {
+    snprintf(display, sizeof(display), "%s %s (%d/%zu)", prefix, project_query,
+             project_sel + 1, project_filtered_len);
+  } else {
+    snprintf(display, sizeof(display), "%s %s", prefix, project_query);
+  }
   drw_setscheme(drw, scheme[SchemeSel]);
   drw_text(drw, 0, 0, project_w, bh, lrpad / 2, display, 0);
 
@@ -9128,9 +9184,14 @@ static void project_draw(void) {
   } else {
     const char *cur_wsname =
         selmon ? workspace_name_from_mask(selmon->tagset[selmon->seltags]) : NULL;
+    size_t shown = project_filtered_len - project_scroll;
+    if (shown > PROJECT_MAX_RESULTS) {
+      shown = PROJECT_MAX_RESULTS;
+    }
 
-    for (i = 0; i < project_filtered_len; i++) {
-      const ProjectMatch *match = &project_filtered[i];
+    for (i = 0; i < shown; i++) {
+      size_t idx = project_scroll + i;
+      const ProjectMatch *match = &project_filtered[idx];
       char row_text[PATH_MAX + 384];
       /* Only saved projects are removable via the close button -- apps come
        * from $PATH and themes from the built-in table, neither of which is
@@ -9165,7 +9226,7 @@ static void project_draw(void) {
         snprintf(row_text, sizeof(row_text), "%s%s  %s", prefix, base, collapsed);
       }
 
-      drw_setscheme(drw, scheme[(int)i == project_sel ? SchemeSel : SchemeNorm]);
+      drw_setscheme(drw, scheme[idx == (size_t)project_sel ? SchemeSel : SchemeNorm]);
       drw_text(drw, 0, y, close_x, bh, lrpad / 2, row_text, 0);
 
       project_row_layout[i].close_x = close_x;
@@ -9288,18 +9349,13 @@ static int project_handle_keypress(XKeyEvent *ev) {
     }
     return 1;
   case XK_Up:
-    if (project_filtered_len > 0) {
-      project_sel = (int)((project_sel - 1 + (int)project_filtered_len) %
-                          (int)project_filtered_len);
-      project_draw();
-    }
+    project_move_sel(-1);
+    project_draw();
     return 1;
   case XK_Down:
   case XK_Tab:
-    if (project_filtered_len > 0) {
-      project_sel = (int)((project_sel + 1) % (int)project_filtered_len);
-      project_draw();
-    }
+    project_move_sel(+1);
+    project_draw();
     return 1;
   default:
     break;
@@ -9317,18 +9373,13 @@ static int project_handle_keypress(XKeyEvent *ev) {
     return 1;
   }
   if (state == ControlMask && keysym == XK_p) {
-    if (project_filtered_len > 0) {
-      project_sel = (int)((project_sel - 1 + (int)project_filtered_len) %
-                          (int)project_filtered_len);
-      project_draw();
-    }
+    project_move_sel(-1);
+    project_draw();
     return 1;
   }
   if (state == ControlMask && keysym == XK_n) {
-    if (project_filtered_len > 0) {
-      project_sel = (int)((project_sel + 1) % (int)project_filtered_len);
-      project_draw();
-    }
+    project_move_sel(+1);
+    project_draw();
     return 1;
   }
 
@@ -9361,36 +9412,42 @@ static int project_handle_button(XButtonPressedEvent *ev) {
     return 0;
   }
   if (ev->button == Button4) {
-    if (project_filtered_len > 0) {
-      project_sel = (int)((project_sel - 1 + (int)project_filtered_len) %
-                          (int)project_filtered_len);
-      project_draw();
-    }
+    project_move_sel(-1);
+    project_draw();
     return 1;
   }
   if (ev->button == Button5) {
-    if (project_filtered_len > 0) {
-      project_sel = (int)((project_sel + 1) % (int)project_filtered_len);
-      project_draw();
-    }
+    project_move_sel(+1);
+    project_draw();
     return 1;
   }
   if (ev->button != Button1) {
     return 1;
   }
-  for (i = 0; i < project_filtered_len; i++) {
-    ProjectRowLayout *row = &project_row_layout[i];
-    if (ev->x >= row->close_x && ev->x < row->close_x + row->close_w &&
-        ev->y >= row->close_y && ev->y < row->close_y + row->close_h) {
-      projects_remove_index((size_t)project_filtered[i].index);
-      project_filter();
-      project_draw();
-      return 1;
+  /* project_row_layout[] only holds the currently-visible rows (indices
+   * 0..shown-1, see project_draw()) -- project_filtered_len can be much
+   * larger now that it's the whole match list, so this must walk the same
+   * visible window rather than the full list. */
+  {
+    size_t shown = project_filtered_len - project_scroll;
+    if (shown > PROJECT_MAX_RESULTS) {
+      shown = PROJECT_MAX_RESULTS;
     }
-    if (ev->y >= row->close_y && ev->y < row->close_y + row->close_h) {
-      project_sel = (int)i;
-      project_submit();
-      return 1;
+    for (i = 0; i < shown; i++) {
+      size_t idx = project_scroll + i;
+      ProjectRowLayout *row = &project_row_layout[i];
+      if (ev->x >= row->close_x && ev->x < row->close_x + row->close_w &&
+          ev->y >= row->close_y && ev->y < row->close_y + row->close_h) {
+        projects_remove_index((size_t)project_filtered[idx].index);
+        project_filter();
+        project_draw();
+        return 1;
+      }
+      if (ev->y >= row->close_y && ev->y < row->close_y + row->close_h) {
+        project_sel = (int)idx;
+        project_submit();
+        return 1;
+      }
     }
   }
   return 1;
