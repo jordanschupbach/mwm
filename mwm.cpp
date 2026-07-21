@@ -830,6 +830,8 @@ struct Monitor {
   int num;
   int by;             /* bar geometry */
   int bby;            /* widget bar geometry */
+  int lbx;            /* left dock bar geometry */
+  int rbx;            /* right dock bar geometry */
   int mx, my, mw, mh; /* screen size */
   int wx, wy, ww, wh; /* window area  */
   unsigned int seltags;
@@ -843,6 +845,8 @@ struct Monitor {
   Monitor *next;
   Window barwin;
   Window widgetbarwin;
+  Window leftbarwin;
+  Window rightbarwin;
   const Layout *lt[2];
 };
 
@@ -1121,6 +1125,10 @@ static void draw_hdivider(int x, int y, int w);
 static void drawbar(Monitor *m);
 static void drawbars(void);
 static void drawwidgetbar(Monitor *m);
+static void drawleftbar(Monitor *m);
+static void drawrightbar(Monitor *m);
+static int leftbar_handle_button(Monitor *m, XButtonPressedEvent *ev);
+static int rightbar_handle_button(Monitor *m, XButtonPressedEvent *ev);
 static void draw_slider_popup(void);
 static void enternotify(XEvent *e);
 static void expose(XEvent *e);
@@ -1562,6 +1570,7 @@ static char stext[256];
 static int screen;
 static int sw, sh; /* X display screen geometry width, height */
 static int bh;     /* bar height */
+static int vbarw;  /* left/right dock bar width -- set alongside bh in setup() */
 static int lrpad;  /* sum of left and right padding for text */
 /* Pixels drawbar() reserves for the clock at the far right of the top bar,
  * past the systray -- updatesystray() shifts the tray left by this much so
@@ -1864,9 +1873,13 @@ static WidgetLayout widget_layout[WidgetCount];
 /* WidgetClock is deliberately absent -- it's drawn directly in drawbar()
  * instead, at the far right of the top bar past the systray, rather than
  * among these in the bottom widget bar. */
+/* WidgetNotif/WidgetTodo/WidgetAgents are deliberately absent -- those three
+ * sidebar toggles live on the right dock bar now (see drawrightbar()),
+ * not among these in the bottom widget bar. WidgetClock is likewise absent,
+ * drawn instead at the far right of the top bar (see drawbar()). */
 static const enum WidgetId widget_draw_order[] = {
     WidgetBattery, WidgetBacklight, WidgetVolume,    WidgetMic,   WidgetMedia,
-    WidgetTheme,   WidgetNotif,     WidgetTodo,      WidgetAgents, WidgetGit,
+    WidgetTheme,   WidgetGit,
     WidgetProjects, WidgetLoad,     WidgetCpu,       WidgetMem,   WidgetDisk,
     WidgetNet,     WidgetWifi,      WidgetBluetooth, WidgetKbLayout,
 };
@@ -2716,6 +2729,8 @@ static const char icon_load[] = "\U0000F0E4";
 static const char icon_git[] = "\U0000F126";
 static const char icon_media[] = "\U0000F001";
 static const char icon_keyboard[] = "\U0000F11C";
+static const char icon_firefox[] = "\U0000F269";
+static const char icon_terminal[] = "\U0000F120";
 /* }}} widget icons */
 
 /* MPRIS via playerctl -- it already does the DBus property/variant
@@ -3499,27 +3514,6 @@ static int widget_handle_button(Monitor *m, XButtonPressedEvent *ev) {
     return 1;
   }
 
-  if (widget_hit(WidgetNotif, ev->x)) {
-    if (ev->button == Button1) {
-      notif_sidebar_toggle(m);
-    }
-    return 1;
-  }
-
-  if (widget_hit(WidgetTodo, ev->x)) {
-    if (ev->button == Button1) {
-      todo_sidebar_toggle(m);
-    }
-    return 1;
-  }
-
-  if (widget_hit(WidgetAgents, ev->x)) {
-    if (ev->button == Button1) {
-      agent_sidebar_toggle(m);
-    }
-    return 1;
-  }
-
   if (widget_hit(WidgetGit, ev->x)) {
     if (ev->button == Button1) {
       widget_git_open_terminal();
@@ -3724,6 +3718,8 @@ static const char *dmenucmd[] = {
  * other Lua-config globals above) so mwm.set_terminal() takes effect here
  * too, without needing to rebuild this array. */
 static const char *termcmd[] = {terminal_cmd, NULL};
+/* Left dock's Firefox button (see drawleftbar()). */
+static const char *firefoxcmd[] = {"firefox", NULL};
 
 static const Key keys[] = {
     /* modifier                     key        function        argument */
@@ -4390,6 +4386,12 @@ void buttonpress(XEvent *e) {
     focus(NULL);
   }
   if (widget_handle_button(m, ev)) {
+    return;
+  }
+  if (leftbar_handle_button(m, ev)) {
+    return;
+  }
+  if (rightbar_handle_button(m, ev)) {
     return;
   }
   // If the window is equal to the selected monitor's bar window
@@ -11617,6 +11619,14 @@ void cleanupmon(Monitor *mon) {
     XUnmapWindow(dpy, mon->widgetbarwin);
     XDestroyWindow(dpy, mon->widgetbarwin);
   }
+  if (mon->leftbarwin) {
+    XUnmapWindow(dpy, mon->leftbarwin);
+    XDestroyWindow(dpy, mon->leftbarwin);
+  }
+  if (mon->rightbarwin) {
+    XUnmapWindow(dpy, mon->rightbarwin);
+    XDestroyWindow(dpy, mon->rightbarwin);
+  }
   free(mon);
 }
 // }}} void cleanupmon(Monitor *mon)
@@ -11732,6 +11742,8 @@ void configurenotify(XEvent *e) {
         }
         XMoveResizeWindow(dpy, m->barwin, m->wx, m->by, m->ww, bh);
         XMoveResizeWindow(dpy, m->widgetbarwin, m->wx, m->bby, m->ww, bh);
+        XMoveResizeWindow(dpy, m->leftbarwin, m->lbx, m->wy, vbarw, m->wh);
+        XMoveResizeWindow(dpy, m->rightbarwin, m->rbx, m->wy, vbarw, m->wh);
       }
       if (slider_popup_visible && slider_popup_mon) {
         widget_position_slider_popup(slider_popup_mon);
@@ -12057,9 +12069,6 @@ void drawwidgetbar(Monitor *m) {
   widget_format_mic(text[WidgetMic], sizeof(text[WidgetMic]));
   widget_format_media(text[WidgetMedia], sizeof(text[WidgetMedia]));
   widget_format_theme(text[WidgetTheme], sizeof(text[WidgetTheme]));
-  widget_format_notifications(text[WidgetNotif], sizeof(text[WidgetNotif]));
-  widget_format_todos(text[WidgetTodo], sizeof(text[WidgetTodo]));
-  widget_format_agents(text[WidgetAgents], sizeof(text[WidgetAgents]));
   widget_format_git(text[WidgetGit], sizeof(text[WidgetGit]));
   widget_format_projects(text[WidgetProjects], sizeof(text[WidgetProjects]));
   widget_format_load(text[WidgetLoad], sizeof(text[WidgetLoad]));
@@ -12093,9 +12102,6 @@ void drawwidgetbar(Monitor *m) {
                     id == WidgetTheme ||
                     (id == WidgetMic && mic_muted) ||
                     (id == WidgetMedia && strcmp(media_status, "Playing") == 0) ||
-                    (id == WidgetNotif && notification_unread > 0) ||
-                    (id == WidgetTodo && todo_incomplete > 0) ||
-                    (id == WidgetAgents && agent_needs_input > 0) ||
                     (id == WidgetGit && git_dirty) ||
                     (id == WidgetProjects && project_visible) ||
                     (id == WidgetLoad && load_avg1 >= (double)widget_ncpu()) ||
@@ -12146,12 +12152,138 @@ void drawwidgetbar(Monitor *m) {
 }
 // }}} void drawwidgetbar(Monitor *m)
 
+// {{{ void drawleftbar(Monitor *m)
+/* App dock: Firefox, then a terminal, stacked top-down in vbarw-square
+ * cells -- same fixed-cell/lpad-0 convention project_draw() and friends use
+ * for their own bh-square icon buttons (e.g. the close "x" next to a saved
+ * project), rather than the auto-sized-to-text width normal bar widgets
+ * use. */
+void drawleftbar(Monitor *m) {
+  static const char *const icons[] = {icon_firefox, icon_terminal};
+  size_t i;
+
+  if (!m->showbar) {
+    return;
+  }
+
+  drw_setscheme(drw, scheme[SchemeNorm]);
+  drw_rect(drw, 0, 0, vbarw, m->wh, 1, 1);
+
+  for (i = 0; i < LENGTH(icons); i++) {
+    int y = (int)i * vbarw;
+    drw_setscheme(drw, scheme[SchemeNorm]);
+    drw_text(drw, 0, y, vbarw, vbarw, 0, icons[i], 0);
+    if (i > 0) {
+      draw_hdivider(0, y, vbarw);
+    }
+  }
+  draw_vdivider(vbarw - 1, 0, m->wh);
+
+  drw_map(drw, m->leftbarwin, 0, 0, vbarw, m->wh);
+}
+// }}} void drawleftbar(Monitor *m)
+
+// {{{ void drawrightbar(Monitor *m)
+/* The sidebar toggles that used to live in the bottom widget bar --
+ * Notifications, Todo, Agents, top-down -- highlighted the same way they
+ * were there (unread count / incomplete count / needs-input), just as a
+ * plain icon rather than icon+count text since these cells are square and
+ * narrow. */
+void drawrightbar(Monitor *m) {
+  struct {
+    const char *icon;
+    int highlighted;
+  } rows[3];
+  size_t i;
+
+  if (!m->showbar) {
+    return;
+  }
+
+  rows[0].icon = icon_bell;
+  rows[0].highlighted = notification_unread > 0;
+  rows[1].icon = icon_todo;
+  rows[1].highlighted = todo_incomplete > 0;
+  rows[2].icon = icon_agents;
+  rows[2].highlighted = agent_needs_input > 0;
+
+  drw_setscheme(drw, scheme[SchemeNorm]);
+  drw_rect(drw, 0, 0, vbarw, m->wh, 1, 1);
+
+  for (i = 0; i < LENGTH(rows); i++) {
+    int y = (int)i * vbarw;
+    drw_setscheme(drw, scheme[rows[i].highlighted ? SchemeSel : SchemeNorm]);
+    drw_text(drw, 0, y, vbarw, vbarw, 0, rows[i].icon, 0);
+    if (i > 0) {
+      draw_hdivider(0, y, vbarw);
+    }
+  }
+  draw_vdivider(0, 0, m->wh);
+
+  drw_map(drw, m->rightbarwin, 0, 0, vbarw, m->wh);
+}
+// }}} void drawrightbar(Monitor *m)
+
+/* Both dock bars share the same row layout (vbarw-tall cells, top-down),
+ * so hit-testing is just ev->y / vbarw -- this is that shared lookup,
+ * returning -1 past the last row. */
+static int dockbar_row_at(int y, size_t nrows) {
+  int row = y / vbarw;
+  if (row < 0 || (size_t)row >= nrows) {
+    return -1;
+  }
+  return row;
+}
+
+int leftbar_handle_button(Monitor *m, XButtonPressedEvent *ev) {
+  Arg a = {0};
+  int row;
+
+  if (!m || ev->window != m->leftbarwin) {
+    return 0;
+  }
+  if (ev->button != Button1) {
+    return 1;
+  }
+  row = dockbar_row_at(ev->y, 2);
+  if (row == 0) {
+    a.v = firefoxcmd;
+    spawn(&a);
+  } else if (row == 1) {
+    a.v = termcmd;
+    spawn(&a);
+  }
+  return 1;
+}
+
+int rightbar_handle_button(Monitor *m, XButtonPressedEvent *ev) {
+  int row;
+
+  if (!m || ev->window != m->rightbarwin) {
+    return 0;
+  }
+  if (ev->button != Button1) {
+    return 1;
+  }
+  row = dockbar_row_at(ev->y, 3);
+  if (row == 0) {
+    notif_sidebar_toggle(m);
+  } else if (row == 1) {
+    todo_sidebar_toggle(m);
+  } else if (row == 2) {
+    agent_sidebar_toggle(m);
+  }
+  return 1;
+}
+
 // {{{ void drawbars(void)
 void drawbars(void) {
   Monitor *m;
   for (m = mons; m; m = m->next) {
     drawbar(m);
     drawwidgetbar(m);
+    drawleftbar(m);
+    drawrightbar(m);
   }
   draw_slider_popup();
 }
@@ -12219,6 +12351,10 @@ void expose(XEvent *e) {
       drawbar(m);
     } else if (ev->window == m->widgetbarwin) {
       drawwidgetbar(m);
+    } else if (ev->window == m->leftbarwin) {
+      drawleftbar(m);
+    } else if (ev->window == m->rightbarwin) {
+      drawrightbar(m);
     }
   }
 }
@@ -13726,6 +13862,7 @@ void setup(void) {
   }
   lrpad = drw->fonts->h;
   bh = drw->fonts->h + 2;
+  vbarw = bh;
   load_theme_mode_state();
   set_default_bar_theme();
   workspace_set_defaults();
@@ -13954,6 +14091,10 @@ void togglebar(const Arg *arg) {
                     bh);
   XMoveResizeWindow(dpy, selmon->widgetbarwin, selmon->wx, selmon->bby,
                     selmon->ww, bh);
+  XMoveResizeWindow(dpy, selmon->leftbarwin, selmon->lbx, selmon->wy, vbarw,
+                    selmon->wh);
+  XMoveResizeWindow(dpy, selmon->rightbarwin, selmon->rbx, selmon->wy, vbarw,
+                    selmon->wh);
   updatesystray();
   arrange(selmon);
 }
@@ -14106,6 +14247,24 @@ void updatebars(void) {
         XMapRaised(dpy, m->widgetbarwin);
         XSetClassHint(dpy, m->widgetbarwin, &ch);
       }
+      if (!m->leftbarwin) {
+        m->leftbarwin = XCreateWindow(
+            dpy, root, m->lbx, m->wy, vbarw, m->wh, 0, DefaultDepth(dpy, screen),
+            CopyFromParent, DefaultVisual(dpy, screen),
+            CWOverrideRedirect | CWBackPixmap | CWEventMask, &wa);
+        XDefineCursor(dpy, m->leftbarwin, cursor[CurNormal]->cursor);
+        XMapRaised(dpy, m->leftbarwin);
+        XSetClassHint(dpy, m->leftbarwin, &ch);
+      }
+      if (!m->rightbarwin) {
+        m->rightbarwin = XCreateWindow(
+            dpy, root, m->rbx, m->wy, vbarw, m->wh, 0, DefaultDepth(dpy, screen),
+            CopyFromParent, DefaultVisual(dpy, screen),
+            CWOverrideRedirect | CWBackPixmap | CWEventMask, &wa);
+        XDefineCursor(dpy, m->rightbarwin, cursor[CurNormal]->cursor);
+        XMapRaised(dpy, m->rightbarwin);
+        XSetClassHint(dpy, m->rightbarwin, &ch);
+      }
       continue;
     }
     m->barwin = XCreateWindow(
@@ -14116,12 +14275,26 @@ void updatebars(void) {
         dpy, root, m->wx, m->bby, m->ww, bh, 0, DefaultDepth(dpy, screen),
         CopyFromParent, DefaultVisual(dpy, screen),
         CWOverrideRedirect | CWBackPixmap | CWEventMask, &wa);
+    m->leftbarwin = XCreateWindow(
+        dpy, root, m->lbx, m->wy, vbarw, m->wh, 0, DefaultDepth(dpy, screen),
+        CopyFromParent, DefaultVisual(dpy, screen),
+        CWOverrideRedirect | CWBackPixmap | CWEventMask, &wa);
+    m->rightbarwin = XCreateWindow(
+        dpy, root, m->rbx, m->wy, vbarw, m->wh, 0, DefaultDepth(dpy, screen),
+        CopyFromParent, DefaultVisual(dpy, screen),
+        CWOverrideRedirect | CWBackPixmap | CWEventMask, &wa);
     XDefineCursor(dpy, m->barwin, cursor[CurNormal]->cursor);
     XDefineCursor(dpy, m->widgetbarwin, cursor[CurNormal]->cursor);
+    XDefineCursor(dpy, m->leftbarwin, cursor[CurNormal]->cursor);
+    XDefineCursor(dpy, m->rightbarwin, cursor[CurNormal]->cursor);
     XMapRaised(dpy, m->barwin);
     XMapRaised(dpy, m->widgetbarwin);
+    XMapRaised(dpy, m->leftbarwin);
+    XMapRaised(dpy, m->rightbarwin);
     XSetClassHint(dpy, m->barwin, &ch);
     XSetClassHint(dpy, m->widgetbarwin, &ch);
+    XSetClassHint(dpy, m->leftbarwin, &ch);
+    XSetClassHint(dpy, m->rightbarwin, &ch);
   }
   if (showsystray && !systray) {
     systray = ecalloc_type<Systray>();
@@ -14152,14 +14325,27 @@ void updatebars(void) {
 void updatebarpos(Monitor *m) {
   m->wy = m->my;
   m->wh = m->mh;
+  m->wx = m->mx;
+  m->ww = m->mw;
   if (m->showbar) {
     m->wh -= 2 * bh;
     m->by = m->topbar ? m->wy : m->wy + m->wh;
     m->bby = m->topbar ? (m->my + m->mh - bh) : m->my;
     m->wy = m->my + bh;
+
+    /* Left dock (app launcher) and right dock (sidebar toggles) eat into
+     * the usable width the same way the top/bottom bars eat into height --
+     * both always-on, not tied to which edge topbar puts the horizontal
+     * bars on, since the user asked for a fixed left/right split. */
+    m->ww -= 2 * vbarw;
+    m->wx = m->mx + vbarw;
+    m->lbx = m->mx;
+    m->rbx = m->mx + m->mw - vbarw;
   } else {
     m->by = -bh;
     m->bby = -bh;
+    m->lbx = -vbarw;
+    m->rbx = m->mw;
   }
 }
 // }}} void updatebarpos(Monitor *m)
@@ -14534,7 +14720,8 @@ Monitor *wintomon(Window w) {
   for (m = mons; m; m = m->next) {
     // Return the monitor if the window matches the monitor's bar window
     // NOTE: barwin not in list of clients, so we check for it here
-    if (w == m->barwin || w == m->widgetbarwin) {
+    if (w == m->barwin || w == m->widgetbarwin || w == m->leftbarwin ||
+        w == m->rightbarwin) {
       return m;
     }
   }
