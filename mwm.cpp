@@ -12471,15 +12471,14 @@ void drawwidgetbar(Monitor *m) {
  * for their own bh-square icon buttons (e.g. the close "x" next to a saved
  * project), rather than the auto-sized-to-text width normal bar widgets
  * use. */
-/* vbarw is sized off the font's line height (see setup()), not any
- * particular glyph's width, so a dock icon drawn flush-left (lpad=0)
- * leftover slack all lands on the right -- right up against the cell
- * boundary, which is what was reading as the icon getting clipped/covered
- * there. Right-aligning instead (slack pushed to the left) keeps every
- * icon clear of that edge. */
+/* Centers a dock icon horizontally in its vbarw-wide cell. setup() already
+ * makes sure vbarw is at least as wide as the widest dock icon plus margin
+ * (see the dock_icon_widths pass there), so glyphw <= vbarw here in the
+ * normal case; the clamp is just a defensive floor if some future icon
+ * turns out wider than that margin anticipated. */
 static int dockbar_icon_lpad(const char *icon) {
   int glyphw = (int)drw_fontset_getwidth(drw, icon);
-  int lpad = vbarw - glyphw;
+  int lpad = (vbarw - glyphw) / 2;
   return lpad > 0 ? lpad : 0;
 }
 
@@ -14195,6 +14194,20 @@ void setup(void) {
   lrpad = drw->fonts->h;
   bh = drw->fonts->h + 2;
   vbarw = bh;
+  /* bh alone is sized off the font's line height, not any glyph's actual
+   * width -- widen the dock cells if the icons they show need more than
+   * that to render without crowding the cell edge. */
+  {
+    static const char *const dock_icon_widths[] = {icon_firefox, icon_terminal, icon_bell,
+                                                    icon_todo, icon_agents};
+    size_t di;
+    for (di = 0; di < LENGTH(dock_icon_widths); di++) {
+      int w = (int)drw_fontset_getwidth(drw, dock_icon_widths[di]) + (bh / 2);
+      if (w > vbarw) {
+        vbarw = w;
+      }
+    }
+  }
   calendar_w = 7 * bh;
   load_theme_mode_state();
   set_default_bar_theme();
