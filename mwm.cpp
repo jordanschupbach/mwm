@@ -1903,7 +1903,7 @@ static const enum WidgetId widget_draw_order[] = {
     WidgetBattery, WidgetBacklight, WidgetVolume,    WidgetMic,   WidgetMedia,
     WidgetTheme,   WidgetGit,
     WidgetProjects, WidgetLoad,     WidgetCpu,       WidgetMem,   WidgetDisk,
-    WidgetNet,     WidgetWifi,      WidgetBluetooth, WidgetKbLayout,
+    WidgetWifi,     WidgetKbLayout,
 };
 static Window slider_popup_win = None;
 static Monitor *slider_popup_mon = NULL;
@@ -3047,10 +3047,10 @@ static void widget_format_mic(char *buf, size_t size) {
     return;
   }
   if (mic_muted) {
-    snprintf(buf, size, "%s muted", icon_mic_muted);
+    snprintf(buf, size, "%s", icon_mic_muted);
     return;
   }
-  snprintf(buf, size, "%s %d%%", icon_mic, mic_percent);
+  snprintf(buf, size, "%s", icon_mic);
 }
 
 static void widget_format_load(char *buf, size_t size) {
@@ -3751,7 +3751,7 @@ static const int topbar = 1;            /* 0 means bottom bar */
 /* Second entry is a fallback used only for glyphs missing from the primary
  * font -- widget icons live in the Nerd Font Private Use Area ranges, so a
  * Nerd Font must be installed for them to render instead of tofu boxes. */
-static const char *fonts[] = {"monospace:size=20", "UbuntuMono Nerd Font Mono:size=20"};
+static const char *fonts[] = {"monospace:size=15", "UbuntuMono Nerd Font Mono:size=26"};
 static const char dmenufont[] = "monospace:size=10";
 static const char default_col_gray1[] = "#222222";
 static const char default_col_gray2[] = "#444444";
@@ -9722,53 +9722,62 @@ static void keybind_help_draw(void) {
     }
   }
 
-  /* rows_per_col is derived straight from the height budget the window is
-   * later clamped to (m->wh - 2*gap), so win_h never has to be shrunk out
-   * from under a row layout that already assumed more space -- that
-   * mismatch would otherwise clip the bottom rows of the last column. */
+  /* rows_per_col is derived straight from the height budget and never
+   * grows past it -- win_h = bh + 2*gap + rows_per_col*bh below is only
+   * ever within that budget. (This used to instead grow rows_per_col in a
+   * loop, trading columns for rows until the layout's *width* fit the
+   * screen; but when even a single column was wider than the screen --
+   * e.g. one long combo like "Super+Ctrl+Shift+Space" plus verbose
+   * descriptions at the 20pt bar font -- the loop had no choice but to
+   * keep shrinking all the way to one column stacking every entry, which
+   * blew win_h far past the monitor's height. Width now gets fixed up
+   * below by capping each column's description width instead, letting
+   * drw_text's built-in ellipsis truncate anything that doesn't fit --
+   * same as it already does for window titles.) */
   rows_per_col = (m->wh - 2 * gap - bh) / bh;
   if (rows_per_col < 8) {
     rows_per_col = 8;
   }
 
-  /* Column count follows from rows_per_col, but a table with many columns
-   * of short rows can end up wider than the screen; if so, trade columns
-   * for rows (up to a generous cap) until the natural width fits, rather
-   * than clamping win_w afterward and clipping the rightmost column(s). */
-  for (;;) {
-    columns = total == 0 ? 1 : (int)((total + (size_t)rows_per_col - 1) / (size_t)rows_per_col);
-    if (columns < 1) {
-      columns = 1;
-    }
-    if (columns > (int)LENGTH(col_desc_w)) {
-      columns = (int)LENGTH(col_desc_w);
-      rows_per_col = (int)((total + (size_t)columns - 1) / (size_t)columns);
-    }
+  columns = total == 0 ? 1 : (int)((total + (size_t)rows_per_col - 1) / (size_t)rows_per_col);
+  if (columns < 1) {
+    columns = 1;
+  }
+  if (columns > (int)LENGTH(col_desc_w)) {
+    columns = (int)LENGTH(col_desc_w);
+    rows_per_col = (int)((total + (size_t)columns - 1) / (size_t)columns);
+  }
 
+  for (idx = 0; idx < (size_t)columns; idx++) {
+    col_desc_w[idx] = 0;
+  }
+  for (idx = 0; idx < total; idx++) {
+    int col = (int)(idx / (size_t)rows_per_col);
+    int w = (int)TEXTW(entries[idx].desc);
+    if (col >= columns) {
+      col = columns - 1;
+    }
+    if (w > col_desc_w[col]) {
+      col_desc_w[col] = w;
+    }
+  }
+
+  {
+    int max_col_w = (m->ww - 2 * gap) / columns - keycombo_w - 2 * gap;
+    if (max_col_w < gap) {
+      max_col_w = gap;
+    }
     for (idx = 0; idx < (size_t)columns; idx++) {
-      col_desc_w[idx] = 0;
-    }
-    for (idx = 0; idx < total; idx++) {
-      int col = (int)(idx / (size_t)rows_per_col);
-      int w = (int)TEXTW(entries[idx].desc);
-      if (col >= columns) {
-        col = columns - 1;
-      }
-      if (w > col_desc_w[col]) {
-        col_desc_w[col] = w;
+      if (col_desc_w[idx] > max_col_w) {
+        col_desc_w[idx] = max_col_w;
       }
     }
+  }
 
-    cx = gap;
-    for (idx = 0; idx < (size_t)columns; idx++) {
-      col_x[idx] = cx;
-      cx += keycombo_w + gap + col_desc_w[idx] + gap;
-    }
-
-    if (cx <= m->ww - 2 * gap || columns <= 1 || rows_per_col >= (int)total) {
-      break;
-    }
-    rows_per_col += 4;
+  cx = gap;
+  for (idx = 0; idx < (size_t)columns; idx++) {
+    col_x[idx] = cx;
+    cx += keycombo_w + gap + col_desc_w[idx] + gap;
   }
 
   win_w = cx;
@@ -14374,6 +14383,13 @@ void setup(void) {
   }
   lrpad = drw->fonts->h;
   bh = drw->fonts->h + 2;
+  /* Icons fall back to the second font in `fonts[]` (see drw_text's fallback
+   * search), which is sized independently of the primary text font -- size
+   * bh off whichever is taller so a larger icon font isn't vertically
+   * clipped against a row height meant for smaller text. */
+  if (drw->fonts->next && drw->fonts->next->h + 2 > bh) {
+    bh = drw->fonts->next->h + 2;
+  }
   vbarw = bh;
   /* bh alone is sized off the font's line height, not any glyph's actual
    * width -- widen the dock cells if the icons they show need more than
