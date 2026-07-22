@@ -83,8 +83,12 @@ DEALINGS IN THE SOFTWARE.
 #include <X11/Xutil.h>
 #include <X11/cursorfont.h>
 #include <X11/keysym.h>
+#include <algorithm>
 #include <array>
 #include <ctype.h>
+#include <memory>
+#include <string>
+#include <vector>
 #include <dbus/dbus.h>
 #include <dirent.h>
 #include <errno.h>
@@ -219,6 +223,15 @@ void drw_map(Drw *drw, Window win, int x, int y, unsigned int w,
 void die(const char *fmt, ...);
 void *ecalloc(size_t nmemb, size_t size);
 template <typename T> T *ecalloc_type(size_t nmemb = 1);
+
+/* Deleter for smart pointers that own memory obtained via ecalloc_type/
+ * ecalloc (i.e. calloc-family) rather than new -- must use free(), not
+ * delete, or the allocator mismatch is undefined behaviour. Only safe for
+ * types with no non-trivial members (nothing that itself needs a destructor
+ * to run, e.g. no embedded shared_ptr/unique_ptr/std::string). */
+struct FreeDeleter {
+  template <typename T> void operator()(T *p) const { free(p); }
+};
 
 // }}} util
 
@@ -783,10 +796,10 @@ typedef uint64_t WorkspaceMask;
 
 struct Workspace {
   WorkspaceMask mask;
-  char *name;
+  std::string name;
 };
 
-struct Client {
+struct Client : std::enable_shared_from_this<Client> {
   char name[256];
   float mina, maxa;
   float cfact;
@@ -796,15 +809,19 @@ struct Client {
   int bw, oldbw; // border width
   WorkspaceMask tags;
   int isfixed, isfloating, isurgent, neverfocus, oldstate, isfullscreen;
-  Client *next;  // Next client in the list
-  Client *snext; // Selection linked list (for focus history)
-  Monitor *mon;  // Monitor the client is
+  /* Every managed Client sits in two lists at once: mon->clients (via next)
+   * and mon->stack (via snext), attached together in manage() and detached
+   * together in unmanage() -- genuine dual ownership, not a single owning
+   * chain, hence shared_ptr rather than unique_ptr here. */
+  std::shared_ptr<Client> next;  // Next client in the list
+  std::shared_ptr<Client> snext; // Selection linked list (for focus history)
+  Monitor *mon;  // Monitor the client is -- non-owning back-pointer
   Window win;    // X Window Id
 };
 
 struct Systray {
   Window win;
-  Client *icons;
+  std::shared_ptr<Client> icons; // single-owner chain, reuses Client::next's type
 };
 
 typedef struct {
@@ -840,10 +857,10 @@ struct Monitor {
   WorkspaceMask tagset[2];
   int showbar;
   int topbar;
-  Client *clients;
-  Client *sel;
-  Client *stack;
-  Monitor *next;
+  std::shared_ptr<Client> clients; // owning head of the tiling-order chain
+  Client *sel;                     // non-owning: currently selected client
+  std::shared_ptr<Client> stack;   // owning head of the focus-order chain
+  std::unique_ptr<Monitor> next;
   Window barwin;
   Window widgetbarwin;
   Window leftbarwin;
@@ -983,7 +1000,7 @@ struct Notification {
   char body[512];
   time_t received;
   time_t expire_at; /* 0 = never */
-  Notification *next;
+  std::unique_ptr<Notification> next;
 };
 
 typedef struct {
@@ -999,7 +1016,7 @@ struct Todo {
   char text[256];
   int done;
   time_t created;
-  Todo *next;
+  std::unique_ptr<Todo> next;
 };
 
 typedef struct {
@@ -1020,7 +1037,7 @@ struct AgentStatus {
   int from_file; /* backed by a status file on disk; dismissible */
   char file_path[PATH_MAX];
   pid_t pid; /* 0 if not (yet) resolved against a live /proc process */
-  AgentStatus *next;
+  std::unique_ptr<AgentStatus> next;
 };
 
 typedef struct {
@@ -1116,7 +1133,7 @@ static void clientmessage(XEvent *e);
 static void configure(Client *c);
 static void configurenotify(XEvent *e);
 static void configurerequest(XEvent *e);
-static Monitor *createmon(void);
+static std::unique_ptr<Monitor> createmon(void);
 static void destroynotify(XEvent *e);
 static void detach(Client *c);
 static void detachstack(Client *c);
@@ -1607,13 +1624,83 @@ static Atom wmatom[WMLast], netatom[NetLast];
 static Atom xatom[XLast];
 static int running = 1;
 static int restart_requested = 0;
-static Cur *cursor[CurLast];
-static Clr **scheme;
-static lua_State *command_lua;
+/* Smart-pointer ownership for the handful of process-lifetime C-API
+ * singletons below: each is a single-owner resource passed by raw pointer
+ * into hundreds of Xlib/Xft/Lua call sites throughout this file. Rather than
+ * rewrite every call site to `.get()`, a unique_ptr with a custom deleter
+ * owns the resource, and the existing raw global name is kept in sync as a
+ * non-owning alias for those call sites -- ownership/cleanup becomes
+ * automatic while the read-side diff stays zero. */
+struct XCloseDisplayDeleter {
+  void operator()(Display *d) const {
+    if (d) {
+      XCloseDisplay(d);
+    }
+  }
+};
+static std::unique_ptr<Display, XCloseDisplayDeleter> dpy_owner;
 static Display *dpy;
+
+struct DrwFreeDeleter {
+  void operator()(Drw *d) const {
+    if (d) {
+      drw_free(d);
+    }
+  }
+};
+static std::unique_ptr<Drw, DrwFreeDeleter> drw_owner;
 static Drw *drw;
-static Monitor *mons, *selmon;
-static Systray *systray;
+
+/* Cur has no non-trivial members, so it's still safe to allocate with
+ * ecalloc_type and free with free() -- see FreeDeleter's doc comment. */
+struct CurFreeDeleter {
+  void operator()(Cur *c) const {
+    if (c) {
+      XFreeCursor(dpy, c->cursor);
+      free(c);
+    }
+  }
+};
+static std::array<std::unique_ptr<Cur, CurFreeDeleter>, CurLast> cursor;
+
+/* scheme is Clr**: one XftColor[3] array per color scheme. Each XftColor
+ * holds a server-side pixel allocation from XftColorAllocName that must be
+ * released with XftColorFree before the backing array is freed -- the
+ * previous code only free()'d the arrays, leaking the color allocations on
+ * every theme/config reload. */
+struct SchemeFreeDeleter {
+  void operator()(Clr **s) const {
+    if (!s) {
+      return;
+    }
+    for (size_t i = 0; i < SchemeSel + 1; i++) {
+      if (s[i]) {
+        for (size_t j = 0; j < 3; j++) {
+          XftColorFree(dpy, DefaultVisual(dpy, screen),
+                       DefaultColormap(dpy, screen), &s[i][j]);
+        }
+        free(s[i]);
+      }
+    }
+    free(s);
+  }
+};
+static std::unique_ptr<Clr *, SchemeFreeDeleter> scheme_owner;
+static Clr **scheme;
+
+struct LuaCloseDeleter {
+  void operator()(lua_State *L) const {
+    if (L) {
+      lua_close(L);
+    }
+  }
+};
+static std::unique_ptr<lua_State, LuaCloseDeleter> command_lua_owner;
+static lua_State *command_lua;
+
+static std::unique_ptr<Monitor> mons;
+static Monitor *selmon;
+static std::unique_ptr<Systray> systray;
 /* The one designated scratchpad client, if any -- see scratchpad_toggle().
  * Cleared by unmanage() when this client is closed, so it never dangles. */
 static Client *scratchpad_client = NULL;
@@ -1644,11 +1731,20 @@ static Layout lua_layout_entries[MAX_LUA_LAYOUTS];
 static char terminal_cmd[64] = "kitty";
 
 /* {{{ notification sidebar globals */
-static Notification *notifications = NULL;
+static std::unique_ptr<Notification> notifications;
 static unsigned int notification_next_id = 1;
 static size_t notification_count = 0;
 static size_t notification_unread = 0;
 
+struct DBusConnDeleter {
+  void operator()(DBusConnection *c) const {
+    if (c) {
+      dbus_connection_close(c);
+      dbus_connection_unref(c);
+    }
+  }
+};
+static std::unique_ptr<DBusConnection, DBusConnDeleter> notif_dbus_conn_owner;
 static DBusConnection *notif_dbus_conn = NULL;
 static int notif_dbus_owned = 0;
 
@@ -1671,7 +1767,7 @@ static int notif_clear_x = 0, notif_clear_y = 0, notif_clear_w = 0, notif_clear_
 /* }}} notification sidebar globals */
 
 /* {{{ todo sidebar globals */
-static Todo *todos = NULL;
+static std::unique_ptr<Todo> todos;
 static unsigned int todo_next_id = 1;
 static size_t todo_count = 0;
 static size_t todo_incomplete = 0;
@@ -1695,7 +1791,7 @@ static int todo_clear_x = 0, todo_clear_y = 0, todo_clear_w = 0, todo_clear_h = 
 /* }}} todo sidebar globals */
 
 /* {{{ agent sidebar globals */
-static AgentStatus *agents = NULL;
+static std::unique_ptr<AgentStatus> agents;
 static size_t agent_count = 0;
 static size_t agent_needs_input = 0;
 static time_t agents_last_refresh = 0;
@@ -1724,17 +1820,13 @@ static unsigned int agent_last_jumped_id = 0;
 /* The picker window itself is now project_*'s (see below) -- this is just
  * the $PATH-scanned app index it searches alongside saved projects, plus
  * the bar button that opens it. */
-static char **launcher_apps = NULL;
-static size_t launcher_apps_len = 0;
-static size_t launcher_apps_cap = 0;
+static std::vector<std::string> launcher_apps;
 static int launcher_btn_x = 0;
 static int launcher_btn_w = 0;
 /* }}} launcher globals */
 
 /* {{{ project picker globals */
-static char **projects = NULL;
-static size_t projects_len = 0;
-static size_t projects_cap = 0;
+static std::vector<std::string> projects;
 static int projects_loaded = 0;
 /* The project shown in drawbar()'s top-left corner -- independent of
  * whichever workspace/tag happens to be in view, so it doesn't disappear
@@ -1793,8 +1885,7 @@ static int xdnd_last_x = 0, xdnd_last_y = 0;
 static Window xdnd_pending_source = None;
 /* }}} desktop icons globals */
 
-static Workspace *workspaces;
-static size_t workspaces_len;
+static std::vector<Workspace> workspaces;
 static Window root, wmcheckwin;
 static int command_prompt_active = 0;
 static char command_prompt[1024];
@@ -3960,17 +4051,17 @@ static void wm_output_append(const char *buf, size_t len) {
 }
 
 static WorkspaceMask get_full_workspace_mask(void) {
-  if (workspaces_len == 0) {
+  if (workspaces.empty()) {
     return 0;
   }
-  if (workspaces_len >= 64) {
+  if (workspaces.size() >= 64) {
     return ~0ULL;
   }
-  return (1ULL << workspaces_len) - 1ULL;
+  return (1ULL << workspaces.size()) - 1ULL;
 }
 
 static Workspace *workspace_by_index(size_t index) {
-  if (index >= workspaces_len) {
+  if (index >= workspaces.size()) {
     return NULL;
   }
   return &workspaces[index];
@@ -3984,22 +4075,20 @@ static WorkspaceMask workspace_mask_from_index(size_t index) {
 }
 
 static const char *workspace_name_from_mask(WorkspaceMask mask) {
-  size_t i;
-  for (i = 0; i < workspaces_len; i++) {
+  for (size_t i = 0; i < workspaces.size(); i++) {
     if (mask & workspace_mask_from_index(i)) {
-      return workspaces[i].name;
+      return workspaces[i].name.c_str();
     }
   }
   return "";
 }
 
 static size_t workspace_find(const char *name) {
-  size_t i;
   if (!name || name[0] == '\0') {
     return SIZE_MAX;
   }
-  for (i = 0; i < workspaces_len; i++) {
-    if (strcmp(workspaces[i].name, name) == 0) {
+  for (size_t i = 0; i < workspaces.size(); i++) {
+    if (workspaces[i].name == name) {
       return i;
     }
   }
@@ -4007,11 +4096,10 @@ static size_t workspace_find(const char *name) {
 }
 
 static size_t workspace_index_from_mask(WorkspaceMask mask) {
-  size_t i;
   if (!mask || (mask & (mask - 1ULL))) {
     return SIZE_MAX;
   }
-  for (i = 0; i < workspaces_len; i++) {
+  for (size_t i = 0; i < workspaces.size(); i++) {
     if (mask == workspace_mask_from_index(i)) {
       return i;
     }
@@ -4024,12 +4112,12 @@ static int workspace_has_clients(size_t index) {
   WorkspaceMask mask;
   Client *c;
 
-  if (index >= workspaces_len) {
+  if (index >= workspaces.size()) {
     return 0;
   }
   mask = workspace_mask_from_index(index);
-  for (m = mons; m; m = m->next) {
-    for (c = m->clients; c; c = c->next) {
+  for (m = mons.get(); m; m = m->next.get()) {
+    for (c = m->clients.get(); c; c = c->next.get()) {
       if (c->tags & mask) {
         return 1;
       }
@@ -4042,11 +4130,11 @@ static int workspace_is_visible_on_any_monitor(size_t index) {
   Monitor *m;
   WorkspaceMask mask;
 
-  if (index >= workspaces_len) {
+  if (index >= workspaces.size()) {
     return 0;
   }
   mask = workspace_mask_from_index(index);
-  for (m = mons; m; m = m->next) {
+  for (m = mons.get(); m; m = m->next.get()) {
     if (m->tagset[m->seltags] & mask) {
       return 1;
     }
@@ -4079,9 +4167,9 @@ static WorkspaceMask workspace_reindex_mask_after_remove(WorkspaceMask mask,
 static void workspace_sync_after_registry_change(void) {
   Monitor *m;
   WorkspaceMask full = get_full_workspace_mask();
-  WorkspaceMask fallback = workspaces_len ? workspace_mask_from_index(0) : 0;
+  WorkspaceMask fallback = !workspaces.empty() ? workspace_mask_from_index(0) : 0;
 
-  for (m = mons; m; m = m->next) {
+  for (m = mons.get(); m; m = m->next.get()) {
     m->tagset[0] &= full;
     m->tagset[1] &= full;
     if (!m->tagset[0]) {
@@ -4094,7 +4182,6 @@ static void workspace_sync_after_registry_change(void) {
 }
 
 static size_t workspace_ensure(const char *name) {
-  Workspace *next;
   size_t found;
 
   if (!name || name[0] == '\0') {
@@ -4104,50 +4191,32 @@ static size_t workspace_ensure(const char *name) {
   if (found != SIZE_MAX) {
     return found;
   }
-  if (workspaces_len >= 64) {
+  if (workspaces.size() >= 64) {
     return SIZE_MAX;
   }
-  next = static_cast<Workspace *>(
-      realloc(workspaces, (workspaces_len + 1) * sizeof(Workspace)));
-  if (!next) {
-    die("realloc:");
-  }
-  workspaces = next;
-  workspaces[workspaces_len].mask = workspace_mask_from_index(workspaces_len);
-  workspaces[workspaces_len].name = xstrdup_local(name);
-  workspaces_len++;
+  workspaces.push_back(
+      Workspace{workspace_mask_from_index(workspaces.size()), name});
   workspace_sync_after_registry_change();
-  return workspaces_len - 1;
+  return workspaces.size() - 1;
 }
 
 static int workspace_remove_index(size_t index) {
-  size_t i;
   Monitor *m;
 
-  if (index >= workspaces_len) {
+  if (index >= workspaces.size()) {
     return 0;
   }
 
-  free(workspaces[index].name);
-  for (i = index + 1; i < workspaces_len; i++) {
-    workspaces[i - 1] = workspaces[i];
-  }
-  workspaces_len--;
-
-  if (workspaces_len == 0) {
-    free(workspaces);
-    workspaces = NULL;
-  } else {
-    for (i = index; i < workspaces_len; i++) {
-      workspaces[i].mask = workspace_mask_from_index(i);
-    }
+  workspaces.erase(workspaces.begin() + (ptrdiff_t)index);
+  for (size_t i = index; i < workspaces.size(); i++) {
+    workspaces[i].mask = workspace_mask_from_index(i);
   }
 
-  for (m = mons; m; m = m->next) {
+  for (m = mons.get(); m; m = m->next.get()) {
     Client *c;
     m->tagset[0] = workspace_reindex_mask_after_remove(m->tagset[0], index);
     m->tagset[1] = workspace_reindex_mask_after_remove(m->tagset[1], index);
-    for (c = m->clients; c; c = c->next) {
+    for (c = m->clients.get(); c; c = c->next.get()) {
       c->tags = workspace_reindex_mask_after_remove(c->tags, index);
       client_save_workspace_tags(c);
     }
@@ -4158,28 +4227,24 @@ static int workspace_remove_index(size_t index) {
 }
 
 static int workspace_rename(size_t index, const char *name) {
-  char *replacement;
   size_t found;
-  if (index >= workspaces_len || !name || name[0] == '\0') {
+  if (index >= workspaces.size() || !name || name[0] == '\0') {
     return 0;
   }
   found = workspace_find(name);
   if (found != SIZE_MAX && found != index) {
     return 0;
   }
-  replacement = xstrdup_local(name);
-  free(workspaces[index].name);
-  workspaces[index].name = replacement;
+  workspaces[index].name = name;
   return 1;
 }
 
 static void workspace_set_defaults(void) {
-  size_t i;
   char name[16];
-  if (workspaces_len > 0) {
+  if (!workspaces.empty()) {
     return;
   }
-  for (i = 0; i < 9; i++) {
+  for (size_t i = 0; i < 9; i++) {
     snprintf(name, sizeof(name), "%zu", i + 1);
     if (workspace_ensure(name) == SIZE_MAX) {
       die("failed to create default workspace");
@@ -4189,38 +4254,23 @@ static void workspace_set_defaults(void) {
 
 static int workspace_set_list_from_lua(lua_State *L, int index) {
   size_t len;
-  size_t i;
-  Workspace *old_workspaces = workspaces;
-  size_t old_len = workspaces_len;
+  std::vector<Workspace> old_workspaces = std::move(workspaces);
 
   luaL_checktype(L, index, LUA_TTABLE);
-  workspaces = NULL;
-  workspaces_len = 0;
+  workspaces.clear();
   len = (size_t)lua_rawlen(L, index);
-  for (i = 1; i <= len; i++) {
+  for (size_t i = 1; i <= len; i++) {
     lua_rawgeti(L, index, (int)i);
     if (!lua_isstring(L, -1) ||
         workspace_ensure(lua_tostring(L, -1)) == SIZE_MAX) {
-      size_t j;
       lua_pop(L, 1);
-      for (j = 0; j < workspaces_len; j++) {
-        free(workspaces[j].name);
-      }
-      free(workspaces);
-      workspaces = old_workspaces;
-      workspaces_len = old_len;
+      workspaces = std::move(old_workspaces);
       return 0;
     }
     lua_pop(L, 1);
   }
-  if (workspaces_len == 0) {
+  if (workspaces.empty()) {
     workspace_set_defaults();
-  }
-  if (old_workspaces) {
-    for (i = 0; i < old_len; i++) {
-      free(old_workspaces[i].name);
-    }
-    free(old_workspaces);
   }
   workspace_sync_after_registry_change();
   return 1;
@@ -4237,7 +4287,7 @@ static void workspace_view_mask(Monitor *m, WorkspaceMask mask) {
   if (mask & get_full_workspace_mask()) {
     m->tagset[m->seltags] = mask & get_full_workspace_mask();
   }
-  if (!m->tagset[m->seltags] && workspaces_len > 0) {
+  if (!m->tagset[m->seltags] && !workspaces.empty()) {
     m->tagset[m->seltags] = workspace_mask_from_index(0);
   }
   focus(NULL);
@@ -4279,7 +4329,7 @@ void applyrules(Client *c) {
         (!r->instance || strstr(instance, r->instance))) {
       c->isfloating = r->isfloating;
       c->tags |= r->tags;
-      for (m = mons; m && m->num != r->monitor; m = m->next) {
+      for (m = mons.get(); m && m->num != r->monitor; m = m->next.get()) {
         ;
       }
       if (m) {
@@ -4407,17 +4457,17 @@ int applysizehints(Client *c, int *x, int *y, int *w, int *h, int interact) {
 // {{{ void arrange(Monitor *m)
 void arrange(Monitor *m) {
   if (m) {
-    showhide(m->stack);
+    showhide(m->stack.get());
   } else {
-    for (m = mons; m; m = m->next) {
-      showhide(m->stack);
+    for (m = mons.get(); m; m = m->next.get()) {
+      showhide(m->stack.get());
     }
   }
   if (m) {
     arrangemon(m);
     restack(m);
   } else {
-    for (m = mons; m; m = m->next) {
+    for (m = mons.get(); m; m = m->next.get()) {
       arrangemon(m);
     }
   }
@@ -4436,14 +4486,14 @@ void arrangemon(Monitor *m) {
 // {{{ void attach(Client *c)
 void attach(Client *c) {
   c->next = c->mon->clients;
-  c->mon->clients = c;
+  c->mon->clients = c->shared_from_this();
 }
 // }}} void attach(Client *c)
 
 // {{{ void attachstack(Client *c)
 void attachstack(Client *c) {
   c->snext = c->mon->stack;
-  c->mon->stack = c;
+  c->mon->stack = c->shared_from_this();
 }
 // }}} void attachstack(Client *c)
 
@@ -4613,7 +4663,9 @@ void checkotherwm(void) {
 
 // {{{ void checkx11(void)
 void checkx11(void) {
-  if (!(dpy = XOpenDisplay(NULL))) {
+  dpy_owner.reset(XOpenDisplay(NULL));
+  dpy = dpy_owner.get();
+  if (!dpy) {
     die("mwm: cannot open display");
   }
 }
@@ -5057,16 +5109,8 @@ static const BarThemeConfig *active_bar_theme(void) {
 }
 
 static void freecolorscheme(void) {
-  size_t i;
-
-  if (!scheme) {
-    return;
-  }
-  for (i = 0; i < SchemeSel + 1; i++) {
-    free(scheme[i]);
-  }
-  free(scheme);
-  scheme = NULL;
+  scheme_owner.reset();
+  scheme = nullptr;
 }
 
 static void setcolorscheme(void) {
@@ -5077,11 +5121,12 @@ static void setcolorscheme(void) {
   };
   size_t i;
 
-  freecolorscheme();
-  scheme = ecalloc_type<Clr *>(SchemeSel + 1);
+  Clr **new_scheme = ecalloc_type<Clr *>(SchemeSel + 1);
   for (i = 0; i < SchemeSel + 1; i++) {
-    scheme[i] = drw_scm_create(drw, colors[i], 3);
+    new_scheme[i] = drw_scm_create(drw, colors[i], 3);
   }
+  scheme_owner.reset(new_scheme);
+  scheme = scheme_owner.get();
 }
 
 static int system_prefers_dark(void) {
@@ -5133,8 +5178,8 @@ static void widget_refresh_client_borders(void) {
   Monitor *m;
   Client *c;
 
-  for (m = mons; m; m = m->next) {
-    for (c = m->clients; c; c = c->next) {
+  for (m = mons.get(); m; m = m->next.get()) {
+    for (c = m->clients.get(); c; c = c->next.get()) {
       XSetWindowBorder(dpy, c->win,
                         scheme[c == m->sel ? SchemeSel : SchemeNorm][ColBorder]
                             .pixel);
@@ -5404,7 +5449,7 @@ static size_t lua_workspace_index_arg(lua_State *L, int arg_index) {
   size_t named;
   if (lua_type(L, arg_index) == LUA_TNUMBER) {
     idx = lua_tointeger(L, arg_index);
-    if (idx <= 0 || (size_t)idx > workspaces_len) {
+    if (idx <= 0 || (size_t)idx > workspaces.size()) {
       return SIZE_MAX;
     }
     return (size_t)(idx - 1);
@@ -5455,13 +5500,13 @@ static size_t focus_workspace_by_name(Monitor *m, const char *name) {
 
   workspace_view_mask(m, workspace_mask_from_index(index));
 
-  if (old_index != SIZE_MAX && old_index < workspaces_len &&
+  if (old_index != SIZE_MAX && old_index < workspaces.size() &&
       old_index != workspace_index_from_mask(m->tagset[m->seltags]) &&
       !workspace_has_clients(old_index) &&
       !workspace_is_visible_on_any_monitor(old_index)) {
     workspace_remove_index(old_index);
     focus(NULL);
-    for (mm = mons; mm; mm = mm->next) {
+    for (mm = mons.get(); mm; mm = mm->next.get()) {
       arrange(mm);
     }
     drawbars();
@@ -5503,15 +5548,15 @@ static int lua_mwm_rename_workspace(lua_State *L) {
     return luaL_error(L, "unable to rename workspace");
   }
   drawbars();
-  lua_pushstring(L, workspaces[index].name);
+  lua_pushstring(L, workspaces[index].name.c_str());
   return 1;
 }
 
 static int lua_mwm_list_workspaces(lua_State *L) {
   size_t i;
-  lua_createtable(L, (int)workspaces_len, 0);
-  for (i = 0; i < workspaces_len; i++) {
-    lua_pushstring(L, workspaces[i].name);
+  lua_createtable(L, (int)workspaces.size(), 0);
+  for (i = 0; i < workspaces.size(); i++) {
+    lua_pushstring(L, workspaces[i].name.c_str());
     lua_rawseti(L, -2, (int)i + 1);
   }
   return 1;
@@ -5536,9 +5581,9 @@ static int lua_mwm_current_project(lua_State *L) {
 static int lua_mwm_list_projects(lua_State *L) {
   size_t i;
   projects_ensure_loaded();
-  lua_createtable(L, (int)projects_len, 0);
-  for (i = 0; i < projects_len; i++) {
-    lua_pushstring(L, projects[i]);
+  lua_createtable(L, (int)projects.size(), 0);
+  for (i = 0; i < projects.size(); i++) {
+    lua_pushstring(L, projects[i].c_str());
     lua_rawseti(L, -2, (int)i + 1);
   }
   return 1;
@@ -5566,7 +5611,7 @@ static int lua_mwm_switch_project(lua_State *L) {
     idx = project_index_for_workspace_name(arg);
   }
   if (idx >= 0) {
-    snprintf(path_buf, sizeof(path_buf), "%s", projects[idx]);
+    snprintf(path_buf, sizeof(path_buf), "%s", projects[idx].c_str());
   } else {
     project_expand_path(arg, path_buf, sizeof(path_buf));
     if (!projects_add(arg)) {
@@ -5991,7 +6036,7 @@ static int lua_mwm_set_mfact(lua_State *L) {
     f = 0.95;
   }
   mfact = (float)f;
-  for (m = mons; m; m = m->next) {
+  for (m = mons.get(); m; m = m->next.get()) {
     m->mfact = mfact;
   }
   if (selmon) {
@@ -6009,7 +6054,7 @@ static int lua_mwm_set_nmaster(lua_State *L) {
     n = 0;
   }
   nmaster = n;
-  for (m = mons; m; m = m->next) {
+  for (m = mons.get(); m; m = m->next.get()) {
     m->nmaster = nmaster;
   }
   if (selmon) {
@@ -6044,8 +6089,8 @@ static int lua_mwm_set_border_width(lua_State *L) {
   }
   borderpx = (unsigned int)px;
 
-  for (m = mons; m; m = m->next) {
-    for (c = m->clients; c; c = c->next) {
+  for (m = mons.get(); m; m = m->next.get()) {
+    for (c = m->clients.get(); c; c = c->next.get()) {
       if (c->isfullscreen) {
         c->oldbw = (int)borderpx;
         continue;
@@ -6070,7 +6115,7 @@ static int lua_mwm_set_gaps(lua_State *L) {
     px = 0;
   }
   gappx = px;
-  for (m = mons; m; m = m->next) {
+  for (m = mons.get(); m; m = m->next.get()) {
     arrange(m);
   }
   drawbars();
@@ -6155,8 +6200,8 @@ static void regrab_all_client_buttons(void) {
   Monitor *m;
   Client *c;
 
-  for (m = mons; m; m = m->next) {
-    for (c = m->clients; c; c = c->next) {
+  for (m = mons.get(); m; m = m->next.get()) {
+    for (c = m->clients.get(); c; c = c->next.get()) {
       grabbuttons(c, c == m->sel);
     }
   }
@@ -6314,7 +6359,7 @@ static void lua_layout_arrange(Monitor *m, size_t layout_idx) {
     return;
   }
 
-  for (c = nexttiled(m->clients); c && n < MAX_LUA_ARRANGE_CLIENTS; c = nexttiled(c->next)) {
+  for (c = nexttiled(m->clients.get()); c && n < MAX_LUA_ARRANGE_CLIENTS; c = nexttiled(c->next.get())) {
     tiled[n++] = c;
   }
   if (n == 0) {
@@ -6461,7 +6506,7 @@ static MonLayoutSnapshot *snapshot_lua_layouts(size_t *count_out) {
   size_t i;
 
   *count_out = 0;
-  for (m = mons; m; m = m->next) {
+  for (m = mons.get(); m; m = m->next.get()) {
     n++;
   }
   if (n == 0) {
@@ -6469,7 +6514,7 @@ static MonLayoutSnapshot *snapshot_lua_layouts(size_t *count_out) {
   }
 
   snap = ecalloc_type<MonLayoutSnapshot>(n);
-  for (m = mons, i = 0; m; m = m->next, i++) {
+  for (m = mons.get(), i = 0; m; m = m->next.get(), i++) {
     int k;
     for (k = 0; k < 2; k++) {
       if (layout_is_lua(m->lt[k])) {
@@ -6498,7 +6543,7 @@ static void restore_lua_layouts(MonLayoutSnapshot *snap, size_t count) {
   if (!snap) {
     return;
   }
-  for (m = mons, i = 0; m && i < count; m = m->next, i++) {
+  for (m = mons.get(), i = 0; m && i < count; m = m->next.get(), i++) {
     int k;
     for (k = 0; k < 2; k++) {
       const Layout *replacement;
@@ -6589,7 +6634,7 @@ static unsigned int notification_add(const char *app_name, const char *summary,
   time_t now = time(NULL);
 
   if (replaces_id != 0) {
-    for (n = notifications; n; n = n->next) {
+    for (n = notifications.get(); n; n = n->next.get()) {
       if (n->id == replaces_id) {
         break;
       }
@@ -6597,10 +6642,11 @@ static unsigned int notification_add(const char *app_name, const char *summary,
   }
 
   if (!n) {
-    n = ecalloc_type<Notification>();
-    n->id = notification_next_id++;
-    n->next = notifications;
-    notifications = n;
+    auto created = std::make_unique<Notification>();
+    created->id = notification_next_id++;
+    n = created.get();
+    created->next = std::move(notifications);
+    notifications = std::move(created);
     notification_count++;
   }
 
@@ -6613,15 +6659,14 @@ static unsigned int notification_add(const char *app_name, const char *summary,
   notification_unread++;
 
   while (notification_count > MAX_NOTIFICATIONS) {
-    Notification *prev = notifications;
+    Notification *prev = notifications.get();
     if (!prev || !prev->next) {
       break;
     }
     while (prev->next && prev->next->next) {
-      prev = prev->next;
+      prev = prev->next.get();
     }
-    free(prev->next);
-    prev->next = NULL;
+    prev->next.reset();
     notification_count--;
   }
 
@@ -6633,68 +6678,48 @@ static unsigned int notification_add(const char *app_name, const char *summary,
 }
 
 static void notification_remove(unsigned int id, unsigned int reason) {
-  Notification *cur = notifications;
-  Notification *prev = NULL;
+  std::unique_ptr<Notification> *slot = &notifications;
 
-  while (cur) {
-    if (cur->id == id) {
-      if (prev) {
-        prev->next = cur->next;
-      } else {
-        notifications = cur->next;
-      }
-      free(cur);
+  while (*slot) {
+    if ((*slot)->id == id) {
+      *slot = std::move((*slot)->next);
       if (notification_count > 0) {
         notification_count--;
       }
       notif_dbus_emit_notification_closed(id, reason);
       return;
     }
-    prev = cur;
-    cur = cur->next;
+    slot = &(*slot)->next;
   }
 }
 
 static void notification_clear_all(void) {
-  Notification *cur = notifications;
-
-  while (cur) {
-    Notification *next = cur->next;
+  for (Notification *cur = notifications.get(); cur; cur = cur->next.get()) {
     notif_dbus_emit_notification_closed(cur->id, 2);
-    free(cur);
-    cur = next;
   }
-  notifications = NULL;
+  notifications.reset();
   notification_count = 0;
   notification_unread = 0;
 }
 
 static void notification_expire_check(void) {
-  Notification *cur = notifications;
-  Notification *prev = NULL;
+  std::unique_ptr<Notification> *slot = &notifications;
   time_t now = time(NULL);
   int changed = 0;
 
-  while (cur) {
-    if (cur->expire_at != 0 && cur->expire_at <= now) {
-      Notification *dead = cur;
+  while (*slot) {
+    if ((*slot)->expire_at != 0 && (*slot)->expire_at <= now) {
+      unsigned int dead_id = (*slot)->id;
 
-      if (prev) {
-        prev->next = cur->next;
-      } else {
-        notifications = cur->next;
-      }
-      cur = cur->next;
       if (notification_count > 0) {
         notification_count--;
       }
-      notif_dbus_emit_notification_closed(dead->id, 1);
-      free(dead);
+      notif_dbus_emit_notification_closed(dead_id, 1);
+      *slot = std::move((*slot)->next);
       changed = 1;
       continue;
     }
-    prev = cur;
-    cur = cur->next;
+    slot = &(*slot)->next;
   }
   if (changed && notif_sidebar_visible) {
     draw_notif_sidebar();
@@ -6724,11 +6749,13 @@ static void notif_dbus_init(void) {
   DBusError err;
 
   dbus_error_init(&err);
-  notif_dbus_conn = dbus_bus_get_private(DBUS_BUS_SESSION, &err);
+  notif_dbus_conn_owner.reset(dbus_bus_get_private(DBUS_BUS_SESSION, &err));
+  notif_dbus_conn = notif_dbus_conn_owner.get();
   if (dbus_error_is_set(&err) || !notif_dbus_conn) {
     fprintf(stderr, "mwm: dbus session bus connect failed: %s\n",
             dbus_error_is_set(&err) ? err.message : "unknown error");
     dbus_error_free(&err);
+    notif_dbus_conn_owner.reset();
     notif_dbus_conn = NULL;
     return;
   }
@@ -6751,8 +6778,7 @@ static void notif_dbus_shutdown(void) {
   if (notif_dbus_owned) {
     dbus_bus_release_name(notif_dbus_conn, "org.freedesktop.Notifications", NULL);
   }
-  dbus_connection_close(notif_dbus_conn);
-  dbus_connection_unref(notif_dbus_conn);
+  notif_dbus_conn_owner.reset();
   notif_dbus_conn = NULL;
   notif_dbus_owned = 0;
 }
@@ -7060,7 +7086,7 @@ static int notif_sidebar_content_height(void) {
   char lines[3][256];
   int max_w = notif_sidebar_w - 2 * notif_row_pad;
 
-  for (n = notifications; n; n = n->next) {
+  for (n = notifications.get(); n; n = n->next.get()) {
     size_t nlines = notif_wrap_body(n->body, max_w, lines, 3);
     total += notif_row_pad + bh + bh + (int)nlines * bh + notif_row_pad;
   }
@@ -7135,7 +7161,7 @@ static void draw_notif_sidebar(void) {
              bh, 0, "No notifications", 0);
   }
 
-  for (n = notifications; n; n = n->next) {
+  for (n = notifications.get(); n; n = n->next.get()) {
     size_t nlines = notif_wrap_body(n->body, max_w, lines, 3);
     int card_h = notif_row_pad + bh + bh + (int)nlines * bh + notif_row_pad;
     int card_y = y;
@@ -7331,30 +7357,30 @@ static int notif_sidebar_handle_button(XButtonPressedEvent *ev) {
 /* {{{ todo sidebar */
 
 static unsigned int todo_add(const char *text) {
-  Todo *t = ecalloc_type<Todo>();
+  auto created = std::make_unique<Todo>();
+  Todo *t = created.get();
 
   t->id = todo_next_id++;
   snprintf(t->text, sizeof(t->text), "%s", text ? text : "");
   t->done = 0;
   t->created = time(NULL);
-  t->next = todos;
-  todos = t;
+  created->next = std::move(todos);
+  todos = std::move(created);
   todo_count++;
   todo_incomplete++;
 
   while (todo_count > MAX_TODOS) {
-    Todo *prev = todos;
+    Todo *prev = todos.get();
     if (!prev || !prev->next) {
       break;
     }
     while (prev->next && prev->next->next) {
-      prev = prev->next;
+      prev = prev->next.get();
     }
     if (!prev->next->done && todo_incomplete > 0) {
       todo_incomplete--;
     }
-    free(prev->next);
-    prev->next = NULL;
+    prev->next.reset();
     todo_count--;
   }
 
@@ -7366,34 +7392,27 @@ static unsigned int todo_add(const char *text) {
 }
 
 static void todo_remove(unsigned int id) {
-  Todo *cur = todos;
-  Todo *prev = NULL;
+  std::unique_ptr<Todo> *slot = &todos;
 
-  while (cur) {
-    if (cur->id == id) {
-      if (prev) {
-        prev->next = cur->next;
-      } else {
-        todos = cur->next;
-      }
-      if (!cur->done && todo_incomplete > 0) {
+  while (*slot) {
+    if ((*slot)->id == id) {
+      if (!(*slot)->done && todo_incomplete > 0) {
         todo_incomplete--;
       }
-      free(cur);
+      *slot = std::move((*slot)->next);
       if (todo_count > 0) {
         todo_count--;
       }
       return;
     }
-    prev = cur;
-    cur = cur->next;
+    slot = &(*slot)->next;
   }
 }
 
 static void todo_toggle(unsigned int id) {
   Todo *t;
 
-  for (t = todos; t; t = t->next) {
+  for (t = todos.get(); t; t = t->next.get()) {
     if (t->id == id) {
       t->done = !t->done;
       if (t->done) {
@@ -7409,27 +7428,17 @@ static void todo_toggle(unsigned int id) {
 }
 
 static void todo_clear_completed(void) {
-  Todo *cur = todos;
-  Todo *prev = NULL;
+  std::unique_ptr<Todo> *slot = &todos;
 
-  while (cur) {
-    if (cur->done) {
-      Todo *dead = cur;
-
-      if (prev) {
-        prev->next = cur->next;
-      } else {
-        todos = cur->next;
-      }
-      cur = cur->next;
+  while (*slot) {
+    if ((*slot)->done) {
+      *slot = std::move((*slot)->next);
       if (todo_count > 0) {
         todo_count--;
       }
-      free(dead);
       continue;
     }
-    prev = cur;
-    cur = cur->next;
+    slot = &(*slot)->next;
   }
 }
 
@@ -7456,7 +7465,7 @@ static int todo_sidebar_content_height(void) {
   char lines[3][256];
   int max_w = todo_sidebar_w - 3 * todo_row_pad - bh;
 
-  for (t = todos; t; t = t->next) {
+  for (t = todos.get(); t; t = t->next.get()) {
     size_t nlines = notif_wrap_body(t->text, max_w, lines, 3);
     if (nlines < 1) {
       nlines = 1;
@@ -7512,7 +7521,7 @@ static void draw_todo_sidebar(void) {
   drw_text(drw, todo_row_pad, 0, todo_sidebar_w - 2 * todo_row_pad, header_h,
            0, "Todos", 0);
 
-  for (t = todos; t; t = t->next) {
+  for (t = todos.get(); t; t = t->next.get()) {
     if (t->done) {
       have_completed = 1;
       break;
@@ -7541,7 +7550,7 @@ static void draw_todo_sidebar(void) {
              bh, 0, "No todos", 0);
   }
 
-  for (t = todos; t; t = t->next) {
+  for (t = todos.get(); t; t = t->next.get()) {
     size_t nlines = notif_wrap_body(t->text, max_w, lines, 3);
     int row_lines = nlines < 1 ? 1 : (int)nlines;
     int card_h = todo_row_pad + row_lines * bh + todo_row_pad;
@@ -7825,19 +7834,13 @@ static void get_agent_status_dir(char *buf, size_t size) {
   snprintf(buf, size, "/tmp/mwm-agents-%s", user && user[0] ? user : "mwm");
 }
 
-static void agents_free_list(void) {
-  while (agents) {
-    AgentStatus *next = agents->next;
-    free(agents);
-    agents = next;
-  }
-}
+static void agents_free_list(void) { agents.reset(); }
 
 static AgentStatus *agent_list_find(AgentStatus *head, const char *kind,
                                     const char *cwd) {
   AgentStatus *a;
 
-  for (a = head; a; a = a->next) {
+  for (a = head; a; a = a->next.get()) {
     if (strcmp(a->kind, kind) == 0 && strcmp(a->cwd, cwd) == 0) {
       return a;
     }
@@ -7846,7 +7849,7 @@ static AgentStatus *agent_list_find(AgentStatus *head, const char *kind,
 }
 
 static void agents_refresh(void) {
-  AgentStatus *new_list = NULL;
+  std::unique_ptr<AgentStatus> new_list;
   size_t count = 0;
   size_t needs_input = 0;
   DIR *dir;
@@ -7860,7 +7863,6 @@ static void agents_refresh(void) {
       FILE *fp;
       char buf[2048];
       size_t n;
-      AgentStatus *a;
 
       if (len < 6 || strcmp(entry->d_name + len - 5, ".json") != 0) {
         continue;
@@ -7874,11 +7876,11 @@ static void agents_refresh(void) {
       fclose(fp);
       buf[n] = '\0';
 
-      a = ecalloc_type<AgentStatus>();
+      auto created = std::make_unique<AgentStatus>();
+      AgentStatus *a = created.get();
       if (!agent_json_field(buf, "agent", a->kind, sizeof(a->kind)) ||
           !agent_json_field(buf, "status", a->status, sizeof(a->status)) ||
           !agent_json_field(buf, "cwd", a->cwd, sizeof(a->cwd))) {
-        free(a);
         continue;
       }
       agent_json_field(buf, "label", a->label, sizeof(a->label));
@@ -7886,8 +7888,8 @@ static void agents_refresh(void) {
       a->from_file = 1;
       snprintf(a->file_path, sizeof(a->file_path), "%s", path);
 
-      a->next = new_list;
-      new_list = a;
+      created->next = std::move(new_list);
+      new_list = std::move(created);
       count++;
       if (strcmp(a->status, "needs_input") == 0) {
         needs_input++;
@@ -7906,7 +7908,6 @@ static void agents_refresh(void) {
       char cwd_link[384];
       FILE *fp;
       ssize_t link_len;
-      AgentStatus *a;
 
       for (p = entry->d_name; *p; p++) {
         if (!isdigit((unsigned char)*p)) {
@@ -7943,7 +7944,7 @@ static void agents_refresh(void) {
       cwd_link[link_len] = '\0';
 
       {
-        AgentStatus *existing = agent_list_find(new_list, comm, cwd_link);
+        AgentStatus *existing = agent_list_find(new_list.get(), comm, cwd_link);
         if (existing) {
           /* A status-file entry already represents this agent; just
            * recover its pid so click-to-jump can find the right window. */
@@ -7954,7 +7955,8 @@ static void agents_refresh(void) {
         }
       }
 
-      a = ecalloc_type<AgentStatus>();
+      auto created = std::make_unique<AgentStatus>();
+      AgentStatus *a = created.get();
       snprintf(a->kind, sizeof(a->kind), "%s", comm);
       snprintf(a->status, sizeof(a->status), "running");
       snprintf(a->label, sizeof(a->label), "running");
@@ -7964,15 +7966,14 @@ static void agents_refresh(void) {
       a->file_path[0] = '\0';
       a->pid = (pid_t)atol(entry->d_name);
 
-      a->next = new_list;
-      new_list = a;
+      created->next = std::move(new_list);
+      new_list = std::move(created);
       count++;
     }
     closedir(dir);
   }
 
-  agents_free_list();
-  agents = new_list;
+  agents = std::move(new_list);
   agent_count = count;
   agent_needs_input = needs_input;
   agents_last_refresh = time(NULL);
@@ -8044,8 +8045,8 @@ static Client *client_for_pid(pid_t target) {
     return NULL;
   }
   for (hops = 0; target > 1 && hops < 32; hops++) {
-    for (m = mons; m; m = m->next) {
-      for (c = m->clients; c; c = c->next) {
+    for (m = mons.get(); m; m = m->next.get()) {
+      for (c = m->clients.get(); c; c = c->next.get()) {
         if (client_get_pid(c->win) == target) {
           return c;
         }
@@ -8100,7 +8101,7 @@ static void agent_jump_to(const AgentStatus *a) {
 
   idx = project_find_for_path(a->cwd);
   if (idx >= 0) {
-    project_basename(projects[idx], wsname, sizeof(wsname));
+    project_basename(projects[idx].c_str(), wsname, sizeof(wsname));
   } else {
     project_basename(a->cwd, wsname, sizeof(wsname));
   }
@@ -8124,7 +8125,7 @@ static void agent_jump_next_needs_input(const Arg *arg) {
 
   agents_refresh();
 
-  for (a = agents; a; a = a->next) {
+  for (a = agents.get(); a; a = a->next.get()) {
     if (strcmp(a->status, "needs_input") != 0) {
       continue;
     }
@@ -8163,7 +8164,7 @@ static int agent_sidebar_content_height(void) {
   char lines[3][256];
   int max_w = agent_sidebar_w - 2 * agent_row_pad;
 
-  for (a = agents; a; a = a->next) {
+  for (a = agents.get(); a; a = a->next.get()) {
     size_t nlines = notif_wrap_body(a->label, max_w, lines, 2);
     if (nlines < 1) {
       nlines = 1;
@@ -8221,7 +8222,7 @@ static void draw_agent_sidebar(void) {
   drw_text(drw, agent_row_pad, 0, agent_sidebar_w - 2 * agent_row_pad, header_h,
            0, "Agents", 0);
 
-  for (a = agents; a; a = a->next) {
+  for (a = agents.get(); a; a = a->next.get()) {
     if (a->from_file) {
       have_dismissible = 1;
       break;
@@ -8250,7 +8251,7 @@ static void draw_agent_sidebar(void) {
              bh, 0, "No agents running", 0);
   }
 
-  for (a = agents; a; a = a->next) {
+  for (a = agents.get(); a; a = a->next.get()) {
     size_t nlines = notif_wrap_body(a->label, max_w, lines, 2);
     int label_lines = nlines < 1 ? 1 : (int)nlines;
     int card_h = agent_row_pad + bh + label_lines * bh + bh + agent_row_pad;
@@ -8440,7 +8441,7 @@ static int agent_sidebar_handle_button(XButtonPressedEvent *ev) {
   if (ev->y >= agent_clear_y && ev->y < agent_clear_y + agent_clear_h &&
       ev->x >= agent_clear_x && ev->x < agent_clear_x + agent_clear_w) {
     AgentStatus *a;
-    for (a = agents; a; a = a->next) {
+    for (a = agents.get(); a; a = a->next.get()) {
       if (a->from_file) {
         unlink(a->file_path);
       }
@@ -8457,7 +8458,7 @@ static int agent_sidebar_handle_button(XButtonPressedEvent *ev) {
         ev->x < row->close_x + row->close_w && ev->y >= row->close_y &&
         ev->y < row->close_y + row->close_h) {
       AgentStatus *a;
-      for (a = agents; a; a = a->next) {
+      for (a = agents.get(); a; a = a->next.get()) {
         if (a->from_file && agent_hash_id(a->file_path) == row->dismiss_id) {
           unlink(a->file_path);
           break;
@@ -8474,7 +8475,7 @@ static int agent_sidebar_handle_button(XButtonPressedEvent *ev) {
     AgentRowLayout *row = &agent_row_layout[i];
     if (ev->y >= row->card_y && ev->y < row->card_y + row->card_h) {
       AgentStatus *a;
-      for (a = agents; a; a = a->next) {
+      for (a = agents.get(); a; a = a->next.get()) {
         if (agent_row_id(a->kind, a->cwd) == row->id) {
           agent_jump_to(a);
           break;
@@ -8493,24 +8494,21 @@ static int agent_sidebar_handle_button(XButtonPressedEvent *ev) {
 /* {{{ launcher (app index -- searched from within the project picker,
  * see the "project picker" section below for the actual UI) */
 
-static int launcher_app_cmp(const void *a, const void *b) {
-  const char *sa = *(const char *const *)a;
-  const char *sb = *(const char *const *)b;
+static bool launcher_app_less(const std::string &sa, const std::string &sb) {
   size_t i;
-  for (i = 0; sa[i] && sb[i]; i++) {
+  for (i = 0; i < sa.size() && i < sb.size(); i++) {
     int ca = tolower((unsigned char)sa[i]);
     int cb = tolower((unsigned char)sb[i]);
     if (ca != cb) {
-      return ca - cb;
+      return ca < cb;
     }
   }
-  return (unsigned char)sa[i] - (unsigned char)sb[i];
+  return sa.size() < sb.size();
 }
 
 static int launcher_app_exists(const char *name) {
-  size_t i;
-  for (i = 0; i < launcher_apps_len; i++) {
-    if (!strcmp(launcher_apps[i], name)) {
+  for (size_t i = 0; i < launcher_apps.size(); i++) {
+    if (launcher_apps[i] == name) {
       return 1;
     }
   }
@@ -8521,16 +8519,7 @@ static void launcher_app_add(const char *name) {
   if (launcher_app_exists(name)) {
     return;
   }
-  if (launcher_apps_len == launcher_apps_cap) {
-    size_t newcap = launcher_apps_cap ? launcher_apps_cap * 2 : 256;
-    char **grown = (char **)realloc(launcher_apps, newcap * sizeof(char *));
-    if (!grown) {
-      return;
-    }
-    launcher_apps = grown;
-    launcher_apps_cap = newcap;
-  }
-  launcher_apps[launcher_apps_len++] = xstrdup_local(name);
+  launcher_apps.push_back(name);
 }
 
 /* Scans every directory on $PATH for executables, the same set dmenu_run
@@ -8572,7 +8561,7 @@ static void launcher_scan_apps(void) {
   }
   free(path_copy);
 
-  qsort(launcher_apps, launcher_apps_len, sizeof(char *), launcher_app_cmp);
+  std::sort(launcher_apps.begin(), launcher_apps.end(), launcher_app_less);
 }
 
 /* }}} launcher */
@@ -8612,21 +8601,12 @@ static void projects_load(void) {
   if (!fp) {
     return;
   }
-  while (projects_len < MAX_PROJECTS && fgets(line, sizeof(line), fp)) {
+  while (projects.size() < MAX_PROJECTS && fgets(line, sizeof(line), fp)) {
     line[strcspn(line, "\n")] = '\0';
     if (line[0] == '\0') {
       continue;
     }
-    if (projects_len == projects_cap) {
-      size_t newcap = projects_cap ? projects_cap * 2 : 32;
-      char **grown = (char **)realloc(projects, newcap * sizeof(char *));
-      if (!grown) {
-        break;
-      }
-      projects = grown;
-      projects_cap = newcap;
-    }
-    projects[projects_len++] = xstrdup_local(line);
+    projects.push_back(line);
   }
   fclose(fp);
 }
@@ -8652,8 +8632,8 @@ static void projects_save(void) {
   if (!fp) {
     return;
   }
-  for (i = 0; i < projects_len; i++) {
-    fprintf(fp, "%s\n", projects[i]);
+  for (i = 0; i < projects.size(); i++) {
+    fprintf(fp, "%s\n", projects[i].c_str());
   }
   fclose(fp);
 }
@@ -8685,40 +8665,25 @@ static int projects_add(const char *raw_path) {
     return 0;
   }
 
-  for (i = 0; i < projects_len; i++) {
-    if (!strcmp(projects[i], expanded)) {
+  for (i = 0; i < projects.size(); i++) {
+    if (projects[i] == expanded) {
       return 1; /* already present */
     }
   }
 
-  if (projects_len >= MAX_PROJECTS) {
+  if (projects.size() >= MAX_PROJECTS) {
     return 0;
   }
-  if (projects_len == projects_cap) {
-    size_t newcap = projects_cap ? projects_cap * 2 : 32;
-    char **grown = (char **)realloc(projects, newcap * sizeof(char *));
-    if (!grown) {
-      return 0;
-    }
-    projects = grown;
-    projects_cap = newcap;
-  }
-  projects[projects_len++] = xstrdup_local(expanded);
+  projects.push_back(expanded);
   projects_save();
   return 1;
 }
 
 static void projects_remove_index(size_t idx) {
-  size_t i;
-
-  if (idx >= projects_len) {
+  if (idx >= projects.size()) {
     return;
   }
-  free(projects[idx]);
-  for (i = idx; i + 1 < projects_len; i++) {
-    projects[i] = projects[i + 1];
-  }
-  projects_len--;
+  projects.erase(projects.begin() + (ptrdiff_t)idx);
   projects_save();
 }
 
@@ -8727,17 +8692,14 @@ static void projects_remove_index(size_t idx) {
  * most-recently-used first (project_filter()'s no-query branch just walks
  * projects[] in array order already). */
 static void projects_move_to_front(size_t idx) {
-  char *moved;
-  size_t i;
-
-  if (idx == 0 || idx >= projects_len) {
+  if (idx == 0 || idx >= projects.size()) {
     return;
   }
-  moved = projects[idx];
-  for (i = idx; i > 0; i--) {
-    projects[i] = projects[i - 1];
+  std::string moved = std::move(projects[idx]);
+  for (size_t i = idx; i > 0; i--) {
+    projects[i] = std::move(projects[i - 1]);
   }
-  projects[0] = moved;
+  projects[0] = std::move(moved);
   projects_save();
 }
 
@@ -8765,7 +8727,7 @@ static int project_has_running_agent(const char *path) {
   AgentStatus *a;
   size_t plen = strlen(path);
 
-  for (a = agents; a; a = a->next) {
+  for (a = agents.get(); a; a = a->next.get()) {
     if (!strncmp(a->cwd, path, plen) && (a->cwd[plen] == '/' || a->cwd[plen] == '\0')) {
       return 1;
     }
@@ -8846,12 +8808,12 @@ static int project_find_for_path(const char *path) {
   }
   projects_ensure_loaded();
   path_len = strlen(path);
-  for (i = 0; i < projects_len; i++) {
-    size_t plen = strlen(projects[i]);
+  for (i = 0; i < projects.size(); i++) {
+    size_t plen = projects[i].size();
     if (plen == 0 || plen > path_len) {
       continue;
     }
-    if (strncmp(projects[i], path, plen) != 0) {
+    if (strncmp(projects[i].c_str(), path, plen) != 0) {
       continue;
     }
     if (path[plen] != '\0' && path[plen] != '/') {
@@ -8877,8 +8839,8 @@ static void project_label_for_path(const char *path, char *out, size_t outsz) {
     snprintf(out, outsz, "%s", path ? path : "");
     return;
   }
-  project_basename(projects[idx], base, sizeof(base));
-  plen = strlen(projects[idx]);
+  project_basename(projects[idx].c_str(), base, sizeof(base));
+  plen = projects[idx].size();
   rel = path + plen;
   while (*rel == '/') {
     rel++;
@@ -8900,8 +8862,8 @@ static int project_index_for_workspace_name(const char *wsname) {
     return -1;
   }
   projects_ensure_loaded();
-  for (i = 0; i < projects_len; i++) {
-    project_basename(projects[i], base, sizeof(base));
+  for (i = 0; i < projects.size(); i++) {
+    project_basename(projects[i].c_str(), base, sizeof(base));
     if (!strcmp(base, wsname)) {
       return (int)i;
     }
@@ -8962,7 +8924,7 @@ static void project_init_default(void) {
  * project if it's a valid directory. */
 static int project_resolve_selected_path(char *out, size_t outsz) {
   if (project_filtered_len > 0 && project_filtered[project_sel].kind == PickResultProject) {
-    snprintf(out, outsz, "%s", projects[project_filtered[project_sel].index]);
+    snprintf(out, outsz, "%s", projects[project_filtered[project_sel].index].c_str());
     return 1;
   }
   /* AppOnly and Theme have no notion of "add as a project" -- an unmatched
@@ -8997,7 +8959,7 @@ static void project_launch(int with_agent) {
 
   if (project_filtered_len > 0 && project_filtered[project_sel].kind == PickResultApp) {
     const char *argv_app[2];
-    argv_app[0] = launcher_apps[project_filtered[project_sel].index];
+    argv_app[0] = launcher_apps[project_filtered[project_sel].index].c_str();
     argv_app[1] = NULL;
     a.v = argv_app;
     spawn(&a);
@@ -9021,8 +8983,8 @@ static void project_launch(int with_agent) {
 
   {
     size_t i;
-    for (i = 0; i < projects_len; i++) {
-      if (!strcmp(projects[i], path_buf)) {
+    for (i = 0; i < projects.size(); i++) {
+      if (projects[i] == path_buf) {
         projects_move_to_front(i);
         break;
       }
@@ -9148,14 +9110,14 @@ static void project_filter(void) {
     }
   } else if (project_query_len == 0) {
     if (want_projects) {
-      for (i = 0; i < projects_len && all_len < MAX_PICK_CANDIDATES; i++) {
+      for (i = 0; i < projects.size() && all_len < MAX_PICK_CANDIDATES; i++) {
         all[all_len].index = (int)i;
         all[all_len].score = 0;
         all[all_len].kind = PickResultProject;
         all_len++;
       }
     } else if (want_apps) {
-      for (i = 0; i < launcher_apps_len && all_len < MAX_PICK_CANDIDATES; i++) {
+      for (i = 0; i < launcher_apps.size() && all_len < MAX_PICK_CANDIDATES; i++) {
         all[all_len].index = (int)i;
         all[all_len].score = 0;
         all[all_len].kind = PickResultApp;
@@ -9164,8 +9126,8 @@ static void project_filter(void) {
     }
   } else {
     if (want_projects) {
-      for (i = 0; i < projects_len && all_len < MAX_PICK_CANDIDATES; i++) {
-        int score = project_fuzzy_score(project_query, project_query_len, projects[i]);
+      for (i = 0; i < projects.size() && all_len < MAX_PICK_CANDIDATES; i++) {
+        int score = project_fuzzy_score(project_query, project_query_len, projects[i].c_str());
         if (score >= 0) {
           all[all_len].index = (int)i;
           all[all_len].score = score;
@@ -9175,8 +9137,8 @@ static void project_filter(void) {
       }
     }
     if (want_apps) {
-      for (i = 0; i < launcher_apps_len && all_len < MAX_PICK_CANDIDATES; i++) {
-        int score = project_fuzzy_score(project_query, project_query_len, launcher_apps[i]);
+      for (i = 0; i < launcher_apps.size() && all_len < MAX_PICK_CANDIDATES; i++) {
+        int score = project_fuzzy_score(project_query, project_query_len, launcher_apps[i].c_str());
         if (score >= 0) {
           all[all_len].index = (int)i;
           all[all_len].score = score;
@@ -9316,9 +9278,9 @@ static void project_draw(void) {
       hint = "No matching themes";
     } else if (project_mode == PickerModeProjectOnly) {
       hint = project_query_len > 0 ? "No matching projects -- Enter adds this path as one"
-             : projects_len == 0   ? "No projects yet -- type a path to add one"
+             : projects.empty()   ? "No projects yet -- type a path to add one"
                                    : "No projects";
-    } else if (projects_len == 0 && project_query_len == 0) {
+    } else if (projects.empty() && project_query_len == 0) {
       hint = "No projects yet -- type a path to add one, or search for an app";
     } else if (project_query_len > 0) {
       hint = "No matches -- Enter runs this as a command, or adds it as a project";
@@ -9347,14 +9309,14 @@ static void project_draw(void) {
 
       if (match->kind == PickResultApp) {
         snprintf(row_text, sizeof(row_text), "%s %s", icon_launcher,
-                 launcher_apps[match->index]);
+                 launcher_apps[match->index].c_str());
       } else if (match->kind == PickResultTheme) {
         const ColorTheme *ct = &color_themes[match->index];
         snprintf(row_text, sizeof(row_text), "%s %s%s",
                  ct->is_light ? icon_theme_light : icon_theme_dark, ct->name,
                  match->index == active_color_theme ? " (active)" : "");
       } else {
-        const char *path = projects[match->index];
+        const char *path = projects[match->index].c_str();
         char base[256];
         char collapsed[PATH_MAX];
         char prefix[64] = "";
@@ -9397,7 +9359,7 @@ static void project_open(Monitor *m, enum PickerMode mode) {
     return;
   }
   projects_ensure_loaded();
-  if (launcher_apps_len == 0) {
+  if (launcher_apps.empty()) {
     launcher_scan_apps();
   }
   if (project_win == None) {
@@ -11779,7 +11741,8 @@ static int load_config_from_lua(void) {
   if (command_lua) {
     return 0;
   }
-  command_lua = luaL_newstate();
+  command_lua_owner.reset(luaL_newstate());
+  command_lua = command_lua_owner.get();
   if (!command_lua) {
     fprintf(stderr, "mwm: failed to initialize Lua state\n");
     return -1;
@@ -11933,29 +11896,28 @@ void cleanup(void) {
   size_t i;
   view(&a);
   selmon->lt[selmon->sellt] = &foo;
-  for (m = mons; m; m = m->next) {
+  for (m = mons.get(); m; m = m->next.get()) {
     while (m->stack) {
-      unmanage(m->stack, 0);
+      unmanage(m->stack.get(), 0);
     }
   }
   XUngrabKey(dpy, AnyKey, AnyModifier, root);
   while (mons) {
-    cleanupmon(mons);
+    cleanupmon(mons.get());
   }
   for (i = 0; i < CurLast; i++) {
-    drw_cur_free(drw, cursor[i]);
+    cursor[i].reset();
   }
   freecolorscheme();
   if (systray) {
     while (systray->icons) {
       XUnmapWindow(dpy, systray->icons->win);
       XReparentWindow(dpy, systray->icons->win, root, 0, 0);
-      removesystrayicon(systray->icons);
+      removesystrayicon(systray->icons.get());
     }
     XSetSelectionOwner(dpy, netatom[NetSystemTray], None, CurrentTime);
     XDestroyWindow(dpy, systray->win);
-    free(systray);
-    systray = NULL;
+    systray.reset();
   }
   if (slider_popup_win != None) {
     XDestroyWindow(dpy, slider_popup_win);
@@ -11965,32 +11927,18 @@ void cleanup(void) {
     XDestroyWindow(dpy, notif_sidebar_win);
     notif_sidebar_win = None;
   }
-  while (notifications) {
-    Notification *next = notifications->next;
-    free(notifications);
-    notifications = next;
-  }
+  notifications.reset();
   if (todo_sidebar_win != None) {
     XDestroyWindow(dpy, todo_sidebar_win);
     todo_sidebar_win = None;
   }
-  while (todos) {
-    Todo *next = todos->next;
-    free(todos);
-    todos = next;
-  }
+  todos.reset();
   if (agent_sidebar_win != None) {
     XDestroyWindow(dpy, agent_sidebar_win);
     agent_sidebar_win = None;
   }
   agents_free_list();
-  for (i = 0; i < launcher_apps_len; i++) {
-    free(launcher_apps[i]);
-  }
-  free(launcher_apps);
-  launcher_apps = NULL;
-  launcher_apps_len = 0;
-  launcher_apps_cap = 0;
+  launcher_apps.clear();
   if (project_win != None) {
     XDestroyWindow(dpy, project_win);
     project_win = None;
@@ -12008,49 +11956,27 @@ void cleanup(void) {
     calendar_win = None;
   }
   wifi_job_reset();
-  for (i = 0; i < projects_len; i++) {
-    free(projects[i]);
-  }
-  free(projects);
-  projects = NULL;
-  projects_len = 0;
-  projects_cap = 0;
+  projects.clear();
   if (deskwin != None) {
     XDestroyWindow(dpy, deskwin);
     deskwin = None;
   }
   notif_dbus_shutdown();
   XDestroyWindow(dpy, wmcheckwin);
-  drw_free(drw);
+  drw_owner.reset();
+  drw = nullptr;
   XSync(dpy, False);
   XSetInputFocus(dpy, PointerRoot, RevertToPointerRoot, CurrentTime);
   XDeleteProperty(dpy, root, netatom[NetActiveWindow]);
-  if (command_lua) {
-    lua_close(command_lua);
-    command_lua = NULL;
-  }
+  command_lua_owner.reset();
+  command_lua = nullptr;
   wm_command_server_shutdown();
-  for (i = 0; i < workspaces_len; i++) {
-    free(workspaces[i].name);
-  }
-  free(workspaces);
-  workspaces = NULL;
-  workspaces_len = 0;
+  workspaces.clear();
 }
 // }}} void cleanup(void)
 
 // {{{ void cleanupmon(Monitor *mon)
 void cleanupmon(Monitor *mon) {
-  Monitor *m;
-
-  if (mon == mons) {
-    mons = mons->next;
-  } else {
-    for (m = mons; m && m->next != mon; m = m->next) {
-      ;
-    }
-    m->next = mon->next;
-  }
   XUnmapWindow(dpy, mon->barwin);
   XDestroyWindow(dpy, mon->barwin);
   if (mon->widgetbarwin) {
@@ -12065,7 +11991,12 @@ void cleanupmon(Monitor *mon) {
     XUnmapWindow(dpy, mon->rightbarwin);
     XDestroyWindow(dpy, mon->rightbarwin);
   }
-  free(mon);
+
+  std::unique_ptr<Monitor> *slot = &mons;
+  while (slot->get() != mon) {
+    slot = &(*slot)->next;
+  }
+  *slot = std::move((*slot)->next);
 }
 // }}} void cleanupmon(Monitor *mon)
 
@@ -12095,12 +12026,15 @@ void clientmessage(XEvent *e) {
       if (!XGetWindowAttributes(dpy, cme->data.l[2], &wa)) {
         return;
       }
-      i = ecalloc_type<Client>();
-      i->win = cme->data.l[2];
-      i->mon = selmon;
-      updatesystrayicongeom(i, wa.width, wa.height);
-      i->next = systray->icons;
-      systray->icons = i;
+      {
+        auto new_icon = std::make_shared<Client>();
+        i = new_icon.get();
+        i->win = cme->data.l[2];
+        i->mon = selmon;
+        updatesystrayicongeom(i, wa.width, wa.height);
+        new_icon->next = std::move(systray->icons);
+        systray->icons = std::move(new_icon);
+      }
       XAddToSaveSet(dpy, i->win);
       XSelectInput(dpy, i->win,
                    StructureNotifyMask | PropertyChangeMask |
@@ -12172,8 +12106,8 @@ void configurenotify(XEvent *e) {
     if (updategeom() || dirty) {
       drw_resize(drw, sw, bh);
       updatebars();
-      for (m = mons; m; m = m->next) {
-        for (c = m->clients; c; c = c->next) {
+      for (m = mons.get(); m; m = m->next.get()) {
+        for (c = m->clients.get(); c; c = c->next.get()) {
           if (c->isfullscreen) {
             resizeclient(c, m->mx, m->my, m->mw, m->mh);
           }
@@ -12279,11 +12213,10 @@ void configurerequest(XEvent *e) {
 // }}} void configurerequest(XEvent *e)
 
 // {{{ Monitor *createmon(void)
-Monitor *createmon(void) {
-  Monitor *m;
-  m = ecalloc_type<Monitor>();
+std::unique_ptr<Monitor> createmon(void) {
+  auto m = std::make_unique<Monitor>();
   m->tagset[0] = m->tagset[1] =
-      workspaces_len ? workspace_mask_from_index(0) : 0;
+      !workspaces.empty() ? workspace_mask_from_index(0) : 0;
   m->mfact = mfact;
   m->nmaster = nmaster;
   m->showbar = showbar;
@@ -12311,23 +12244,24 @@ void destroynotify(XEvent *e) {
 
 // {{{ void detach(Client *c)
 void detach(Client *c) {
-  Client **tc;
-  for (tc = &c->mon->clients; *tc && *tc != c; tc = &(*tc)->next) {
+  std::shared_ptr<Client> *tc;
+  for (tc = &c->mon->clients; tc->get() && tc->get() != c; tc = &(*tc)->next) {
     ;
   }
-  *tc = c->next;
+  *tc = std::move(c->next);
 }
 // }}} void detach(Client *c)
 
 // {{{ void detachstack(Client *c)
 void detachstack(Client *c) {
-  Client **tc, *t;
-  for (tc = &c->mon->stack; *tc && *tc != c; tc = &(*tc)->snext) {
+  std::shared_ptr<Client> *tc;
+  Client *t;
+  for (tc = &c->mon->stack; tc->get() && tc->get() != c; tc = &(*tc)->snext) {
     ;
   }
-  *tc = c->snext;
+  *tc = std::move(c->snext);
   if (c == c->mon->sel) {
-    for (t = c->mon->stack; t && !ISVISIBLE(t); t = t->snext) {
+    for (t = c->mon->stack.get(); t && !ISVISIBLE(t); t = t->snext.get()) {
       ;
     }
     c->mon->sel = t;
@@ -12339,15 +12273,15 @@ void detachstack(Client *c) {
 Monitor *dirtomon(int dir) {
   Monitor *m = NULL;
   if (dir > 0) {
-    if (!(m = selmon->next)) {
-      m = mons;
+    if (!(m = selmon->next.get())) {
+      m = mons.get();
     }
-  } else if (selmon == mons) {
-    for (m = mons; m->next; m = m->next) {
+  } else if (selmon == mons.get()) {
+    for (m = mons.get(); m->next; m = m->next.get()) {
       ;
     }
   } else {
-    for (m = mons; m->next != selmon; m = m->next) {
+    for (m = mons.get(); m->next.get() != selmon; m = m->next.get()) {
       ;
     }
   }
@@ -12419,7 +12353,7 @@ void drawbar(Monitor *m) {
   drw_setscheme(drw, scheme[SchemeSel]);
   drw_text(drw, 0, 0, project_labelw, bh, lrpad / 2, project_label, 0);
   draw_vdivider(project_labelw, bh / 4, bh - bh / 2);
-  for (c = m->clients; c; c = c->next) {
+  for (c = m->clients.get(); c; c = c->next.get()) {
     occ |= c->tags;
     if (c->isurgent) {
       urg |= c->tags;
@@ -12793,7 +12727,7 @@ int rightbar_handle_button(Monitor *m, XButtonPressedEvent *ev) {
 // {{{ void drawbars(void)
 void drawbars(void) {
   Monitor *m;
-  for (m = mons; m; m = m->next) {
+  for (m = mons.get(); m; m = m->next.get()) {
     drawbar(m);
     drawwidgetbar(m);
     drawleftbar(m);
@@ -12881,7 +12815,7 @@ void expose(XEvent *e) {
 // {{{ void focus(Client *c)
 void focus(Client *c) {
   if (!c || !ISVISIBLE(c)) {
-    for (c = selmon->stack; c && !ISVISIBLE(c); c = c->snext) {
+    for (c = selmon->stack.get(); c && !ISVISIBLE(c); c = c->snext.get()) {
       ;
     }
   }
@@ -12941,22 +12875,22 @@ void focusstack(const Arg *arg) {
     return;
   }
   if (arg->i > 0) {
-    for (c = selmon->sel->next; c && !ISVISIBLE(c); c = c->next) {
+    for (c = selmon->sel->next.get(); c && !ISVISIBLE(c); c = c->next.get()) {
       ;
     }
     if (!c) {
-      for (c = selmon->clients; c && !ISVISIBLE(c); c = c->next) {
+      for (c = selmon->clients.get(); c && !ISVISIBLE(c); c = c->next.get()) {
         ;
       }
     }
   } else {
-    for (i = selmon->clients; i != selmon->sel; i = i->next) {
+    for (i = selmon->clients.get(); i != selmon->sel; i = i->next.get()) {
       if (ISVISIBLE(i)) {
         c = i;
       }
     }
     if (!c) {
-      for (; i; i = i->next) {
+      for (; i; i = i->next.get()) {
         if (ISVISIBLE(i)) {
           c = i;
         }
@@ -12985,7 +12919,7 @@ void focusdir(const Arg *arg) {
   best = NULL;
   bestscore = 0;
 
-  for (c = selmon->clients; c; c = c->next) {
+  for (c = selmon->clients.get(); c; c = c->next.get()) {
     if (c == sel || !ISVISIBLE(c)) {
       continue;
     }
@@ -13058,7 +12992,7 @@ unsigned int getsystraywidth(void) {
   if (!showsystray || !systray) {
     return 0;
   }
-  for (i = systray->icons; i; i = i->next) {
+  for (i = systray->icons.get(); i; i = i->next.get()) {
     width += i->w + systrayspacing;
   }
   return width ? width + systrayspacing : 0;
@@ -13350,7 +13284,8 @@ void manage(Window w, XWindowAttributes *wa) {
   XWindowChanges wc;
   WorkspaceMask restored_tags = 0;
   int has_restored_tags = 0;
-  c = ecalloc_type<Client>();
+  auto c_owner = std::make_shared<Client>();
+  c = c_owner.get();
   c->cfact = 1.0f;
   c->win = w;
   /* geometry */
@@ -13448,7 +13383,7 @@ void maprequest(XEvent *e) {
 void monocle(Monitor *m) {
   unsigned int n = 0;
   Client *c;
-  for (c = m->clients; c; c = c->next) {
+  for (c = m->clients.get(); c; c = c->next.get()) {
     if (ISVISIBLE(c)) {
       n++;
     }
@@ -13456,7 +13391,7 @@ void monocle(Monitor *m) {
   if (n > 0) { /* override layout symbol */
     snprintf(m->ltsymbol, sizeof m->ltsymbol, "[%d]", n);
   }
-  for (c = nexttiled(m->clients); c; c = nexttiled(c->next)) {
+  for (c = nexttiled(m->clients.get()); c; c = nexttiled(c->next.get())) {
     resize_cell(c, m->wx, m->wy, m->ww, m->wh, 0);
   }
 }
@@ -13552,7 +13487,7 @@ void movemouse(const Arg *arg) {
 
 // {{{ Client *nexttiled(Client *c)
 Client *nexttiled(Client *c) {
-  for (; c && (c->isfloating || !ISVISIBLE(c)); c = c->next) {
+  for (; c && (c->isfloating || !ISVISIBLE(c)); c = c->next.get()) {
     ;
   }
   return c;
@@ -13642,7 +13577,7 @@ void quit(const Arg *arg) { running = 0; }
 Monitor *recttomon(int x, int y, int w, int h) {
   Monitor *m, *r = selmon;
   int a, area = 0;
-  for (m = mons; m; m = m->next) {
+  for (m = mons.get(); m; m = m->next.get()) {
     if ((a = INTERSECT(x, y, w, h, m)) > area) {
       area = a;
       r = m;
@@ -13654,18 +13589,17 @@ Monitor *recttomon(int x, int y, int w, int h) {
 
 // {{{ void removesystrayicon(Client *i)
 void removesystrayicon(Client *i) {
-  Client **ii;
+  std::shared_ptr<Client> *ii;
 
   if (!systray || !i) {
     return;
   }
-  for (ii = &systray->icons; *ii && *ii != i; ii = &(*ii)->next) {
+  for (ii = &systray->icons; ii->get() && ii->get() != i; ii = &(*ii)->next) {
     ;
   }
   if (*ii) {
-    *ii = i->next;
+    *ii = std::move(i->next);
   }
-  free(i);
 }
 // }}} void removesystrayicon(Client *i)
 
@@ -13739,8 +13673,8 @@ void resizebydir(const Arg *arg) {
       return;
     }
 
-    for (i = 0, in_master = 0, column_count = 0, c = nexttiled(selmon->clients);
-         c; c = nexttiled(c->next), i++) {
+    for (i = 0, in_master = 0, column_count = 0, c = nexttiled(selmon->clients.get());
+         c; c = nexttiled(c->next.get()), i++) {
       if (c != selmon->sel) {
         continue;
       }
@@ -13765,7 +13699,7 @@ void resizebydir(const Arg *arg) {
       return;
     }
 
-    for (i = 0, c = nexttiled(selmon->clients); c; c = nexttiled(c->next), i++) {
+    for (i = 0, c = nexttiled(selmon->clients.get()); c; c = nexttiled(c->next.get()), i++) {
       if ((i < (unsigned int)selmon->nmaster) == in_master) {
         column_count++;
       }
@@ -13906,10 +13840,8 @@ void reloadconfig(const Arg *arg) {
    * lua_layout_entries[] out from under any monitor still pointing into it. */
   layout_snap = snapshot_lua_layouts(&layout_snap_count);
 
-  if (command_lua) {
-    lua_close(command_lua);
-    command_lua = NULL;
-  }
+  command_lua_owner.reset();
+  command_lua = nullptr;
   reset_lua_widgets();
   reset_lua_keys();
   reset_lua_rules();
@@ -13934,7 +13866,7 @@ void reloadconfig(const Arg *arg) {
   regrab_all_client_buttons();
   restore_lua_layouts(layout_snap, layout_snap_count);
   focus(NULL);
-  for (m = mons; m; m = m->next) {
+  for (m = mons.get(); m; m = m->next.get()) {
     arrange(m);
   }
   drawbars();
@@ -13963,7 +13895,7 @@ void restack(Monitor *m) {
   if (m->lt[m->sellt]->arrange) {
     wc.stack_mode = Below;
     wc.sibling = m->barwin;
-    for (c = m->stack; c; c = c->snext) {
+    for (c = m->stack.get(); c; c = c->snext.get()) {
       if (!c->isfloating && ISVISIBLE(c)) {
         XConfigureWindow(dpy, c->win, CWSibling | CWStackMode, &wc);
         wc.sibling = c->win;
@@ -14126,6 +14058,10 @@ void sendmon(Client *c, Monitor *m) {
   if (c->mon == m) {
     return;
   }
+  /* Both owning lists get dropped below before c is re-attached to m's
+   * lists -- keepalive holds a third reference across that window so c
+   * doesn't get destroyed mid-move. */
+  std::shared_ptr<Client> keepalive = c->shared_from_this();
   unfocus(c, 1);
   detach(c);
   detachstack(c);
@@ -14151,8 +14087,8 @@ int client_is_managed(Client *target) {
   if (!target) {
     return 0;
   }
-  for (m = mons; m; m = m->next) {
-    for (c = m->clients; c; c = c->next) {
+  for (m = mons.get(); m; m = m->next.get()) {
+    for (c = m->clients.get(); c; c = c->next.get()) {
       if (c == target) {
         return 1;
       }
@@ -14180,6 +14116,8 @@ void scratchpad_hide(Client *c) {
  * updated even when its monitor doesn't change). */
 void scratchpad_show(Client *c, Monitor *m) {
   if (c->mon != m) {
+    /* See sendmon()'s comment -- keepalive spans the detach/re-attach. */
+    std::shared_ptr<Client> keepalive = c->shared_from_this();
     detach(c);
     detachstack(c);
     c->mon = m;
@@ -14350,7 +14288,7 @@ unsigned int tiledcount(Monitor *m) {
   unsigned int n;
   Client *c;
 
-  for (n = 0, c = nexttiled(m->clients); c; c = nexttiled(c->next), n++) {
+  for (n = 0, c = nexttiled(m->clients.get()); c; c = nexttiled(c->next.get()), n++) {
     ;
   }
   return n;
@@ -14377,7 +14315,8 @@ void setup(void) {
   sw = DisplayWidth(dpy, screen);
   sh = DisplayHeight(dpy, screen);
   root = RootWindow(dpy, screen);
-  drw = drw_create(dpy, screen, root, sw, sh);
+  drw_owner.reset(drw_create(dpy, screen, root, sw, sh));
+  drw = drw_owner.get();
   if (!drw_fontset_create(drw, fonts, LENGTH(fonts))) {
     die("no fonts could be loaded.");
   }
@@ -14477,9 +14416,9 @@ void setup(void) {
   netatom[NetClientList] = XInternAtom(dpy, "_NET_CLIENT_LIST", False);
   netatom[NetWMPid] = XInternAtom(dpy, "_NET_WM_PID", False);
   /* init cursors */
-  cursor[CurNormal] = drw_cur_create(drw, XC_left_ptr);
-  cursor[CurResize] = drw_cur_create(drw, XC_sizing);
-  cursor[CurMove] = drw_cur_create(drw, XC_fleur);
+  cursor[CurNormal].reset(drw_cur_create(drw, XC_left_ptr));
+  cursor[CurResize].reset(drw_cur_create(drw, XC_sizing));
+  cursor[CurMove].reset(drw_cur_create(drw, XC_fleur));
   /* init appearance */
   setcolorscheme();
   /* init bars */
@@ -14539,10 +14478,10 @@ void showhide(Client *c) {
         !c->isfullscreen) {
       resize(c, c->x, c->y, c->w, c->h, 0);
     }
-    showhide(c->snext);
+    showhide(c->snext.get());
   } else {
     /* hide clients bottom up */
-    showhide(c->snext);
+    showhide(c->snext.get());
     XMoveWindow(dpy, c->win, WIDTH(c) * -2, c->y);
   }
 }
@@ -14595,8 +14534,8 @@ void tile(Monitor *m) {
   unsigned int i, n, h, mw, my, ty;
   float mfacts, sfacts, fact;
   Client *c;
-  for (n = 0, mfacts = sfacts = 0.0f, c = nexttiled(m->clients); c;
-       c = nexttiled(c->next), n++) {
+  for (n = 0, mfacts = sfacts = 0.0f, c = nexttiled(m->clients.get()); c;
+       c = nexttiled(c->next.get()), n++) {
     if (n < (unsigned int)m->nmaster) {
       mfacts += c->cfact;
     } else {
@@ -14611,8 +14550,8 @@ void tile(Monitor *m) {
   } else {
     mw = m->ww;
   }
-  for (i = my = ty = 0, c = nexttiled(m->clients); c;
-       c = nexttiled(c->next), i++) {
+  for (i = my = ty = 0, c = nexttiled(m->clients.get()); c;
+       c = nexttiled(c->next.get()), i++) {
     if (i < m->nmaster) {
       fact = mfacts > 0.0f ? c->cfact / mfacts : 1.0f;
       h = (unsigned int)((m->wh - my) * fact);
@@ -14771,6 +14710,11 @@ void unfocus(Client *c, int setfocus) {
 void unmanage(Client *c, int destroyed) {
   Monitor *m = c->mon;
   XWindowChanges wc;
+  /* detach()+detachstack() below drop both owning references; keepalive
+   * holds a third one so the code that still reads c->win/c->oldbw etc.
+   * afterward isn't a use-after-free. Replaces the old free(c) -- c is
+   * destroyed when keepalive is reset, once nothing else references it. */
+  std::shared_ptr<Client> keepalive = c->shared_from_this();
   if (c == scratchpad_client) {
     scratchpad_client = NULL;
   }
@@ -14788,7 +14732,7 @@ void unmanage(Client *c, int destroyed) {
     XSetErrorHandler(xerror);
     XUngrabServer(dpy);
   }
-  free(c);
+  keepalive.reset();
   focus(NULL);
   updateclientlist();
   arrange(m);
@@ -14827,7 +14771,7 @@ void updatebars(void) {
   wa.event_mask = ButtonPressMask | ExposureMask;
   ch.res_name = const_cast<char *>("dwm");
   ch.res_class = const_cast<char *>("dwm");
-  for (m = mons; m; m = m->next) {
+  for (m = mons.get(); m; m = m->next.get()) {
     if (m->barwin) {
       if (!m->widgetbarwin) {
         m->widgetbarwin = XCreateWindow(
@@ -14888,7 +14832,7 @@ void updatebars(void) {
     XSetClassHint(dpy, m->rightbarwin, &ch);
   }
   if (showsystray && !systray) {
-    systray = ecalloc_type<Systray>();
+    systray = std::make_unique<Systray>();
     systray->win = XCreateSimpleWindow(dpy, root, 0, 0, 1, bh, 0, 0,
                                        scheme[SchemeNorm][ColBg].pixel);
     XChangeProperty(dpy, systray->win, netatom[NetSystemTrayOrientation],
@@ -14947,8 +14891,8 @@ void updateclientlist() {
   Monitor *m;
 
   XDeleteProperty(dpy, root, netatom[NetClientList]);
-  for (m = mons; m; m = m->next) {
-    for (c = m->clients; c; c = c->next) {
+  for (m = mons.get(); m; m = m->next.get()) {
+    for (c = m->clients.get(); c; c = c->next.get()) {
       XChangeProperty(dpy, root, netatom[NetClientList], XA_WINDOW, 32,
                       PropModeAppend, (unsigned char *)&(c->win), 1);
     }
@@ -14967,7 +14911,7 @@ int updategeom(void) {
     Monitor *m;
     XineramaScreenInfo *info = XineramaQueryScreens(dpy, &nn);
     XineramaScreenInfo *unique = NULL;
-    for (n = 0, m = mons; m; m = m->next, n++) {
+    for (n = 0, m = mons.get(); m; m = m->next.get(), n++) {
       ;
     }
     /* only consider unique geometries as separate screens */
@@ -14982,7 +14926,7 @@ int updategeom(void) {
 
     /* new monitors if nn > n */
     for (i = n; i < nn; i++) {
-      for (m = mons; m && m->next; m = m->next) {
+      for (m = mons.get(); m && m->next; m = m->next.get()) {
         ;
       }
       if (m) {
@@ -14991,7 +14935,7 @@ int updategeom(void) {
         mons = createmon();
       }
     }
-    for (i = 0, m = mons; i < nn && m; m = m->next, i++)
+    for (i = 0, m = mons.get(); i < nn && m; m = m->next.get(), i++)
       if (i >= n || unique[i].x_org != m->mx || unique[i].y_org != m->my ||
           unique[i].width != m->mw || unique[i].height != m->mh) {
         dirty = 1;
@@ -15004,19 +14948,51 @@ int updategeom(void) {
       }
     /* removed monitors if n > nn */
     for (i = nn; i < n; i++) {
-      for (m = mons; m && m->next; m = m->next) {
+      for (m = mons.get(); m && m->next; m = m->next.get()) {
         ;
       }
-      while ((c = m->clients)) {
+      while ((c = m->clients.get())) {
         dirty = 1;
-        m->clients = c->next;
+        /* m->clients (below) and m->stack (via detachstack) both drop their
+         * reference to c here; keepalive holds a third one across the move
+         * to mons, same reasoning as sendmon()'s. */
+        std::shared_ptr<Client> keepalive = c->shared_from_this();
+        m->clients = std::move(c->next);
         detachstack(c);
-        c->mon = mons;
+        c->mon = mons.get();
         attach(c);
         attachstack(c);
       }
       if (m == selmon) {
-        selmon = mons;
+        selmon = mons.get();
+      }
+      /* Every other *_mon global is a non-owning "which monitor is this
+       * popup/sidebar currently on" pointer into the mons list -- clear it
+       * here too, or it dangles after cleanupmon() frees m below. Previously
+       * only selmon was defended against this. */
+      if (calendar_mon == m) {
+        calendar_mon = NULL;
+      }
+      if (notif_sidebar_mon == m) {
+        notif_sidebar_mon = NULL;
+      }
+      if (todo_sidebar_mon == m) {
+        todo_sidebar_mon = NULL;
+      }
+      if (agent_sidebar_mon == m) {
+        agent_sidebar_mon = NULL;
+      }
+      if (project_mon == m) {
+        project_mon = NULL;
+      }
+      if (keybind_help_mon == m) {
+        keybind_help_mon = NULL;
+      }
+      if (wifi_mon == m) {
+        wifi_mon = NULL;
+      }
+      if (slider_popup_mon == m) {
+        slider_popup_mon = NULL;
       }
       cleanupmon(m);
     }
@@ -15031,11 +15007,11 @@ int updategeom(void) {
       dirty = 1;
       mons->mw = mons->ww = sw;
       mons->mh = mons->wh = sh;
-      updatebarpos(mons);
+      updatebarpos(mons.get());
     }
   }
   if (dirty) {
-    selmon = mons;
+    selmon = mons.get();
     selmon = wintomon(root);
   }
   return dirty;
@@ -15131,7 +15107,7 @@ void updatesystray(void) {
     return;
   }
   x = systrayspacing;
-  for (i = systray->icons; i; i = i->next) {
+  for (i = systray->icons.get(); i; i = i->next.get()) {
     XMoveResizeWindow(dpy, i->win, x, (bh - i->h) / 2, i->w, i->h);
     x += i->w + systrayspacing;
   }
@@ -15270,8 +15246,8 @@ void viewnth(const Arg *arg) {
 Client *wintoclient(Window w) {
   Client *c;
   Monitor *m;
-  for (m = mons; m; m = m->next) {
-    for (c = m->clients; c; c = c->next) {
+  for (m = mons.get(); m; m = m->next.get()) {
+    for (c = m->clients.get(); c; c = c->next.get()) {
       if (c->win == w) {
         return c;
       }
@@ -15288,7 +15264,7 @@ Client *wintosystrayicon(Window w) {
   if (!systray) {
     return NULL;
   }
-  for (i = systray->icons; i; i = i->next) {
+  for (i = systray->icons.get(); i; i = i->next.get()) {
     if (i->win == w) {
       return i;
     }
@@ -15309,7 +15285,7 @@ Monitor *wintomon(Window w) {
     return recttomon(x, y, 1, 1);
   }
   // Iterate over each monitor (in linked list)
-  for (m = mons; m; m = m->next) {
+  for (m = mons.get(); m; m = m->next.get()) {
     // Return the monitor if the window matches the monitor's bar window
     // NOTE: barwin not in list of clients, so we check for it here
     if (w == m->barwin || w == m->widgetbarwin || w == m->leftbarwin ||
@@ -15369,7 +15345,7 @@ void zoom(const Arg *arg) {
   if (!selmon->lt[selmon->sellt]->arrange || !c || c->isfloating) {
     return;
   }
-  if (c == nexttiled(selmon->clients) && !(c = nexttiled(c->next))) {
+  if (c == nexttiled(selmon->clients.get()) && !(c = nexttiled(c->next.get()))) {
     return;
   }
   pop(c);
@@ -15388,7 +15364,8 @@ int main(int argc, char *argv[]) {
   scan();
   run();
   cleanup();
-  XCloseDisplay(dpy);
+  dpy_owner.reset();
+  dpy = nullptr;
   if (restart_requested) {
     execvp(saved_argv[0], saved_argv);
     die("mwm: execvp '%s' failed:", saved_argv[0]);
