@@ -1062,9 +1062,9 @@ enum SidebarAnim { SidebarAnimIdle, SidebarAnimOpening, SidebarAnimClosing };
 #define PROJECT_MAX_RESULTS 8
 #define MAX_PROJECTS 500
 /* Upper bound on candidates scored per keystroke: saved projects plus a
- * generous ceiling on $PATH-scanned executables (a few thousand on a large
- * system) -- also the storage cap for project_filtered[] now that it keeps
- * every match, not just the first screenful. */
+ * generous ceiling on XDG desktop applications -- also the storage cap for
+ * project_filtered[] now that it keeps every match, not just the first
+ * screenful. */
 #define MAX_PICK_CANDIDATES (MAX_PROJECTS + 4096)
 
 enum PickResultKind { PickResultProject, PickResultApp, PickResultTheme };
@@ -1091,6 +1091,15 @@ typedef struct {
 typedef struct {
   int close_x, close_y, close_w, close_h;
 } ProjectRowLayout;
+
+typedef struct {
+  std::string name; /* [Desktop Entry] Name= */
+  std::string exec; /* [Desktop Entry] Exec=, with field codes removed */
+} LauncherApp;
+
+typedef struct {
+  size_t project_index;
+} ActiveProjectMenuItem;
 
 #define MAX_DESKTOP_ICONS 500
 
@@ -1425,6 +1434,13 @@ int project_index_for_workspace_name(const char *wsname);
 void project_switch_workspace(Monitor *m, const char *path);
 void project_set_active(const char *path);
 void project_init_default(void);
+void terminal_in_active_project(const Arg *arg);
+int project_has_clients(size_t project_index);
+void active_project_menu_open(Monitor *m);
+void active_project_menu_close(void);
+void active_project_menu_toggle(Monitor *m);
+void active_project_menu_draw(void);
+int active_project_menu_handle_button(XButtonPressedEvent *ev);
 int project_resolve_selected_path(char *out, size_t outsz);
 void project_launch(int with_agent);
 void project_filter(void);
@@ -1718,9 +1734,10 @@ long agent_json_number(const char *json, const char *field);
 unsigned int agent_hash_id(const char *s);
 AgentStatus *agent_list_find(AgentStatus *head, const char *kind,
                                     const char *cwd);
-static bool launcher_app_less(const std::string &sa, const std::string &sb);
-int launcher_app_exists(const char *name);
-void launcher_app_add(const char *name);
+static bool launcher_app_less(const LauncherApp &a, const LauncherApp &b);
+int launcher_app_seen(const char *desktop_id);
+void launcher_app_mark_seen(const char *desktop_id);
+void launcher_app_add(const char *desktop_id, const char *name, const char *exec);
 WorkspaceMask project_workspace_slot_mask(int n);
 int project_fuzzy_score(const char *needle, size_t needle_len, const char *hay);
 int info_disk_fstype_real(const char *fstype);
@@ -1848,7 +1865,8 @@ AgentRowLayout agent_row_layout[MAX_AGENTS];
 size_t agent_row_layout_len = 0;
 int agent_clear_x = 0, agent_clear_y = 0, agent_clear_w = 0, agent_clear_h = 0;
 unsigned int agent_last_jumped_id = 0;
-std::vector<std::string> launcher_apps;
+std::vector<LauncherApp> launcher_apps;
+std::vector<std::string> launcher_desktop_ids;
 std::vector<std::string> projects;
 int projects_loaded = 0;
 char active_project_path[PATH_MAX] = "";
@@ -1864,6 +1882,12 @@ int project_sel = 0;
 size_t project_scroll = 0; /* index of the first visible row */
 const int project_w = 560;
 ProjectRowLayout project_row_layout[PROJECT_MAX_RESULTS];
+Window active_project_menu_win = None;
+Monitor *active_project_menu_mon = NULL;
+int active_project_menu_visible = 0;
+size_t active_project_menu_scroll = 0;
+std::vector<ActiveProjectMenuItem> active_project_menu_items;
+const int active_project_menu_w = 300;
 char agent_launch_command[64] = "claude";
 Window keybind_help_win = None;
 int keybind_help_visible = 0;
@@ -2071,6 +2095,7 @@ static inline const char icon_gimp[] = "\U0000E7E7";
 static inline const char icon_libreoffice[] = "\U0000F376";
 static inline const char icon_vscode[] = "\U0000E8DA";
 static inline const char icon_emacs[] = "\U0000E7CF";
+static inline const char icon_neovim[] = "\U0000E6A9";
 static inline const char icon_info[] = "\U0000F05A";              /* fa-info_circle */
 static inline const char icon_layout_tile[] = "\U0000F00A";       /* fa-th */
 static inline const char icon_layout_floating[] = "\U0000F2D2";   /* fa-window_restore */
@@ -2137,16 +2162,21 @@ static inline const char *inkscapecmd[] = {"inkscape", NULL};
 static inline const char *gimpcmd[] = {"gimp", NULL};
 static inline const char *libreofficecmd[] = {"libreoffice", NULL};
 static inline const char *vscodecmd[] = {"code", NULL};
-static inline const char *emacscmd[] = {"emacs", NULL};
+static inline const char *emacs_nixcmd[] = {
+    "/bin/sh", "-c",
+    "if command -v nix >/dev/null 2>&1; then exec nix run 'git:jordanschupbach/emc' --refresh; "
+    "else exec emacs; fi",
+    NULL};
 static inline const Key keys[] = {
     /* modifier                     key        function        argument */
     /* One picker window (see "project picker" further down), four scopes:
-     * Mod4+p is a rofi-style app launcher (search $PATH only), Mod4+space
+     * Mod4+p is a rofi-style desktop-app launcher (XDG .desktop entries), Mod4+space
      * jumps straight to a project, Mod4+o is the original combined search
      * across both, and Mod4+Shift+t (further down, by the layout keys)
      * browses color themes. */
     {MODKEY, XK_p, &WM::project_toggle_key, {.i = PickerModeAppOnly}, "Open app launcher"},
-    {MODKEY, XK_Return, &WM::spawn, {.v = termcmd}, "Open a terminal"},
+    {MODKEY, XK_Return, &WM::terminal_in_active_project, {0},
+     "Open a terminal in the active project"},
     {MODKEY, XK_o, &WM::project_toggle_key, {.i = PickerModeCombined},
      "Open combined project/app picker"},
     {MODKEY, XK_a, &WM::agent_jump_next_needs_input, {0}, "Jump to next agent needing input"},
@@ -2720,7 +2750,7 @@ static int xerrorstart(Display *dpy, XErrorEvent *ee);
 
 /* {{{ launcher globals */
 /* The picker window itself is now project_*'s (see below) -- this is just
- * the $PATH-scanned app index it searches alongside saved projects. The
+ * the XDG desktop-application index it searches alongside saved projects. The
  * picker is opened via the top-left corner button on the left dock bar
  * (see drawleftbar()/leftbar_handle_button()); the bottom widget bar no
  * longer has its own launcher/project buttons. */
@@ -5189,6 +5219,7 @@ void WM::buttonpress(XEvent *e) {
   unsigned int x, click;
   size_t i;
   Arg arg = {0};
+  Arg tag_workspace_arg = {0};
   Client *c;
   Monitor *m;
   XButtonPressedEvent *ev = &e->xbutton;
@@ -5202,6 +5233,9 @@ void WM::buttonpress(XEvent *e) {
     return;
   }
   if (wifi_handle_button(ev)) {
+    return;
+  }
+  if (active_project_menu_handle_button(ev)) {
     return;
   }
   if (project_handle_button(ev)) {
@@ -5277,10 +5311,12 @@ void WM::buttonpress(XEvent *e) {
       /* Materialize the slot now, mainly so the lua_buttons[] path below
        * has a real mask to turn back into a name -- the *nth function
        * this ultimately dispatches to (see the buttons[] table) will just
-       * find it already there via its own workspace_ensure() call. */
+       * find it already there via its own workspace_ensure() call. Keep
+       * that mask in a separate Arg: Arg is a union, so writing it into
+       * arg would overwrite the slot number viewnth()/tagnth() need. */
       project_workspace_name((int)i + 1, name, sizeof(name));
       idx = workspace_ensure(name);
-      arg.ull = idx == SIZE_MAX ? 0 : workspace_mask_from_index(idx);
+      tag_workspace_arg.ull = idx == SIZE_MAX ? 0 : workspace_mask_from_index(idx);
     } else if (ev->x < x + TEXTW(selmon->ltsymbol)) {
       click = ClkLtSymbol;
     } else if (ev->x > selmon->ww - (int)clockw) {
@@ -5331,7 +5367,8 @@ void WM::buttonpress(XEvent *e) {
   for (i = 0; i < lua_buttons_len; i++) {
     if (click == (unsigned int)lua_buttons[i].click && lua_buttons[i].button == ev->button &&
         CLEANMASK(lua_buttons[i].mod) == CLEANMASK(ev->state)) {
-      const char *wsname = click == ClkTagBar ? workspace_name_from_mask(arg.ull) : NULL;
+      const char *wsname =
+          click == ClkTagBar ? workspace_name_from_mask(tag_workspace_arg.ull) : NULL;
       lua_button_invoke(i, wsname);
     }
   }
@@ -8872,76 +8909,184 @@ int WM::agent_sidebar_handle_button(XButtonPressedEvent *ev) {
 
 /* }}} agent sidebar */
 
-/* {{{ launcher (app index -- searched from within the project picker,
- * see the "project picker" section below for the actual UI) */
+/* {{{ launcher (XDG desktop-application index -- searched from within the
+ * project picker, see the "project picker" section below for the actual UI) */
 
-bool WM::launcher_app_less(const std::string &sa, const std::string &sb) {
+bool WM::launcher_app_less(const LauncherApp &a, const LauncherApp &b) {
   size_t i;
-  for (i = 0; i < sa.size() && i < sb.size(); i++) {
-    int ca = tolower((unsigned char)sa[i]);
-    int cb = tolower((unsigned char)sb[i]);
+  for (i = 0; i < a.name.size() && i < b.name.size(); i++) {
+    int ca = tolower((unsigned char)a.name[i]);
+    int cb = tolower((unsigned char)b.name[i]);
     if (ca != cb) {
       return ca < cb;
     }
   }
-  return sa.size() < sb.size();
+  return a.name.size() < b.name.size();
 }
 
-int WM::launcher_app_exists(const char *name) {
-  for (size_t i = 0; i < launcher_apps.size(); i++) {
-    if (launcher_apps[i] == name) {
+int WM::launcher_app_seen(const char *desktop_id) {
+  for (size_t i = 0; i < launcher_desktop_ids.size(); i++) {
+    if (launcher_desktop_ids[i] == desktop_id) {
       return 1;
     }
   }
   return 0;
 }
 
-void WM::launcher_app_add(const char *name) {
-  if (launcher_app_exists(name)) {
-    return;
+void WM::launcher_app_mark_seen(const char *desktop_id) {
+  if (!launcher_app_seen(desktop_id)) {
+    launcher_desktop_ids.push_back(desktop_id);
   }
-  launcher_apps.push_back(name);
 }
 
-/* Scans every directory on $PATH for executables, the same set dmenu_run
- * would offer, so the launcher works without any external dmenu/rofi. */
-void WM::launcher_scan_apps(void) {
-  const char *path_env = getenv("PATH");
-  char *path_copy;
-  char *saveptr = NULL;
-  char *dir;
-
-  if (!path_env || !path_env[0]) {
+void WM::launcher_app_add(const char *desktop_id, const char *name, const char *exec) {
+  if (launcher_app_seen(desktop_id)) {
     return;
   }
-  path_copy = xstrdup_local(path_env);
+  launcher_app_mark_seen(desktop_id);
+  launcher_apps.push_back({name, exec});
+}
 
-  for (dir = strtok_r(path_copy, ":", &saveptr); dir;
-       dir = strtok_r(NULL, ":", &saveptr)) {
-    DIR *dp = opendir(dir);
+static char *launcher_trim(char *text) {
+  char *end;
+  while (*text && isspace((unsigned char)*text)) {
+    text++;
+  }
+  end = text + strlen(text);
+  while (end > text && isspace((unsigned char)end[-1])) {
+    *--end = '\0';
+  }
+  return text;
+}
+
+/* Removes the %f/%F/%u/%U and related placeholders which only make sense
+ * when a file or URI is passed to an application. %% escapes a literal %. */
+static void launcher_strip_exec_field_codes(const char *exec, char *out, size_t outsz) {
+  size_t oi = 0;
+  size_t i;
+  for (i = 0; exec[i] && oi + 1 < outsz; i++) {
+    if (exec[i] == '%' && exec[i + 1]) {
+      if (exec[i + 1] == '%') {
+        out[oi++] = '%';
+      }
+      i++;
+      continue;
+    }
+    out[oi++] = exec[i];
+  }
+  out[oi] = '\0';
+}
+
+/* Scans XDG application directories for .desktop entries, matching rofi's
+ * drun mode: users select a desktop entry's Name and mwm launches its Exec.
+ * Directories are searched in XDG precedence order, so a user entry shadows
+ * a same-named system entry; Hidden entries shadow it too. */
+void WM::launcher_scan_apps(void) {
+  const char *xdg_home = getenv("XDG_DATA_HOME");
+  const char *xdg_dirs = getenv("XDG_DATA_DIRS");
+  const char *home = getenv("HOME");
+  std::vector<std::string> data_dirs;
+  size_t dir_index;
+
+  launcher_apps.clear();
+  launcher_desktop_ids.clear();
+  if (xdg_home && xdg_home[0]) {
+    data_dirs.push_back(xdg_home);
+  } else if (home && home[0]) {
+    data_dirs.push_back(std::string(home) + "/.local/share");
+  }
+  if (xdg_dirs && xdg_dirs[0]) {
+    char *dirs_copy = xstrdup_local(xdg_dirs);
+    char *saveptr = NULL;
+    char *dir;
+    for (dir = strtok_r(dirs_copy, ":", &saveptr); dir;
+         dir = strtok_r(NULL, ":", &saveptr)) {
+      if (dir[0]) {
+        data_dirs.push_back(dir);
+      }
+    }
+    free(dirs_copy);
+  } else {
+    data_dirs.push_back("/usr/local/share");
+    data_dirs.push_back("/usr/share");
+  }
+
+  for (dir_index = 0; dir_index < data_dirs.size(); dir_index++) {
+    std::string app_dir = data_dirs[dir_index] + "/applications";
+    DIR *dp = opendir(app_dir.c_str());
     struct dirent *de;
     if (!dp) {
       continue;
     }
     while ((de = readdir(dp)) != NULL) {
       char fullpath[PATH_MAX];
-      struct stat st;
-      if (de->d_name[0] == '.') {
+      char line[4096];
+      char name[1024] = "";
+      char exec[PATH_MAX] = "";
+      char type[64] = "";
+      int in_desktop_entry = 0;
+      int hidden = 0;
+      FILE *fp;
+      size_t name_len = strlen(de->d_name);
+
+      if (name_len <= strlen(".desktop") ||
+          strcmp(de->d_name + name_len - strlen(".desktop"), ".desktop")) {
         continue;
       }
-      snprintf(fullpath, sizeof(fullpath), "%s/%s", dir, de->d_name);
-      if (stat(fullpath, &st) != 0 || !S_ISREG(st.st_mode)) {
+      if (launcher_app_seen(de->d_name)) {
         continue;
       }
-      if (access(fullpath, X_OK) != 0) {
+      snprintf(fullpath, sizeof(fullpath), "%s/%s", app_dir.c_str(), de->d_name);
+      fp = fopen(fullpath, "r");
+      if (!fp) {
         continue;
       }
-      launcher_app_add(de->d_name);
+      while (fgets(line, sizeof(line), fp)) {
+        char *key;
+        char *value;
+        char *equals;
+        char *trimmed = launcher_trim(line);
+        if (trimmed[0] == '[') {
+          in_desktop_entry = !strcmp(trimmed, "[Desktop Entry]");
+          continue;
+        }
+        if (!in_desktop_entry || trimmed[0] == '\0' || trimmed[0] == '#' ||
+            trimmed[0] == ';') {
+          continue;
+        }
+        equals = strchr(trimmed, '=');
+        if (!equals) {
+          continue;
+        }
+        *equals = '\0';
+        key = launcher_trim(trimmed);
+        value = launcher_trim(equals + 1);
+        if (!strcmp(key, "Name") && !name[0]) {
+          snprintf(name, sizeof(name), "%s", value);
+        } else if (!strcmp(key, "Exec") && !exec[0]) {
+          snprintf(exec, sizeof(exec), "%s", value);
+        } else if (!strcmp(key, "Type")) {
+          snprintf(type, sizeof(type), "%s", value);
+        } else if ((!strcmp(key, "Hidden") || !strcmp(key, "NoDisplay")) &&
+                   !strcasecmp(value, "true")) {
+          hidden = 1;
+        }
+      }
+      fclose(fp);
+      if (hidden) {
+        launcher_app_mark_seen(de->d_name);
+        continue;
+      }
+      if ((!type[0] || !strcmp(type, "Application")) && name[0] && exec[0]) {
+        char cleaned_exec[PATH_MAX];
+        launcher_strip_exec_field_codes(exec, cleaned_exec, sizeof(cleaned_exec));
+        if (cleaned_exec[0]) {
+          launcher_app_add(de->d_name, name, cleaned_exec);
+        }
+      }
     }
     closedir(dp);
   }
-  free(path_copy);
-
   std::sort(launcher_apps.begin(), launcher_apps.end(), launcher_app_less);
 }
 
@@ -9296,6 +9441,194 @@ void WM::project_init_default(void) {
   snprintf(active_project_path, sizeof(active_project_path), "%s", home);
 }
 
+/* A project is active when at least one client belongs to one of its nine
+ * project-scoped workspaces. This deliberately checks all monitors, not just
+ * the selected one, so the dock menu remains a useful cross-monitor switcher. */
+int WM::project_has_clients(size_t project_index) {
+  char base[256];
+  char name[300];
+  size_t slot;
+
+  if (project_index >= projects.size()) {
+    return 0;
+  }
+  project_basename(projects[project_index].c_str(), base, sizeof(base));
+  for (slot = 1; slot <= 9; slot++) {
+    size_t workspace_index;
+    snprintf(name, sizeof(name), "%s/%zu", base, slot);
+    workspace_index = workspace_find(name);
+    if (workspace_index != SIZE_MAX && workspace_has_clients(workspace_index)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+void WM::active_project_menu_draw(void) {
+  size_t shown;
+  size_t i;
+  int height;
+
+  if (!active_project_menu_visible || !active_project_menu_mon) {
+    return;
+  }
+  shown = active_project_menu_items.size() - active_project_menu_scroll;
+  {
+    size_t max_rows = (size_t)((active_project_menu_mon->mh - bh) / bh);
+    if (max_rows == 0) {
+      max_rows = 1;
+    }
+    if (shown > max_rows) {
+      shown = max_rows;
+    }
+  }
+  height = (int)(shown ? shown : 1) * bh;
+  drw_setscheme(drw, scheme[SchemeNorm]);
+  drw_rect(drw, 0, 0, active_project_menu_w, height, 1, 1);
+  if (shown == 0) {
+    drw_text(drw, 0, 0, active_project_menu_w, bh, lrpad / 2, "No active projects", 0);
+  }
+  for (i = 0; i < shown; i++) {
+    const char *path = projects[active_project_menu_items[active_project_menu_scroll + i].project_index]
+                           .c_str();
+    char label[PATH_MAX + 8];
+    char collapsed[PATH_MAX];
+
+    project_collapse_home(path, collapsed, sizeof(collapsed));
+    snprintf(label, sizeof(label), "%s %s", icon_projects, collapsed);
+    drw_setscheme(drw, scheme[!strcmp(path, active_project_path) ? SchemeSel : SchemeNorm]);
+    drw_text(drw, 0, (int)i * bh, active_project_menu_w, bh, lrpad / 2, label, 0);
+  }
+  drw_map(drw, active_project_menu_win, 0, 0, active_project_menu_w, height);
+}
+
+void WM::active_project_menu_open(Monitor *m) {
+  XSetWindowAttributes wa = {};
+  size_t i;
+  size_t max_rows;
+  size_t shown;
+  int height;
+
+  if (!m) {
+    return;
+  }
+  projects_ensure_loaded();
+  active_project_menu_items.clear();
+  for (i = 0; i < projects.size(); i++) {
+    if (project_has_clients(i)) {
+      active_project_menu_items.push_back({i});
+    }
+  }
+  active_project_menu_mon = m;
+  active_project_menu_scroll = 0;
+  active_project_menu_visible = 1;
+  max_rows = (size_t)((m->mh - bh) / bh);
+  if (max_rows == 0) {
+    max_rows = 1;
+  }
+  shown = active_project_menu_items.size();
+  if (shown > max_rows) {
+    shown = max_rows;
+  }
+  height = (int)(shown ? shown : 1) * bh;
+  if (active_project_menu_win == None) {
+    wa.override_redirect = True;
+    wa.background_pixel = scheme[SchemeNorm][ColBg].pixel;
+    wa.border_pixel = scheme[SchemeSel][ColBorder].pixel;
+    wa.event_mask = ExposureMask | ButtonPressMask | ButtonReleaseMask;
+    active_project_menu_win = XCreateWindow(
+        dpy, root, m->lbx + vbarw, m->my + bh, active_project_menu_w, height, 1,
+        DefaultDepth(dpy, screen), CopyFromParent, DefaultVisual(dpy, screen),
+        CWOverrideRedirect | CWBackPixel | CWBorderPixel | CWEventMask, &wa);
+    XDefineCursor(dpy, active_project_menu_win, cursor[CurNormal]->cursor);
+  } else {
+    XMoveResizeWindow(dpy, active_project_menu_win, m->lbx + vbarw, m->my + bh,
+                      active_project_menu_w, height);
+  }
+  active_project_menu_draw();
+  XMapRaised(dpy, active_project_menu_win);
+}
+
+void WM::active_project_menu_close(void) {
+  active_project_menu_visible = 0;
+  if (active_project_menu_win != None) {
+    XUnmapWindow(dpy, active_project_menu_win);
+  }
+}
+
+void WM::active_project_menu_toggle(Monitor *m) {
+  if (active_project_menu_visible) {
+    active_project_menu_close();
+  } else {
+    active_project_menu_open(m);
+  }
+}
+
+int WM::active_project_menu_handle_button(XButtonPressedEvent *ev) {
+  size_t max_rows;
+  size_t shown;
+  size_t item_index;
+
+  if (!active_project_menu_visible) {
+    return 0;
+  }
+  if (ev->window != active_project_menu_win) {
+    active_project_menu_close();
+    /* The trigger itself is outside the popup. Consume it after closing so
+     * clicking the folder a second time reliably closes instead of reopening. */
+    if (active_project_menu_mon && ev->window == active_project_menu_mon->leftbarwin &&
+        ev->y < bh) {
+      return 1;
+    }
+    return 0;
+  }
+  max_rows = (size_t)((active_project_menu_mon->mh - bh) / bh);
+  if (max_rows == 0) {
+    max_rows = 1;
+  }
+  shown = active_project_menu_items.size() - active_project_menu_scroll;
+  if (shown > max_rows) {
+    shown = max_rows;
+  }
+  if (ev->button == Button4 && active_project_menu_scroll > 0) {
+    active_project_menu_scroll--;
+    active_project_menu_draw();
+    return 1;
+  }
+  if (ev->button == Button5 && active_project_menu_scroll + shown < active_project_menu_items.size()) {
+    active_project_menu_scroll++;
+    active_project_menu_draw();
+    return 1;
+  }
+  if (ev->button != Button1 || ev->y < 0 || (size_t)(ev->y / bh) >= shown) {
+    return 1;
+  }
+  item_index = active_project_menu_scroll + (size_t)(ev->y / bh);
+  {
+    size_t project_index = active_project_menu_items[item_index].project_index;
+    std::string path = projects[project_index];
+    char base[256];
+    char name[300];
+    size_t slot;
+
+    project_basename(path.c_str(), base, sizeof(base));
+    for (slot = 1; slot <= 9; slot++) {
+      snprintf(name, sizeof(name), "%s/%zu", base, slot);
+      if (workspace_has_clients(workspace_find(name))) {
+        focus_workspace_by_name(active_project_menu_mon, name);
+        break;
+      }
+    }
+    if (slot > 9) {
+      project_switch_workspace(active_project_menu_mon, path.c_str());
+    }
+    projects_move_to_front(project_index);
+    project_set_active(path.c_str());
+  }
+  active_project_menu_close();
+  return 1;
+}
+
 /* Resolves what Enter/Ctrl+Enter in the picker should act on: the selected
  * row, or -- if the query doesn't match anything -- the typed path, added as
  * a new project. */
@@ -9339,9 +9672,11 @@ void WM::project_launch(int with_agent) {
   }
 
   if (project_filtered_len > 0 && project_filtered[project_sel].kind == PickResultApp) {
-    const char *argv_app[2];
-    argv_app[0] = launcher_apps[project_filtered[project_sel].index].c_str();
-    argv_app[1] = NULL;
+    const char *argv_app[4];
+    argv_app[0] = "/bin/sh";
+    argv_app[1] = "-c";
+    argv_app[2] = launcher_apps[project_filtered[project_sel].index].exec.c_str();
+    argv_app[3] = NULL;
     a.v = argv_app;
     spawn(&a);
     project_close();
@@ -9349,7 +9684,7 @@ void WM::project_launch(int with_agent) {
   }
 
   if (!project_resolve_selected_path(path_buf, sizeof(path_buf))) {
-    if (project_query_len > 0) {
+    if (project_query_len > 0 && project_mode == PickerModeCombined) {
       const char *argv_shell[4];
       argv_shell[0] = "/bin/sh";
       argv_shell[1] = "-c";
@@ -9508,7 +9843,8 @@ void WM::project_filter(void) {
     }
     if (want_apps) {
       for (i = 0; i < launcher_apps.size() && all_len < MAX_PICK_CANDIDATES; i++) {
-        int score = project_fuzzy_score(project_query, project_query_len, launcher_apps[i].c_str());
+        int score =
+            project_fuzzy_score(project_query, project_query_len, launcher_apps[i].name.c_str());
         if (score >= 0) {
           all[all_len].index = (int)i;
           all[all_len].score = score;
@@ -9642,8 +9978,7 @@ void WM::project_draw(void) {
   if (project_filtered_len == 0) {
     const char *hint;
     if (project_mode == PickerModeAppOnly) {
-      hint = project_query_len > 0 ? "No matching apps -- Enter runs this as a command"
-                                    : "No apps found";
+      hint = project_query_len > 0 ? "No matching applications" : "No applications found";
     } else if (project_mode == PickerModeTheme) {
       hint = "No matching themes";
     } else if (project_mode == PickerModeProjectOnly) {
@@ -9679,7 +10014,7 @@ void WM::project_draw(void) {
 
       if (match->kind == PickResultApp) {
         snprintf(row_text, sizeof(row_text), "%s %s", icon_launcher,
-                 launcher_apps[match->index].c_str());
+                 launcher_apps[match->index].name.c_str());
       } else if (match->kind == PickResultTheme) {
         const ColorTheme *ct = &color_themes[match->index];
         snprintf(row_text, sizeof(row_text), "%s %s%s",
@@ -13197,9 +13532,14 @@ void WM::cleanup(void) {
   }
   agents_free_list();
   launcher_apps.clear();
+  launcher_desktop_ids.clear();
   if (project_win != None) {
     XDestroyWindow(dpy, project_win);
     project_win = None;
+  }
+  if (active_project_menu_win != None) {
+    XDestroyWindow(dpy, active_project_menu_win);
+    active_project_menu_win = None;
   }
   if (keybind_help_win != None) {
     XDestroyWindow(dpy, keybind_help_win);
@@ -13817,7 +14157,7 @@ void WM::drawwidgetbar(Monitor *m) {
 
 // {{{ void drawleftbar(Monitor *m)
 /* App dock: Firefox, a terminal, then Inkscape/GIMP/LibreOffice/VS Code/
- * Emacs, stacked top-down in vbarw-square cells -- same fixed-cell/lpad-0
+ * Emacs/Neovim, stacked top-down in vbarw-square cells -- same fixed-cell/lpad-0
  * convention project_draw() and friends use for their own bh-square icon
  * buttons (e.g. the close "x" next to a saved project), rather than the
  * auto-sized-to-text width normal bar widgets use. */
@@ -13839,7 +14179,7 @@ int WM::dockbar_icon_lpad(const char *icon) {
 void WM::drawleftbar(Monitor *m) {
   static const char *const icons[] = {icon_firefox,     icon_terminal, icon_inkscape,
                                        icon_gimp,        icon_libreoffice,
-                                       icon_vscode,      icon_emacs};
+                                       icon_vscode,      icon_emacs,    icon_neovim};
   const char *os_icon = os_logo_glyph();
   size_t i;
 
@@ -13951,10 +14291,11 @@ int WM::leftbar_handle_button(Monitor *m, XButtonPressedEvent *ev) {
   if (!m || ev->window != m->leftbarwin) {
     return 0;
   }
-  /* top-left corner: project/app picker */
+  /* Top-left project folder: active projects currently owning a client. The
+   * searchable project/app picker remains available on Mod+o/Mod+space. */
   if (ev->y < bh) {
     if (ev->button == Button1) {
-      project_toggle(m, PickerModeCombined);
+      active_project_menu_toggle(m);
     }
     return 1;
   }
@@ -13965,13 +14306,14 @@ int WM::leftbar_handle_button(Monitor *m, XButtonPressedEvent *ev) {
   if (ev->button != Button1) {
     return 1;
   }
-  /* Same top-down order as drawleftbar()'s icons[]. */
+  /* Same top-down order as drawleftbar()'s icons[]. The final Neovim row is
+   * deliberately a no-op placeholder until it gains its own launcher. */
   {
     static const char *const *const dock_cmds[] = {firefoxcmd,     termcmd,     inkscapecmd,
                                                      gimpcmd,        libreofficecmd,
-                                                     vscodecmd,      emacscmd};
-    row = dockbar_row_at(ev->y - bh, LENGTH(dock_cmds));
-    if (row >= 0) {
+                                                     vscodecmd,      emacs_nixcmd};
+    row = dockbar_row_at(ev->y - bh, LENGTH(dock_cmds) + 1);
+    if (row >= 0 && (size_t)row < LENGTH(dock_cmds)) {
       a.v = dock_cmds[row];
       spawn(&a);
     }
@@ -15647,7 +15989,7 @@ void WM::setup(void) {
   {
     static const char *const dock_icon_widths[] = {
         icon_firefox, icon_terminal, icon_inkscape, icon_gimp, icon_libreoffice,
-        icon_vscode,  icon_emacs,    icon_bell,     icon_todo, icon_agents};
+        icon_vscode,  icon_emacs,    icon_neovim,   icon_bell, icon_todo, icon_agents};
     size_t di;
     for (di = 0; di < LENGTH(dock_icon_widths); di++) {
       int w = (int)drw_fontset_getwidth(drw, dock_icon_widths[di]) + (bh / 2);
@@ -15798,6 +16140,31 @@ void WM::showhide(Client *c) {
   }
 }
 // }}} void showhide(Client *c)
+
+// {{{ void terminal_in_active_project(const Arg *arg)
+void WM::terminal_in_active_project(const Arg *arg) {
+  const char *argv[] = {terminal_cmd, NULL};
+  struct sigaction sa;
+
+  (void)arg;
+  if (fork() == 0) {
+    if (dpy) {
+      close(ConnectionNumber(dpy));
+    }
+    setsid();
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sa.sa_handler = SIG_DFL;
+    sigaction(SIGCHLD, &sa, NULL);
+    if (active_project_path[0] != '\0' && chdir(active_project_path) != 0) {
+      fprintf(stderr, "mwm: cannot open active project '%s': %s\n", active_project_path,
+              strerror(errno));
+    }
+    execvp(argv[0], (char **)argv);
+    die("dwm: execvp '%s' failed:", argv[0]);
+  }
+}
+// }}} void terminal_in_active_project
 
 // {{{ void spawn(const Arg *arg)
 void WM::spawn(const Arg *arg) {
