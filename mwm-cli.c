@@ -53,7 +53,6 @@ int main(int argc, char **argv) {
   int i;
   int exit_code = 0;
   int saw_output = 0;
-  int first_chunk = 1;
   char buffer[4096];
   ssize_t nread;
 
@@ -115,10 +114,6 @@ int main(int argc, char **argv) {
       exit_code = 1;
     }
     saw_output = 1;
-    if (!first_chunk && fwrite("", 1, 0, stdout) < 0) {
-      break;
-    }
-    first_chunk = 0;
     if (fwrite(buffer, 1, (size_t)nread, stdout) != (size_t)nread) {
       perror("fwrite");
       close(fd);

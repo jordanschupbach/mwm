@@ -89,10 +89,12 @@ DEALINGS IN THE SOFTWARE.
 #include <memory>
 #include <string>
 #include <vector>
+#include <arpa/inet.h>
 #include <dbus/dbus.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <ifaddrs.h>
 #include <stdint.h>
 #include <limits.h>
 #ifdef __cplusplus
@@ -780,11 +782,13 @@ typedef union {
   const void *v;
 } Arg;
 
+class WM;
+
 typedef struct {
   unsigned int click;
   unsigned int mask;
   unsigned int button;
-  void (*func)(const Arg *arg);
+  void (WM::*func)(const Arg *arg);
   const Arg arg;
 } Button;
 
@@ -827,14 +831,14 @@ struct Systray {
 typedef struct {
   unsigned int mod;
   KeySym keysym;
-  void (*func)(const Arg *);
+  void (WM::*func)(const Arg *);
   const Arg arg;
   const char *desc; /* shown in the Mod+s keybinding-help overlay */
 } Key;
 
 typedef struct {
   const char *symbol;
-  void (*arrange)(Monitor *);
+  void (WM::*arrange)(Monitor *);
   /* Only meaningful when arrange == lua_layout_dispatch: which entry of
    * lua_layouts[] this Layout* stands in for. Compiled layouts leave this
    * zero-initialized and unread. */
@@ -899,7 +903,6 @@ enum WidgetId {
   WidgetTodo,
   WidgetAgents,
   WidgetGit,
-  WidgetProjects,
   WidgetLoad,
   WidgetCpu,
   WidgetMem,
@@ -912,7 +915,7 @@ enum WidgetId {
   WidgetCount
 };
 
-enum SliderWidget { SliderBacklight, SliderVolume };
+enum SliderWidget { SliderBacklight, SliderVolume, SliderMic };
 
 enum ThemeMode { ThemeModeDark, ThemeModeLight, ThemeModeSystem, ThemeModeCount };
 
@@ -1114,516 +1117,50 @@ typedef struct {
  * that's only ever driven by one person clicking one thing at a time. */
 enum WifiJobKind { WifiJobNone, WifiJobScan, WifiJobConnect };
 
+/* Prerequisites for member declarations/initializers below (macros,
+ * enums used as member types) -- these must be visible before the class
+ * that uses them, same as any type needed by a member's declaration. */
+#define MODKEY Mod4Mask
+#define WORKSPACEKEYS(KEY, INDEX, LABEL)                                       \
+  {MODKEY, KEY, &WM::viewnth, {.i = INDEX}, "View workspace " LABEL},               \
+      {MODKEY | ControlMask, KEY, &WM::toggleviewnth, {.i = INDEX},                 \
+       "Toggle workspace " LABEL " in view"},                                  \
+      {MODKEY | ShiftMask, KEY, &WM::tagnth, {.i = INDEX},                          \
+       "Move focused window to workspace " LABEL},                            \
+      {MODKEY | ControlMask | ShiftMask, KEY, &WM::toggletagnth, {.i = INDEX},      \
+       "Toggle focused window on workspace " LABEL},
+enum { DIR_LEFT, DIR_DOWN, DIR_UP, DIR_RIGHT };
+#define KB_LAYOUT_MAX 8
+#define INFO_DISK_MAX_MOUNTS 5
+#define MAX_BT_DEVICES 24
+enum InfoPopupKind {
+  InfoBattery,
+  InfoLoad,
+  InfoCpu,
+  InfoMem,
+  InfoDisk,
+  InfoNet,
+  InfoGit,
+  InfoKbLayout,
+  InfoMedia,
+};
+
 // }}} Types
-
-// {{{ Function declarations
-static void applyrules(Client *c);
-static int applysizehints(Client *c, int *x, int *y, int *w, int *h,
-                          int interact);
-static void arrange(Monitor *m);
-static void arrangemon(Monitor *m);
-static void attach(Client *c);
-static void attachstack(Client *c);
-static void buttonpress(XEvent *e);
-static void buttonrelease(XEvent *e);
-static void checkotherwm(void);
-static void cleanup(void);
-static void cleanupmon(Monitor *mon);
-static void clientmessage(XEvent *e);
-static void configure(Client *c);
-static void configurenotify(XEvent *e);
-static void configurerequest(XEvent *e);
-static std::unique_ptr<Monitor> createmon(void);
-static void destroynotify(XEvent *e);
-static void detach(Client *c);
-static void detachstack(Client *c);
-static Monitor *dirtomon(int dir);
-static void draw_vdivider(int x, int y, int h);
-static void draw_hdivider(int x, int y, int w);
-static void drawbar(Monitor *m);
-static void drawbars(void);
-static void drawwidgetbar(Monitor *m);
-static void drawleftbar(Monitor *m);
-static void drawrightbar(Monitor *m);
-static int leftbar_handle_button(Monitor *m, XButtonPressedEvent *ev);
-static int rightbar_handle_button(Monitor *m, XButtonPressedEvent *ev);
-static void draw_slider_popup(void);
-static void enternotify(XEvent *e);
-static void expose(XEvent *e);
-static void focus(Client *c);
-static void focusin(XEvent *e);
-static void focusdir(const Arg *arg);
-static void focusmon(const Arg *arg);
-static void focusstack(const Arg *arg);
-static Atom getatomprop(Client *c, Atom prop);
-static WorkspaceMask get_full_workspace_mask(void);
-static void get_theme_config_path(char *buf, size_t size);
-static void get_workspace_socket_path(char *buf, size_t size);
-static unsigned int getsystraywidth(void);
-static int getrootptr(int *x, int *y);
-static long getstate(Window w);
-static int gettextprop(Window w, Atom atom, char *text, unsigned int size);
-static void grabbuttons(Client *c, int focused);
-static void grabkeys(void);
-static void incnmaster(const Arg *arg);
-static void keypress(XEvent *e);
-static void killclient(const Arg *arg);
-static int load_config_from_lua(void);
-static int load_theme_from_lua(void);
-static int lua_mwm_agent_command(lua_State *L);
-static int lua_mwm_create_workspace(lua_State *L);
-static int lua_mwm_current_project(lua_State *L);
-static int lua_mwm_exec(lua_State *L);
-static int lua_mwm_focus_workspace(lua_State *L);
-static int lua_mwm_list_projects(lua_State *L);
-static int lua_mwm_list_workspaces(lua_State *L);
-static int lua_mwm_rename_workspace(lua_State *L);
-static int lua_mwm_switch_project(lua_State *L);
-static int lua_mwm_theme(lua_State *L);
-static int lua_mwm_widget(lua_State *L);
-static int lua_mwm_workspaces(lua_State *L);
-static void reset_lua_widgets(void);
-static void widget_update_lua_widgets(void);
-static void widget_lua_click(size_t index, int button);
-static int lua_parse_mods(char **tokens, int count, unsigned int *mod_out);
-static int lua_split_spec(char *buf, char **tokens, int max);
-static int lua_parse_keybind(const char *spec, unsigned int *mod_out, KeySym *keysym_out);
-static void lua_key_invoke(size_t index);
-static int lua_mwm_keybind(lua_State *L);
-static void reset_lua_keys(void);
-static int lua_mwm_rule(lua_State *L);
-static void reset_lua_rules(void);
-static int lua_mwm_set_terminal(lua_State *L);
-static int lua_mwm_set_mfact(lua_State *L);
-static int lua_mwm_set_nmaster(lua_State *L);
-static int lua_mwm_set_snap(lua_State *L);
-static int lua_mwm_set_border_width(lua_State *L);
-static int lua_mwm_set_gaps(lua_State *L);
-static int lua_mwm_scratchpad_toggle(lua_State *L);
-static int lua_mwm_scratchpad_set(lua_State *L);
-static int lua_mwm_zoom(lua_State *L);
-static int lua_mwm_toggle_floating(lua_State *L);
-static int lua_mwm_kill_client(lua_State *L);
-static int lua_mwm_toggle_bar(lua_State *L);
-static int lua_parse_click_context(const char *name);
-static int lua_parse_mousebind(const char *spec, unsigned int *mod_out, unsigned int *button_out);
-static void lua_button_invoke(size_t index, const char *wsname);
-static int lua_mwm_mousebind(lua_State *L);
-static void reset_lua_buttons(void);
-static void regrab_all_client_buttons(void);
-static int lua_layout_index_by_symbol(const char *symbol);
-static int lua_mwm_set_layout(lua_State *L);
-static int lua_geom_field(lua_State *L, const char *field, int fallback);
-static void lua_layout_arrange(Monitor *m, size_t layout_idx);
-static void lua_layout_dispatch(Monitor *m);
-static int lua_mwm_layout(lua_State *L);
-static void reset_lua_layouts(void);
-static int layout_is_lua(const Layout *lt);
-static MonLayoutSnapshot *snapshot_lua_layouts(size_t *count_out);
-static void restore_lua_layouts(MonLayoutSnapshot *snap, size_t count);
-static size_t layout_total_count(void);
-static const Layout *layout_at(size_t idx);
-static void cycle_layout(int direction);
-static void cyclelayout(const Arg *arg);
-static int lua_mwm_cycle_layout(lua_State *L);
-
-/* {{{ notification sidebar declarations */
-static unsigned int notification_add(const char *app_name, const char *summary,
-                                     const char *body, unsigned int replaces_id,
-                                     int expire_timeout_ms);
-static void notification_remove(unsigned int id, unsigned int reason);
-static void notification_clear_all(void);
-static void notification_expire_check(void);
-static void notif_dbus_init(void);
-static void notif_dbus_try_acquire(void);
-static void notif_dbus_shutdown(void);
-static void notif_dbus_process(void);
-static void notif_dbus_handle_message(DBusMessage *msg);
-static void notif_dbus_handle_notify(DBusMessage *msg);
-static void notif_dbus_handle_close_notification(DBusMessage *msg);
-static void notif_dbus_handle_get_capabilities(DBusMessage *msg);
-static void notif_dbus_handle_get_server_information(DBusMessage *msg);
-static void notif_dbus_handle_introspect(DBusMessage *msg);
-static void notif_dbus_emit_notification_closed(unsigned int id, unsigned int reason);
-static void widget_format_notifications(char *buf, size_t size);
-static size_t notif_wrap_body(const char *text, int max_width, char out[][256],
-                              size_t max_lines);
-static void notif_format_relative_time(time_t t, char *buf, size_t size);
-static int notif_sidebar_content_height(void);
-static void notif_sidebar_position(Monitor *m);
-static void draw_notif_sidebar(void);
-static void notif_sidebar_open(Monitor *m);
-static void notif_sidebar_close(void);
-static void notif_sidebar_toggle(Monitor *m);
-static void notif_sidebar_advance_animation(void);
-static int notif_sidebar_handle_button(XButtonPressedEvent *ev);
-/* }}} notification sidebar declarations */
-
-/* {{{ todo sidebar declarations */
-static unsigned int todo_add(const char *text);
-static void todo_remove(unsigned int id);
-static void todo_toggle(unsigned int id);
-static void todo_clear_completed(void);
-static void todo_seed_fake(void);
-static void widget_format_todos(char *buf, size_t size);
-static int todo_sidebar_content_height(void);
-static void todo_sidebar_position(Monitor *m);
-static void draw_todo_sidebar(void);
-static void todo_sidebar_open(Monitor *m);
-static void todo_sidebar_close(void);
-static void todo_sidebar_toggle(Monitor *m);
-static void todo_sidebar_advance_animation(void);
-static int todo_sidebar_handle_button(XButtonPressedEvent *ev);
-/* }}} todo sidebar declarations */
-
-/* {{{ agent sidebar declarations */
-static void get_agent_status_dir(char *buf, size_t size);
-static void agents_refresh(void);
-static void agents_free_list(void);
-static unsigned int agent_row_id(const char *kind, const char *cwd);
-static pid_t proc_ppid(pid_t pid);
-static pid_t client_get_pid(Window w);
-static Client *client_for_pid(pid_t target);
-static void client_reveal(Client *c);
-static void agent_jump_to(const AgentStatus *a);
-static void agent_jump_next_needs_input(const Arg *arg);
-static void widget_format_agents(char *buf, size_t size);
-static int agent_sidebar_content_height(void);
-static void agent_sidebar_position(Monitor *m);
-static void draw_agent_sidebar(void);
-static void agent_sidebar_open(Monitor *m);
-static void agent_sidebar_close(void);
-static void agent_sidebar_toggle(Monitor *m);
-static void agent_sidebar_advance_animation(void);
-static int agent_sidebar_handle_button(XButtonPressedEvent *ev);
-/* }}} agent sidebar declarations */
-
-/* {{{ launcher declarations (app index only -- see launcher globals above) */
-static void launcher_scan_apps(void);
-/* }}} launcher declarations */
-
-/* {{{ project picker declarations */
-static void get_projects_state_path(char *buf, size_t size);
-static void projects_load(void);
-static void projects_save(void);
-static void projects_ensure_loaded(void);
-static void project_expand_path(const char *raw, char *out, size_t outsz);
-static int projects_add(const char *raw_path);
-static void projects_remove_index(size_t idx);
-static void projects_move_to_front(size_t idx);
-static void project_collapse_home(const char *path, char *out, size_t outsz);
-static int project_has_running_agent(const char *path);
-static void project_basename(const char *path, char *out, size_t outsz);
-static void project_workspace_name(int n, char *out, size_t outsz);
-static int project_find_for_path(const char *path);
-static void project_label_for_path(const char *path, char *out, size_t outsz);
-static int project_index_for_workspace_name(const char *wsname);
-static void project_switch_workspace(Monitor *m, const char *path);
-static void project_set_active(const char *path);
-static void project_init_default(void);
-static int project_resolve_selected_path(char *out, size_t outsz);
-static void project_launch(int with_agent);
-static void widget_format_projects(char *buf, size_t size);
-static void project_filter(void);
-static void project_ensure_sel_visible(void);
-static void project_move_sel(int delta);
-static int project_total_h(void);
-static void project_position(Monitor *m);
-static void project_draw(void);
-static void project_open(Monitor *m, enum PickerMode mode);
-static void project_close(void);
-static void project_toggle(Monitor *m, enum PickerMode mode);
-static void project_toggle_key(const Arg *arg);
-static void project_submit(void);
-static void project_submit_agent(void);
-static void project_remove_selected(void);
-static int project_handle_keypress(XKeyEvent *ev);
-static int project_handle_button(XButtonPressedEvent *ev);
-/* }}} project picker declarations */
-
-/* {{{ keybinding help declarations */
-static void keybind_help_mod_string(unsigned int mod, char *out, size_t outsz);
-static void keybind_help_key_string(KeySym keysym, char *out, size_t outsz);
-static size_t keybind_help_collect(KeybindHelpEntry *out, size_t cap);
-static void keybind_help_open(Monitor *m);
-static void keybind_help_close(void);
-static void keybind_help_toggle(Monitor *m);
-static void keybind_help_toggle_key(const Arg *arg);
-static void keybind_help_draw(void);
-static int keybind_help_handle_keypress(XKeyEvent *ev);
-static int keybind_help_handle_button(XButtonPressedEvent *ev);
-/* }}} keybinding help declarations */
-
-/* {{{ wifi popup declarations */
-static void wifi_job_reset(void);
-static int wifi_job_start(enum WifiJobKind kind, char *const argv[], int capture_stderr);
-static void wifi_job_poll(void);
-static int nmcli_split_line(char *line, char *fields[], int max);
-static int wifi_network_cmp(const void *a, const void *b);
-static void wifi_parse_scan_output(char *buf);
-static void wifi_start_scan(void);
-static void wifi_start_connect(const char *ssid, const char *password);
-static int wifi_popup_total_h(void);
-static void wifi_popup_position(Monitor *m);
-static void wifi_popup_draw(void);
-static void wifi_popup_open(Monitor *m);
-static void wifi_popup_close(void);
-static void wifi_popup_toggle(Monitor *m);
-static int wifi_handle_keypress(XKeyEvent *ev);
-static int wifi_handle_button(XButtonPressedEvent *ev);
-/* }}} wifi popup declarations */
-
-/* {{{ desktop icons declarations */
-static void get_desktop_dir(char *buf, size_t size);
-static void get_trash_files_dir(char *buf, size_t size);
-static void get_trash_info_dir(char *buf, size_t size);
-static void get_desktop_layout_path(char *buf, size_t size);
-static void desktop_layout_save(void);
-static const char *desktop_icon_glyph(const DesktopIcon *icon);
-static void get_trash_base_dir(char *buf, size_t size);
-static void desktop_next_free_cell(const DesktopIcon *icons, size_t icons_len, int *out_x,
-                                   int *out_y);
-static void desktop_url_decode(const char *in, char *out, size_t outsz);
-static void desktop_rescan(void);
-static void desktop_draw(void);
-static int desktop_hit_test(int x, int y);
-static void desktop_open_icon(const DesktopIcon *icon);
-static void desktop_trash_icon(size_t index);
-static void desktop_dragmouse(size_t index);
-static int desktop_handle_button(XButtonPressedEvent *ev);
-static void desktop_setup(void);
-static int desktop_copy_regular_file(const char *src, const char *dst, mode_t mode);
-static int desktop_copy_path_recursive(const char *src, const char *dst);
-static void desktop_xdnd_enter(XClientMessageEvent *cme);
-static void desktop_xdnd_position(XClientMessageEvent *cme);
-static void desktop_xdnd_leave(XClientMessageEvent *cme);
-static void desktop_xdnd_drop(XClientMessageEvent *cme);
-static void desktop_xdnd_selection_notify(XSelectionEvent *sev);
-static int desktop_xdnd_import_uri_list(const char *data, int drop_x, int drop_y);
-static void selectionnotify(XEvent *e);
-/* }}} desktop icons declarations */
-
-static void manage(Window w, XWindowAttributes *wa);
-static void mappingnotify(XEvent *e);
-static void maprequest(XEvent *e);
-static void monocle(Monitor *m);
-static void motionnotify(XEvent *e);
-static void movemouse(const Arg *arg);
-static Client *nexttiled(Client *c);
-static void pop(Client *c);
-static void promptcommand(const Arg *arg);
-static void propertynotify(XEvent *e);
-static void quit(const Arg *arg);
-static Monitor *recttomon(int x, int y, int w, int h);
-static int read_long_from_file(const char *path, long *value);
-static void removesystrayicon(Client *i);
-static void resize(Client *c, int x, int y, int w, int h, int interact);
-static void resize_cell(Client *c, int x, int y, int w, int h, int interact);
-static void resizebydir(const Arg *arg);
-static void resizeclient(Client *c, int x, int y, int w, int h);
-static void resizemouse(const Arg *arg);
-static void reloadconfig(const Arg *arg);
-static void restartwm(const Arg *arg);
-static void restack(Monitor *m);
-static void run(void);
-static void scan(void);
-static int sendevent(Client *c, Atom proto);
-static void sendmon(Client *c, Monitor *m);
-static int client_is_managed(Client *target);
-static void scratchpad_hide(Client *c);
-static void scratchpad_show(Client *c, Monitor *m);
-static void scratchpad_set(const Arg *arg);
-static void scratchpad_toggle(const Arg *arg);
-static void setclientstate(Client *c, long state);
-static void setcolorscheme(void);
-static void set_default_bar_theme(void);
-static void setfocus(Client *c);
-static void setfullscreen(Client *c, int fullscreen);
-static void setlayout(const Arg *arg);
-static void setmfact(const Arg *arg);
-static void setup(void);
-static void seturgent(Client *c, int urg);
-static void showhide(Client *c);
-static void spawn(const Arg *arg);
-static void tag(const Arg *arg);
-static void tagmon(const Arg *arg);
-static unsigned int tiledcount(Monitor *m);
-static void tile(Monitor *m);
-static void togglebar(const Arg *arg);
-static void togglefloating(const Arg *arg);
-static void toggletag(const Arg *arg);
-static void toggleview(const Arg *arg);
-static void toggletagnth(const Arg *arg);
-static void toggleviewnth(const Arg *arg);
-static void unfocus(Client *c, int setfocus);
-static void unmanage(Client *c, int destroyed);
-static void unmapnotify(XEvent *e);
-static void updatebarpos(Monitor *m);
-static void updatebars(void);
-static void updateclientlist(void);
-static int updategeom(void);
-static void updatenumlockmask(void);
-static void updatewidgets(void);
-static void updatesystray(void);
-static void updatesystrayicongeom(Client *i, int w, int h);
-static void updatesystrayiconstate(Client *i);
-static void updatesizehints(Client *c);
-static void updatestatus(void);
-static void updatetitle(Client *c);
-static void updatewindowtype(Client *c);
-static void updatewmhints(Client *c);
-static void widget_close_slider_popup(void);
-static void widget_init_paths(void);
-static void widget_update_backlight(void);
-static void widget_format_backlight(char *buf, size_t size);
-static void widget_format_battery(char *buf, size_t size);
-static void widget_format_clock(char *buf, size_t size);
-static int calendar_days_in_month(int year, int month);
-static int calendar_first_weekday(int year, int month);
-static void calendar_open(Monitor *m);
-static void calendar_close(void);
-static void calendar_toggle(Monitor *m);
-static void calendar_toggle_key(const Arg *arg);
-static void calendar_shift_month(int delta);
-static void calendar_position(Monitor *m);
-static int calendar_total_h(void);
-static void calendar_draw(void);
-static int calendar_handle_keypress(XKeyEvent *ev);
-static int calendar_handle_button(XButtonPressedEvent *ev);
-static void widget_format_cpu(char *buf, size_t size);
-static void widget_format_disk(char *buf, size_t size);
-static void widget_format_mem(char *buf, size_t size);
-static void widget_format_net(char *buf, size_t size);
-static void widget_format_wifi(char *buf, size_t size);
-static void widget_format_bluetooth(char *buf, size_t size);
-static void widget_format_volume(char *buf, size_t size);
-static void widget_format_mic(char *buf, size_t size);
-static void widget_format_load(char *buf, size_t size);
-static void widget_format_git(char *buf, size_t size);
-static int run_capture_argv(const char *cwd, char *const argv[], char *out, size_t outsz,
-                            int timeout_ms);
-static void widget_amixer_read(const char *control, int *percent, int *muted);
-static void widget_update_mic(void);
-static void widget_toggle_mic_mute(void);
-static void widget_update_load(void);
-static long widget_ncpu(void);
-static void widget_update_git(void);
-static void widget_git_open_terminal(void);
-static void widget_format_net_rate(double kbps, char *buf, size_t size);
-static void widget_format_media(char *buf, size_t size);
-static void widget_update_media(void);
-static void widget_media_play_pause(void);
-static void widget_media_next(void);
-static void widget_media_previous(void);
-static void widget_format_kblayout(char *buf, size_t size);
-static void widget_refresh_kblayout_list(void);
-static void widget_update_kblayout(void);
-static void widget_cycle_kblayout(void);
-static int widget_handle_button(Monitor *m, XButtonPressedEvent *ev);
-static int widget_hit(enum WidgetId id, int x);
-static void widget_open_slider_popup(Monitor *m, enum SliderWidget kind);
-static void widget_position_slider_popup(Monitor *m);
-static int slider_popup_handle_button(XButtonPressedEvent *ev);
-static int slider_popup_handle_motion(XMotionEvent *ev);
-static int widget_slider_current_percent(enum SliderWidget kind);
-static void widget_slider_label(enum SliderWidget kind, char *buf, size_t size);
-static void widget_slider_set_absolute(enum SliderWidget kind, int percent);
-static void widget_set_backlight_percent_absolute(int percent);
-static int widget_set_backlight_percent(int delta_percent);
-static void run_detached_shell(const char *cmd);
-static void widget_set_volume_percent_absolute(int percent);
-static int widget_set_volume_percent(int delta_percent);
-static void widget_toggle_volume_mute(void);
-static void widget_update_cpu(void);
-static void widget_update_disk(void);
-static void widget_update_mem(void);
-static void widget_update_net(void);
-static void widget_update_wifi(void);
-static void widget_update_bluetooth(void);
-static int widget_rfkill_blocked(const char *type_name);
-static void widget_toggle_bluetooth(void);
-static void widget_update_volume(void);
-static void widget_update_theme(void);
-static void widget_format_theme(char *buf, size_t size);
-static void widget_cycle_theme_mode(int direction);
-static const BarThemeConfig *active_bar_theme(void);
-static int theme_resolve_prefers_dark(void);
-static int system_prefers_dark(void);
-static void widget_apply_theme(void);
-static void widget_refresh_client_borders(void);
-static void get_theme_state_path(char *buf, size_t size);
-static void load_theme_mode_state(void);
-static void save_theme_mode_state(void);
-static int color_theme_find_by_name(const char *name);
-static void color_theme_apply(size_t idx);
-static void view(const Arg *arg);
-static void viewnth(const Arg *arg);
-static void tagnth(const Arg *arg);
-static Client *wintoclient(Window w);
-static Client *wintosystrayicon(Window w);
-static Workspace *workspace_by_index(size_t index);
-static size_t workspace_ensure(const char *name);
-static size_t workspace_find(const char *name);
-static size_t focus_workspace_by_name(Monitor *m, const char *name);
-static int workspace_has_clients(size_t index);
-static size_t workspace_index_from_mask(WorkspaceMask mask);
-static int workspace_is_visible_on_any_monitor(size_t index);
-static WorkspaceMask workspace_mask_from_index(size_t index);
-static WorkspaceMask workspace_reindex_mask_after_remove(WorkspaceMask mask,
-                                                         size_t removed_index);
-static int workspace_remove_index(size_t index);
-static const char *workspace_name_from_mask(WorkspaceMask mask);
-static int workspace_rename(size_t index, const char *name);
-static void workspace_set_defaults(void);
-static int workspace_set_list_from_lua(lua_State *L, int index);
-static void workspace_sync_after_registry_change(void);
-static void workspace_view_mask(Monitor *m, WorkspaceMask mask);
-static int wm_command_handle_client(int fd);
-static int wm_command_server_init(void);
-static void wm_command_server_shutdown(void);
-static int wm_eval_lua_buffer(const char *chunk, size_t len, int fd);
-static void client_save_workspace_tags(const Client *c);
-static int client_restore_workspace_tags(Window w, WorkspaceMask *tags);
-static std::array<void (*)(XEvent *), LASTEvent> make_handler_table(void);
-
-static Monitor *wintomon(Window w);
-static int xerror(Display *dpy, XErrorEvent *ee);
-static int xerrordummy(Display *dpy, XErrorEvent *ee);
-static int xerrorstart(Display *dpy, XErrorEvent *ee);
-static void zoom(const Arg *arg);
-
-// }}} Function declarations
-
-// {{{ Variables
-static const char broken[] = "broken";
-static char stext[256];
+// {{{ irreducible free globals
+/* These few cannot be WM members: CurFreeDeleter/SchemeFreeDeleter (X11
+ * resource cleanup for unique_ptr) and the free xerror() family need them
+ * as bare globals since they're invoked via C-ABI callback mechanisms
+ * (Xlib error handler, unique_ptr deleters used before/independent of any
+ * WM construction) that have no way to carry an implicit WM& to a member.
+ * Declared this early because the deleter structs right below need
+ * dpy/screen, and dpy_owner needs XCloseDisplayDeleter -- ordinary
+ * "must be declared before first use" rules, same as anywhere else in
+ * C++; being members of one class doesn't exempt these from that when
+ * the use is in an unrelated free struct's method, not another member of
+ * the same class. */
 static int screen;
-static int sw, sh; /* X display screen geometry width, height */
-static int bh;     /* bar height */
-static int vbarw;  /* left/right dock bar width -- set alongside bh in setup() */
-static int lrpad;  /* sum of left and right padding for text */
-/* Pixels drawbar() reserves for the clock at the far right of the top bar,
- * past the systray -- updatesystray() shifts the tray left by this much so
- * the two never overlap. Set in drawbar() just before it calls
- * updatesystray(); 0 on any monitor that isn't selmon (no clock drawn there). */
-static int clock_reserved_w = 0;
-
-/* {{{ calendar popup globals */
-static Window calendar_win = None;
-static int calendar_visible = 0;
-static Monitor *calendar_mon = NULL;
-static int calendar_month = 0; /* 0-11, currently displayed */
-static int calendar_year = 0;  /* e.g. 2026 */
-static int calendar_w;         /* 7 columns wide; set to 7*bh in setup() */
-/* }}} calendar popup globals */
 static int (*xerrorxlib)(Display *, XErrorEvent *);
-static unsigned int numlockmask = 0;
-static const std::array<void (*)(XEvent *), LASTEvent> handler =
-    make_handler_table();
-static Atom wmatom[WMLast], netatom[NetLast];
-static Atom xatom[XLast];
-static int running = 1;
-static int restart_requested = 0;
+
 /* Smart-pointer ownership for the handful of process-lifetime C-API
  * singletons below: each is a single-owner resource passed by raw pointer
  * into hundreds of Xlib/Xft/Lua call sites throughout this file. Rather than
@@ -1638,6 +1175,7 @@ struct XCloseDisplayDeleter {
     }
   }
 };
+
 static std::unique_ptr<Display, XCloseDisplayDeleter> dpy_owner;
 static Display *dpy;
 
@@ -1648,8 +1186,6 @@ struct DrwFreeDeleter {
     }
   }
 };
-static std::unique_ptr<Drw, DrwFreeDeleter> drw_owner;
-static Drw *drw;
 
 /* Cur has no non-trivial members, so it's still safe to allocate with
  * ecalloc_type and free with free() -- see FreeDeleter's doc comment. */
@@ -1661,7 +1197,6 @@ struct CurFreeDeleter {
     }
   }
 };
-static std::array<std::unique_ptr<Cur, CurFreeDeleter>, CurLast> cursor;
 
 /* scheme is Clr**: one XftColor[3] array per color scheme. Each XftColor
  * holds a server-side pixel allocation from XftColorAllocName that must be
@@ -1685,8 +1220,6 @@ struct SchemeFreeDeleter {
     free(s);
   }
 };
-static std::unique_ptr<Clr *, SchemeFreeDeleter> scheme_owner;
-static Clr **scheme;
 
 struct LuaCloseDeleter {
   void operator()(lua_State *L) const {
@@ -1695,46 +1228,6 @@ struct LuaCloseDeleter {
     }
   }
 };
-static std::unique_ptr<lua_State, LuaCloseDeleter> command_lua_owner;
-static lua_State *command_lua;
-
-static std::unique_ptr<Monitor> mons;
-static Monitor *selmon;
-static std::unique_ptr<Systray> systray;
-/* The one designated scratchpad client, if any -- see scratchpad_toggle().
- * Cleared by unmanage() when this client is closed, so it never dangles. */
-static Client *scratchpad_client = NULL;
-static const char scratchpad_workspace[] = "scratch";
-static BarThemeConfig bar_theme_dark;
-static BarThemeConfig bar_theme_light;
-static enum ThemeMode theme_mode = ThemeModeSystem;
-static int theme_resolved_dark = 1;
-/* -1 means "no named theme picked -- just following theme_mode's plain
- * dark/light/system default"; otherwise an index into color_themes[] whose
- * colors were copied into both bar_theme_dark and bar_theme_light (a named
- * theme is one complete look, not a dark/light pair) by color_theme_apply(). */
-static int active_color_theme = -1;
-static LuaWidget lua_widgets[MAX_LUA_WIDGETS];
-static size_t lua_widgets_len = 0;
-static LuaKey lua_keys[MAX_LUA_KEYS];
-static size_t lua_keys_len = 0;
-static LuaRule lua_rules[MAX_LUA_RULES];
-static size_t lua_rules_len = 0;
-static LuaButton lua_buttons[MAX_LUA_BUTTONS];
-static size_t lua_buttons_len = 0;
-static LuaLayout lua_layouts[MAX_LUA_LAYOUTS];
-static size_t lua_layouts_len = 0;
-/* Layout* handles for the Lua layouts above, so setlayout()/m->lt[] can
- * point at something -- one static entry per lua_layouts[] slot, each
- * carrying its index via Layout.lua_index. */
-static Layout lua_layout_entries[MAX_LUA_LAYOUTS];
-static char terminal_cmd[64] = "kitty";
-
-/* {{{ notification sidebar globals */
-static std::unique_ptr<Notification> notifications;
-static unsigned int notification_next_id = 1;
-static size_t notification_count = 0;
-static size_t notification_unread = 0;
 
 struct DBusConnDeleter {
   void operator()(DBusConnection *c) const {
@@ -1744,2118 +1237,874 @@ struct DBusConnDeleter {
     }
   }
 };
-static std::unique_ptr<DBusConnection, DBusConnDeleter> notif_dbus_conn_owner;
-static DBusConnection *notif_dbus_conn = NULL;
-static int notif_dbus_owned = 0;
+// }}} irreducible free globals
 
-static Window notif_sidebar_win = None;
-static Monitor *notif_sidebar_mon = NULL;
-static int notif_sidebar_visible = 0;
-static enum SidebarAnim notif_anim_state = SidebarAnimIdle;
-static struct timeval notif_anim_start;
-static int notif_anim_from_x = 0;
-static int notif_anim_to_x = 0;
-static int notif_sidebar_cur_x = 0;
-static int notif_scroll_offset = 0;
-static const int notif_sidebar_w = 360;
-static const int notif_anim_duration_ms = 220;
-static const int notif_row_pad = 12;
+typedef struct {
+  char target[128];
+  int percent;
+  double used_gb;
+  double total_gb;
+} InfoDiskMount;
 
-static NotifRowLayout notif_row_layout[MAX_NOTIFICATIONS];
-static size_t notif_row_layout_len = 0;
-static int notif_clear_x = 0, notif_clear_y = 0, notif_clear_w = 0, notif_clear_h = 0;
-/* }}} notification sidebar globals */
+typedef struct {
+  char mac[32];
+  char name[128];
+  int connected;
+} BtDevice;
 
-/* {{{ todo sidebar globals */
-static std::unique_ptr<Todo> todos;
-static unsigned int todo_next_id = 1;
-static size_t todo_count = 0;
-static size_t todo_incomplete = 0;
+typedef struct {
+  const char *name;
+  int is_light;
+  BarThemeConfig colors; /* {normal{fg,bg,border}, selected{fg,bg,border}} */
+} ColorTheme;
 
-static Window todo_sidebar_win = None;
-static Monitor *todo_sidebar_mon = NULL;
-static int todo_sidebar_visible = 0;
-static enum SidebarAnim todo_anim_state = SidebarAnimIdle;
-static struct timeval todo_anim_start;
-static int todo_anim_from_x = 0;
-static int todo_anim_to_x = 0;
-static int todo_sidebar_cur_x = 0;
-static int todo_scroll_offset = 0;
-static const int todo_sidebar_w = 360;
-static const int todo_anim_duration_ms = 220;
-static const int todo_row_pad = 12;
+// {{{ class WM
+class WM {
+public:
+void checkargs(int argc, char *argv[]);
+void checklocale(void);
+void checkx11(void);
+void applyrules(Client *c);
+int applysizehints(Client *c, int *x, int *y, int *w, int *h,
+                          int interact);
+void arrange(Monitor *m);
+void arrangemon(Monitor *m);
+void attach(Client *c);
+void attachstack(Client *c);
+void buttonpress(XEvent *e);
+void buttonrelease(XEvent *e);
+void checkotherwm(void);
+void cleanup(void);
+void cleanupmon(Monitor *mon);
+void clientmessage(XEvent *e);
+void configure(Client *c);
+void configurenotify(XEvent *e);
+void configurerequest(XEvent *e);
+std::unique_ptr<Monitor> createmon(void);
+void destroynotify(XEvent *e);
+void detach(Client *c);
+void detachstack(Client *c);
+Monitor *dirtomon(int dir);
+void draw_vdivider(int x, int y, int h);
+void draw_hdivider(int x, int y, int w);
+void drawbar(Monitor *m);
+void drawtasklist(Monitor *m, int x, int w, int boxs, int boxw);
+void drawbars(void);
+void drawwidgetbar(Monitor *m);
+void drawleftbar(Monitor *m);
+void drawrightbar(Monitor *m);
+int leftbar_handle_button(Monitor *m, XButtonPressedEvent *ev);
+int rightbar_handle_button(Monitor *m, XButtonPressedEvent *ev);
+void draw_slider_popup(void);
+void enternotify(XEvent *e);
+void expose(XEvent *e);
+void focus(Client *c);
+void focusin(XEvent *e);
+void focusdir(const Arg *arg);
+void focusmon(const Arg *arg);
+void focusstack(const Arg *arg);
+Atom getatomprop(Client *c, Atom prop);
+WorkspaceMask get_full_workspace_mask(void);
+void get_theme_config_path(char *buf, size_t size);
+void get_workspace_socket_path(char *buf, size_t size);
+unsigned int getsystraywidth(void);
+int getrootptr(int *x, int *y);
+long getstate(Window w);
+int gettextprop(Window w, Atom atom, char *text, unsigned int size);
+void grabbuttons(Client *c, int focused);
+void grabkeys(void);
+void incnmaster(const Arg *arg);
+void keypress(XEvent *e);
+void killclient(const Arg *arg);
+int load_config_from_lua(void);
+int load_theme_from_lua(void);
+void reset_lua_widgets(void);
+void widget_update_lua_widgets(void);
+void widget_lua_click(size_t index, int button);
+int lua_parse_mods(char **tokens, int count, unsigned int *mod_out);
+int lua_split_spec(char *buf, char **tokens, int max);
+int lua_parse_keybind(const char *spec, unsigned int *mod_out, KeySym *keysym_out);
+void lua_key_invoke(size_t index);
+void reset_lua_keys(void);
+void reset_lua_rules(void);
+int lua_parse_click_context(const char *name);
+int lua_parse_mousebind(const char *spec, unsigned int *mod_out, unsigned int *button_out);
+void lua_button_invoke(size_t index, const char *wsname);
+void reset_lua_buttons(void);
+void regrab_all_client_buttons(void);
+int lua_layout_index_by_symbol(const char *symbol);
+int lua_geom_field(lua_State *L, const char *field, int fallback);
+void lua_layout_arrange(Monitor *m, size_t layout_idx);
+void lua_layout_dispatch(Monitor *m);
+void reset_lua_layouts(void);
+int layout_is_lua(const Layout *lt);
+MonLayoutSnapshot *snapshot_lua_layouts(size_t *count_out);
+void restore_lua_layouts(MonLayoutSnapshot *snap, size_t count);
+size_t layout_total_count(void);
+const Layout *layout_at(size_t idx);
+void cycle_layout(int direction);
+void cyclelayout(const Arg *arg);
+unsigned int notification_add(const char *app_name, const char *summary,
+                                     const char *body, unsigned int replaces_id,
+                                     int expire_timeout_ms);
+void notification_remove(unsigned int id, unsigned int reason);
+void notification_clear_all(void);
+void notification_expire_check(void);
+void notif_dbus_init(void);
+void notif_dbus_try_acquire(void);
+void notif_dbus_shutdown(void);
+void notif_dbus_process(void);
+void notif_dbus_handle_message(DBusMessage *msg);
+void notif_dbus_handle_notify(DBusMessage *msg);
+void notif_dbus_handle_close_notification(DBusMessage *msg);
+void notif_dbus_handle_get_capabilities(DBusMessage *msg);
+void notif_dbus_handle_get_server_information(DBusMessage *msg);
+void notif_dbus_handle_introspect(DBusMessage *msg);
+void notif_dbus_emit_notification_closed(unsigned int id, unsigned int reason);
+void widget_format_notifications(char *buf, size_t size);
+size_t notif_wrap_body(const char *text, int max_width, char out[][256],
+                              size_t max_lines);
+void notif_format_relative_time(time_t t, char *buf, size_t size);
+int notif_sidebar_content_height(void);
+void notif_sidebar_position(Monitor *m);
+void draw_notif_sidebar(void);
+void notif_sidebar_open(Monitor *m);
+void notif_sidebar_close(void);
+void notif_sidebar_toggle(Monitor *m);
+void notif_sidebar_advance_animation(void);
+int notif_sidebar_handle_button(XButtonPressedEvent *ev);
+unsigned int todo_add(const char *text);
+void todo_remove(unsigned int id);
+void todo_toggle(unsigned int id);
+void todo_clear_completed(void);
+void todo_seed_fake(void);
+void widget_format_todos(char *buf, size_t size);
+int todo_sidebar_content_height(void);
+void todo_sidebar_position(Monitor *m);
+void draw_todo_sidebar(void);
+void todo_sidebar_open(Monitor *m);
+void todo_sidebar_close(void);
+void todo_sidebar_toggle(Monitor *m);
+void todo_sidebar_advance_animation(void);
+int todo_sidebar_handle_button(XButtonPressedEvent *ev);
+void get_agent_status_dir(char *buf, size_t size);
+void agents_refresh(void);
+void agents_free_list(void);
+unsigned int agent_row_id(const char *kind, const char *cwd);
+pid_t proc_ppid(pid_t pid);
+pid_t client_get_pid(Window w);
+Client *client_for_pid(pid_t target);
+void client_reveal(Client *c);
+void agent_jump_to(const AgentStatus *a);
+void agent_jump_next_needs_input(const Arg *arg);
+void widget_format_agents(char *buf, size_t size);
+int agent_sidebar_content_height(void);
+void agent_sidebar_position(Monitor *m);
+void draw_agent_sidebar(void);
+void agent_sidebar_open(Monitor *m);
+void agent_sidebar_close(void);
+void agent_sidebar_toggle(Monitor *m);
+void agent_sidebar_advance_animation(void);
+int agent_sidebar_handle_button(XButtonPressedEvent *ev);
+void launcher_scan_apps(void);
+void get_projects_state_path(char *buf, size_t size);
+void projects_load(void);
+void projects_save(void);
+void projects_ensure_loaded(void);
+void project_expand_path(const char *raw, char *out, size_t outsz);
+int projects_add(const char *raw_path);
+void projects_remove_index(size_t idx);
+void projects_move_to_front(size_t idx);
+void project_collapse_home(const char *path, char *out, size_t outsz);
+int project_has_running_agent(const char *path);
+void project_basename(const char *path, char *out, size_t outsz);
+void project_workspace_name(int n, char *out, size_t outsz);
+int project_find_for_path(const char *path);
+void project_label_for_path(const char *path, char *out, size_t outsz);
+int project_index_for_workspace_name(const char *wsname);
+void project_switch_workspace(Monitor *m, const char *path);
+void project_set_active(const char *path);
+void project_init_default(void);
+int project_resolve_selected_path(char *out, size_t outsz);
+void project_launch(int with_agent);
+void project_filter(void);
+void project_ensure_sel_visible(void);
+void project_move_sel(int delta);
+int project_total_h(void);
+void project_position(Monitor *m);
+void project_draw(void);
+void project_open(Monitor *m, enum PickerMode mode);
+void project_close(void);
+void project_toggle(Monitor *m, enum PickerMode mode);
+void project_toggle_key(const Arg *arg);
+void project_submit(void);
+void project_submit_agent(void);
+void project_remove_selected(void);
+int project_handle_keypress(XKeyEvent *ev);
+int project_handle_button(XButtonPressedEvent *ev);
+void keybind_help_mod_string(unsigned int mod, char *out, size_t outsz);
+void keybind_help_key_string(KeySym keysym, char *out, size_t outsz);
+size_t keybind_help_collect(KeybindHelpEntry *out, size_t cap);
+void keybind_help_open(Monitor *m);
+void keybind_help_close(void);
+void keybind_help_toggle(Monitor *m);
+void keybind_help_toggle_key(const Arg *arg);
+void keybind_help_draw(void);
+int keybind_help_handle_keypress(XKeyEvent *ev);
+int keybind_help_handle_button(XButtonPressedEvent *ev);
+void wifi_job_reset(void);
+int wifi_job_start(enum WifiJobKind kind, char *const argv[], int capture_stderr);
+void wifi_job_poll(void);
+int nmcli_split_line(char *line, char *fields[], int max);
+void wifi_parse_scan_output(char *buf);
+void wifi_start_scan(void);
+void wifi_start_connect(const char *ssid, const char *password);
+int wifi_popup_total_h(void);
+void wifi_popup_position(Monitor *m);
+void wifi_popup_draw(void);
+void wifi_popup_open(Monitor *m);
+void wifi_popup_close(void);
+void wifi_popup_toggle(Monitor *m);
+int wifi_handle_keypress(XKeyEvent *ev);
+int wifi_handle_button(XButtonPressedEvent *ev);
+enum WidgetId info_popup_widget_id(enum InfoPopupKind kind);
+int info_popup_total_h(void);
+void info_popup_position(Monitor *m);
+void draw_info_popup(void);
+void info_popup_open(Monitor *m, enum InfoPopupKind kind);
+void info_popup_close(void);
+void info_popup_toggle(Monitor *m, enum InfoPopupKind kind);
+int info_popup_handle_button(XButtonPressedEvent *ev);
+void widget_select_kblayout(int index);
+void bt_popup_refresh(void);
+int bt_popup_total_h(void);
+void bt_popup_position(Monitor *m);
+void bt_popup_draw(void);
+void bt_popup_open(Monitor *m);
+void bt_popup_close(void);
+void bt_popup_toggle(Monitor *m);
+int bt_handle_button(XButtonPressedEvent *ev);
+void get_desktop_dir(char *buf, size_t size);
+void get_trash_files_dir(char *buf, size_t size);
+void get_trash_info_dir(char *buf, size_t size);
+void get_desktop_layout_path(char *buf, size_t size);
+void desktop_layout_save(void);
+const char *desktop_icon_glyph(const DesktopIcon *icon);
+void get_trash_base_dir(char *buf, size_t size);
+void desktop_next_free_cell(const DesktopIcon *icons, size_t icons_len, int *out_x,
+                                   int *out_y);
+void desktop_url_decode(const char *in, char *out, size_t outsz);
+void desktop_rescan(void);
+void desktop_draw(void);
+int desktop_hit_test(int x, int y);
+void desktop_open_icon(const DesktopIcon *icon);
+void desktop_trash_icon(size_t index);
+void desktop_dragmouse(size_t index);
+int desktop_handle_button(XButtonPressedEvent *ev);
+void desktop_setup(void);
+int desktop_copy_regular_file(const char *src, const char *dst, mode_t mode);
+int desktop_copy_path_recursive(const char *src, const char *dst);
+void desktop_xdnd_enter(XClientMessageEvent *cme);
+void desktop_xdnd_position(XClientMessageEvent *cme);
+void desktop_xdnd_leave(XClientMessageEvent *cme);
+void desktop_xdnd_drop(XClientMessageEvent *cme);
+void desktop_xdnd_selection_notify(XSelectionEvent *sev);
+int desktop_xdnd_import_uri_list(const char *data, int drop_x, int drop_y);
+void selectionnotify(XEvent *e);
+void manage(Window w, XWindowAttributes *wa);
+void mappingnotify(XEvent *e);
+void maprequest(XEvent *e);
+void monocle(Monitor *m);
+void motionnotify(XEvent *e);
+void movemouse(const Arg *arg);
+Client *nexttiled(Client *c);
+void pop(Client *c);
+void promptcommand(const Arg *arg);
+void propertynotify(XEvent *e);
+void quit(const Arg *arg);
+Monitor *recttomon(int x, int y, int w, int h);
+int read_long_from_file(const char *path, long *value);
+void removesystrayicon(Client *i);
+void resize(Client *c, int x, int y, int w, int h, int interact);
+void resize_cell(Client *c, int x, int y, int w, int h, int interact);
+void resizebydir(const Arg *arg);
+void resizeclient(Client *c, int x, int y, int w, int h);
+void resizemouse(const Arg *arg);
+void reloadconfig(const Arg *arg);
+void restartwm(const Arg *arg);
+void restack(Monitor *m);
+void run(void);
+void scan(void);
+int sendevent(Client *c, Atom proto);
+void sendmon(Client *c, Monitor *m);
+int client_is_managed(Client *target);
+void scratchpad_hide(Client *c);
+void scratchpad_show(Client *c, Monitor *m);
+void scratchpad_set(const Arg *arg);
+void scratchpad_toggle(const Arg *arg);
+void setclientstate(Client *c, long state);
+void setcolorscheme(void);
+void set_default_bar_theme(void);
+void setfocus(Client *c);
+void setfullscreen(Client *c, int fullscreen);
+void setlayout(const Arg *arg);
+void setmfact(const Arg *arg);
+void setup(void);
+void seturgent(Client *c, int urg);
+void showhide(Client *c);
+void spawn(const Arg *arg);
+void tag(const Arg *arg);
+void tasklist_focus(const Arg *arg);
+void tagmon(const Arg *arg);
+unsigned int tiledcount(Monitor *m);
+void tile(Monitor *m);
+void togglebar(const Arg *arg);
+void togglefloating(const Arg *arg);
+void toggletag(const Arg *arg);
+void toggleview(const Arg *arg);
+void toggletagnth(const Arg *arg);
+void toggleviewnth(const Arg *arg);
+void unfocus(Client *c, int setfocus);
+void unmanage(Client *c, int destroyed);
+void unmapnotify(XEvent *e);
+void updatebarpos(Monitor *m);
+void updatebars(void);
+void updateclientlist(void);
+int updategeom(void);
+void updatenumlockmask(void);
+void updatewidgets(void);
+void updatesystray(void);
+void updatesystrayicongeom(Client *i, int w, int h);
+void updatesystrayiconstate(Client *i);
+void updatesizehints(Client *c);
+void updatestatus(void);
+void updatetitle(Client *c);
+void updatewindowtype(Client *c);
+void updatewmhints(Client *c);
+void widget_close_slider_popup(void);
+void widget_init_paths(void);
+void widget_update_backlight(void);
+void widget_format_backlight(char *buf, size_t size);
+void widget_format_battery(char *buf, size_t size);
+void widget_format_clock(char *buf, size_t size);
+int calendar_days_in_month(int year, int month);
+int calendar_first_weekday(int year, int month);
+void calendar_open(Monitor *m);
+void calendar_close(void);
+void calendar_toggle(Monitor *m);
+void calendar_toggle_key(const Arg *arg);
+void calendar_shift_month(int delta);
+void calendar_position(Monitor *m);
+int calendar_total_h(void);
+void calendar_draw(void);
+int calendar_handle_keypress(XKeyEvent *ev);
+int calendar_handle_button(XButtonPressedEvent *ev);
+void widget_format_cpu(char *buf, size_t size);
+void widget_format_disk(char *buf, size_t size);
+void widget_format_mem(char *buf, size_t size);
+void widget_format_net(char *buf, size_t size);
+void widget_format_wifi(char *buf, size_t size);
+void widget_format_bluetooth(char *buf, size_t size);
+void widget_format_volume(char *buf, size_t size);
+void widget_format_mic(char *buf, size_t size);
+void widget_format_load(char *buf, size_t size);
+void widget_format_git(char *buf, size_t size);
+int run_capture_argv(const char *cwd, char *const argv[], char *out, size_t outsz,
+                            int timeout_ms);
+void widget_amixer_read(const char *control, int *percent, int *muted);
+void widget_update_mic(void);
+void widget_toggle_mic_mute(void);
+void widget_update_load(void);
+long widget_ncpu(void);
+void widget_update_git(void);
+void widget_git_open_terminal(void);
+void widget_format_net_rate(double kbps, char *buf, size_t size);
+void widget_format_media(char *buf, size_t size);
+void widget_update_media(void);
+void widget_media_play_pause(void);
+void widget_media_next(void);
+void widget_media_previous(void);
+void widget_format_kblayout(char *buf, size_t size);
+void widget_refresh_kblayout_list(void);
+void widget_update_kblayout(void);
+void widget_cycle_kblayout(void);
+int widget_handle_button(Monitor *m, XButtonPressedEvent *ev);
+int widget_hit(enum WidgetId id, int x);
+void widget_open_slider_popup(Monitor *m, enum SliderWidget kind);
+void widget_position_slider_popup(Monitor *m);
+int slider_popup_handle_button(XButtonPressedEvent *ev);
+int slider_popup_handle_motion(XMotionEvent *ev);
+int widget_slider_current_percent(enum SliderWidget kind);
+void widget_slider_label(enum SliderWidget kind, char *buf, size_t size);
+void widget_slider_set_absolute(enum SliderWidget kind, int percent);
+void widget_set_backlight_percent_absolute(int percent);
+int widget_set_backlight_percent(int delta_percent);
+void run_detached_shell(const char *cmd);
+void widget_set_volume_percent_absolute(int percent);
+int widget_set_volume_percent(int delta_percent);
+void widget_toggle_volume_mute(void);
+void widget_set_mic_percent_absolute(int percent);
+int widget_set_mic_percent(int delta_percent);
+enum WidgetId widget_slider_anchor_id(enum SliderWidget kind);
+void widget_update_cpu(void);
+void widget_update_disk(void);
+void widget_update_mem(void);
+void widget_update_net(void);
+void widget_update_wifi(void);
+void widget_update_bluetooth(void);
+int widget_rfkill_blocked(const char *type_name);
+void widget_update_volume(void);
+void widget_update_theme(void);
+void widget_format_theme(char *buf, size_t size);
+void widget_cycle_theme_mode(int direction);
+const BarThemeConfig *active_bar_theme(void);
+int theme_resolve_prefers_dark(void);
+int system_prefers_dark(void);
+void widget_apply_theme(void);
+void widget_refresh_client_borders(void);
+void get_theme_state_path(char *buf, size_t size);
+void load_theme_mode_state(void);
+void save_theme_mode_state(void);
+int color_theme_find_by_name(const char *name);
+void color_theme_apply(size_t idx);
+void view(const Arg *arg);
+void viewnth(const Arg *arg);
+void tagnth(const Arg *arg);
+Client *wintoclient(Window w);
+Client *wintosystrayicon(Window w);
+Workspace *workspace_by_index(size_t index);
+size_t workspace_ensure(const char *name);
+size_t workspace_find(const char *name);
+size_t focus_workspace_by_name(Monitor *m, const char *name);
+int workspace_has_clients(size_t index);
+size_t workspace_index_from_mask(WorkspaceMask mask);
+int workspace_is_visible_on_any_monitor(size_t index);
+WorkspaceMask workspace_mask_from_index(size_t index);
+WorkspaceMask workspace_reindex_mask_after_remove(WorkspaceMask mask,
+                                                         size_t removed_index);
+int workspace_remove_index(size_t index);
+const char *workspace_name_from_mask(WorkspaceMask mask);
+int workspace_rename(size_t index, const char *name);
+void workspace_set_defaults(void);
+int workspace_set_list_from_lua(lua_State *L, int index);
+void workspace_sync_after_registry_change(void);
+void workspace_view_mask(Monitor *m, WorkspaceMask mask);
+int wm_command_handle_client(int fd);
+int wm_command_server_init(void);
+void wm_command_server_shutdown(void);
+int wm_eval_lua_buffer(const char *chunk, size_t len, int fd);
+void client_save_workspace_tags(const Client *c);
+int client_restore_workspace_tags(Window w, WorkspaceMask *tags);
+static std::array<void (WM::*)(XEvent *), LASTEvent> make_handler_table(void);
+Monitor *wintomon(Window w);
+void zoom(const Arg *arg);
+unsigned int numlockmask = 0;
+const std::array<void (WM::*)(XEvent *), LASTEvent> handler =
+    make_handler_table();
+int widget_git_int_after(const char *s, const char *marker);
+const char *os_logo_glyph(void);
+const char *layout_symbol_glyph(const char *ltsymbol);
+Atom workspace_tags_atom(void);
+char *xstrdup_local(const char *src);
+void write_all(int fd, const char *buf, size_t len);
+void wm_output_append(const char *buf, size_t len);
+void copy_color_value(char dest[32], const char *src);
+void freecolorscheme(void);
+void lua_read_colorset(lua_State *L, int index, ColorSetConfig *config);
+size_t lua_workspace_index_arg(lua_State *L, int arg_index);
+int agent_json_field(const char *json, const char *field, char *out,
+                            size_t out_size);
+long agent_json_number(const char *json, const char *field);
+unsigned int agent_hash_id(const char *s);
+AgentStatus *agent_list_find(AgentStatus *head, const char *kind,
+                                    const char *cwd);
+static bool launcher_app_less(const std::string &sa, const std::string &sb);
+int launcher_app_exists(const char *name);
+void launcher_app_add(const char *name);
+WorkspaceMask project_workspace_slot_mask(int n);
+int project_fuzzy_score(const char *needle, size_t needle_len, const char *hay);
+int info_disk_fstype_real(const char *fstype);
+void info_disk_refresh(void);
+void info_mem_refresh(void);
+void info_net_ip(char *buf, size_t size);
+double info_battery_hours_remaining(void);
+void draw_info_bar(int x, int y, int w, int percent);
+int info_popup_center_lpad(const char *s, int cellw);
+int desktop_ext_matches(const char *ext, const char *want_lower);
+void lua_register_mwm_api(lua_State *L);
+int dockbar_icon_lpad(const char *icon);
+int dockbar_row_at(int y, size_t nrows);
+void command_prompt_stop(void);
+void command_prompt_submit(void);
+int handle_command_prompt_keypress(XKeyEvent *ev);
+int isuniquegeom(XineramaScreenInfo *unique, size_t n,
+                        XineramaScreenInfo *info);
 
-static TodoRowLayout todo_row_layout[MAX_TODOS];
-static size_t todo_row_layout_len = 0;
-static int todo_clear_x = 0, todo_clear_y = 0, todo_clear_w = 0, todo_clear_h = 0;
-/* }}} todo sidebar globals */
-
-/* {{{ agent sidebar globals */
-static std::unique_ptr<AgentStatus> agents;
-static size_t agent_count = 0;
-static size_t agent_needs_input = 0;
-static time_t agents_last_refresh = 0;
-static char agent_status_dir[PATH_MAX];
-
-static Window agent_sidebar_win = None;
-static Monitor *agent_sidebar_mon = NULL;
-static int agent_sidebar_visible = 0;
-static enum SidebarAnim agent_anim_state = SidebarAnimIdle;
-static struct timeval agent_anim_start;
-static int agent_anim_from_x = 0;
-static int agent_anim_to_x = 0;
-static int agent_sidebar_cur_x = 0;
-static int agent_scroll_offset = 0;
-static const int agent_sidebar_w = 360;
-static const int agent_anim_duration_ms = 220;
-static const int agent_row_pad = 12;
-
-static AgentRowLayout agent_row_layout[MAX_AGENTS];
-static size_t agent_row_layout_len = 0;
-static int agent_clear_x = 0, agent_clear_y = 0, agent_clear_w = 0, agent_clear_h = 0;
-static unsigned int agent_last_jumped_id = 0;
-/* }}} agent sidebar globals */
-
-/* {{{ launcher globals */
-/* The picker window itself is now project_*'s (see below) -- this is just
- * the $PATH-scanned app index it searches alongside saved projects, plus
- * the bar button that opens it. */
-static std::vector<std::string> launcher_apps;
-static int launcher_btn_x = 0;
-static int launcher_btn_w = 0;
-/* }}} launcher globals */
-
-/* {{{ project picker globals */
-static std::vector<std::string> projects;
-static int projects_loaded = 0;
-/* The project shown in drawbar()'s top-left corner -- independent of
- * whichever workspace/tag happens to be in view, so it doesn't disappear
- * just because you've switched to a plain numbered workspace. Always
- * non-empty: set to $HOME at every startup (see project_init_default() in
- * setup()) and updated whenever the picker or mwm.switch_project() actually
- * switches projects (project_set_active()). Deliberately not persisted --
- * every session starts on "default" again, per the user's request. */
-static char active_project_path[PATH_MAX] = "";
-
-static Window project_win = None;
-static Monitor *project_mon = NULL;
-static int project_visible = 0;
-static enum PickerMode project_mode = PickerModeCombined;
-static char project_query[PICKER_QUERY_MAX];
-static size_t project_query_len = 0;
-static ProjectMatch project_filtered[MAX_PICK_CANDIDATES];
-static size_t project_filtered_len = 0;
-static int project_sel = 0;
-static size_t project_scroll = 0; /* index of the first visible row */
-static const int project_w = 560;
-static ProjectRowLayout project_row_layout[PROJECT_MAX_RESULTS];
-static char agent_launch_command[64] = "claude";
-/* }}} project picker globals */
-
-/* {{{ keybinding help globals */
-static Window keybind_help_win = None;
-static int keybind_help_visible = 0;
-static Monitor *keybind_help_mon = NULL;
-/* }}} keybinding help globals */
-
-/* {{{ desktop icons globals */
-static Atom xdndatom[XdndLast];
-static Window deskwin = None;
-static DesktopIcon desktop_icons[MAX_DESKTOP_ICONS];
-static size_t desktop_icons_len = 0;
-
-static const int desktop_cell_w = 90;
-static const int desktop_cell_h = 86;
-static const int desktop_glyph_h = 40;
-static const int desktop_margin = 12;
-
-static int desktop_drag_active = 0;
-static size_t desktop_drag_index = 0;
-static int desktop_drag_x = 0;
-static int desktop_drag_y = 0;
-
-static struct timeval desktop_last_click_time;
-static int desktop_last_click_index = -1;
-
-/* xdnd target-side drag-in state */
-static Window xdnd_source = None;
-static int xdnd_version = 0;
-static Atom xdnd_desired_type = None;
-static int xdnd_last_x = 0, xdnd_last_y = 0;
-static Window xdnd_pending_source = None;
-/* }}} desktop icons globals */
-
-static std::vector<Workspace> workspaces;
-static Window root, wmcheckwin;
-static int command_prompt_active = 0;
-static char command_prompt[1024];
-static size_t command_prompt_len;
-static char command_prompt_feedback[1024];
-static int wm_command_fd = -1;
-static int wm_command_reply_fd = -1;
-static char *wm_capture_buffer = NULL;
-static size_t wm_capture_buffer_size = 0;
-static size_t wm_capture_buffer_len = 0;
-static char wm_socket_path[sizeof(((struct sockaddr_un *)0)->sun_path)];
-static char **saved_argv;
-static char backlight_dir[PATH_MAX];
-static char backlight_brightness_path[PATH_MAX];
-static char backlight_max_path[PATH_MAX];
-static char battery_capacity_path[PATH_MAX];
-static char battery_status_path[PATH_MAX];
-static int backlight_percent = -1;
-static int battery_percent = -1;
-static int battery_charging = 0;
-static int volume_percent = -1;
-static int volume_muted = 0;
-static int mic_percent = -1;
-static int mic_muted = 0;
-static char mic_control[16] = "Capture";
-static int mic_control_resolved = 0;
-static unsigned long mic_next_probe_tick = 0;
-static double load_avg1 = -1.0;
-static char git_project_path[PATH_MAX];
-static char git_branch[64];
-static int git_dirty = 0;
-static int git_ahead = 0;
-static int git_behind = 0;
-static int git_valid = 0;
-static char git_last_project_path[PATH_MAX];
-static unsigned long git_next_tick = 0;
-static char media_status[16];
-static char media_title[192];
-#define KB_LAYOUT_MAX 8
-static char kb_layout[16];
-static char kb_layout_names[KB_LAYOUT_MAX][16];
-static int kb_layout_count = 0;
-static unsigned long kb_layout_list_next_tick = 0;
-static long cpu_prev_total = -1;
-static long cpu_prev_idle = -1;
-static int cpu_percent = -1;
-static int mem_percent = -1;
-static int disk_percent = -1;
-static char net_iface[64];
-static int net_up = 0;
-static char net_last_iface[64];
-static long net_prev_rx = -1;
-static long net_prev_tx = -1;
-static time_t net_prev_time = 0;
-static double net_rx_kbps = 0;
-static double net_tx_kbps = 0;
-static char wifi_iface[64];
-static int wifi_blocked = 0;
-static int wifi_up = 0;
-static int wifi_quality = -1; /* 0-70 per /proc/net/wireless, -1 = unknown */
-static char wifi_ssid[128];
-
-/* {{{ wifi popup globals */
-static const int wifi_popup_w = 320;
-static Window wifi_win = None;
-static int wifi_visible = 0;
-static Monitor *wifi_mon = NULL;
-static WifiNetwork wifi_networks[MAX_WIFI_NETWORKS];
-static size_t wifi_networks_len = 0;
-static int wifi_sel = 0;
-static int wifi_scanning = 0;
-static int wifi_connecting = 0;
-static char wifi_connecting_ssid[128] = "";
-static char wifi_status_msg[192] = "";
-
-static int wifi_password_mode = 0;
-static char wifi_password_ssid[128] = "";
-static char wifi_password_query[128] = "";
-static size_t wifi_password_query_len = 0;
-
-static enum WifiJobKind wifi_job_kind = WifiJobNone;
-static pid_t wifi_job_pid = -1;
-static int wifi_job_fd = -1;
-static int wifi_job_capture_stderr = 0;
-static char wifi_job_buf[8192];
-static size_t wifi_job_buf_len = 0;
-/* }}} wifi popup globals */
-
-static int bt_blocked = 0;
-static int bt_connected_count = 0;
-static char bt_first_device[128];
-static time_t widgets_last_refresh = 0;
-/* Incremented once per updatewidgets() call (~every 2s); lets individual
- * widgets throttle expensive work to less than every tick without each one
- * tracking its own wall-clock timer. */
-static unsigned long widget_tick = 0;
-static WidgetLayout widget_layout[WidgetCount];
-/* WidgetClock is deliberately absent -- it's drawn directly in drawbar()
- * instead, at the far right of the top bar past the systray, rather than
- * among these in the bottom widget bar. */
-/* WidgetNotif/WidgetTodo/WidgetAgents are deliberately absent -- those three
- * sidebar toggles live on the right dock bar now (see drawrightbar()),
- * not among these in the bottom widget bar. WidgetClock is likewise absent,
- * drawn instead at the far right of the top bar (see drawbar()). */
-static const enum WidgetId widget_draw_order[] = {
+static inline const char broken[] = "broken";
+char stext[256];
+int sw, sh; /* X display screen geometry width, height */
+int bh;     /* bar height */
+int vbarw;  /* left/right dock bar width -- set alongside bh in setup() */
+int lrpad;  /* sum of left and right padding for text */
+int clock_reserved_w = 0;
+Window calendar_win = None;
+int calendar_visible = 0;
+Monitor *calendar_mon = NULL;
+int calendar_month = 0; /* 0-11, currently displayed */
+int calendar_year = 0;  /* e.g. 2026 */
+int calendar_w;         /* 7 columns wide; set to 7*bh in setup() */
+Atom wmatom[WMLast], netatom[NetLast];
+Atom xatom[XLast];
+int running = 1;
+int restart_requested = 0;
+std::unique_ptr<Drw, DrwFreeDeleter> drw_owner;
+Drw *drw;
+std::array<std::unique_ptr<Cur, CurFreeDeleter>, CurLast> cursor;
+std::unique_ptr<Clr *, SchemeFreeDeleter> scheme_owner;
+Clr **scheme;
+std::unique_ptr<lua_State, LuaCloseDeleter> command_lua_owner;
+lua_State *command_lua;
+std::unique_ptr<Monitor> mons;
+Monitor *selmon;
+std::unique_ptr<Systray> systray;
+Client *scratchpad_client = NULL;
+static inline const char scratchpad_workspace[] = "scratch";
+BarThemeConfig bar_theme_dark;
+BarThemeConfig bar_theme_light;
+enum ThemeMode theme_mode = ThemeModeSystem;
+int theme_resolved_dark = 1;
+int active_color_theme = -1;
+LuaWidget lua_widgets[MAX_LUA_WIDGETS];
+size_t lua_widgets_len = 0;
+LuaKey lua_keys[MAX_LUA_KEYS];
+size_t lua_keys_len = 0;
+LuaRule lua_rules[MAX_LUA_RULES];
+size_t lua_rules_len = 0;
+LuaButton lua_buttons[MAX_LUA_BUTTONS];
+size_t lua_buttons_len = 0;
+LuaLayout lua_layouts[MAX_LUA_LAYOUTS];
+size_t lua_layouts_len = 0;
+Layout lua_layout_entries[MAX_LUA_LAYOUTS];
+static inline char terminal_cmd[64] = "kitty";
+std::unique_ptr<Notification> notifications;
+unsigned int notification_next_id = 1;
+size_t notification_count = 0;
+size_t notification_unread = 0;
+std::unique_ptr<DBusConnection, DBusConnDeleter> notif_dbus_conn_owner;
+DBusConnection *notif_dbus_conn = NULL;
+int notif_dbus_owned = 0;
+Window notif_sidebar_win = None;
+Monitor *notif_sidebar_mon = NULL;
+int notif_sidebar_visible = 0;
+enum SidebarAnim notif_anim_state = SidebarAnimIdle;
+struct timeval notif_anim_start;
+int notif_anim_from_x = 0;
+int notif_anim_to_x = 0;
+int notif_sidebar_cur_x = 0;
+int notif_scroll_offset = 0;
+const int notif_sidebar_w = 360;
+const int notif_anim_duration_ms = 220;
+const int notif_row_pad = 12;
+NotifRowLayout notif_row_layout[MAX_NOTIFICATIONS];
+size_t notif_row_layout_len = 0;
+int notif_clear_x = 0, notif_clear_y = 0, notif_clear_w = 0, notif_clear_h = 0;
+std::unique_ptr<Todo> todos;
+unsigned int todo_next_id = 1;
+size_t todo_count = 0;
+size_t todo_incomplete = 0;
+Window todo_sidebar_win = None;
+Monitor *todo_sidebar_mon = NULL;
+int todo_sidebar_visible = 0;
+enum SidebarAnim todo_anim_state = SidebarAnimIdle;
+struct timeval todo_anim_start;
+int todo_anim_from_x = 0;
+int todo_anim_to_x = 0;
+int todo_sidebar_cur_x = 0;
+int todo_scroll_offset = 0;
+const int todo_sidebar_w = 360;
+const int todo_anim_duration_ms = 220;
+const int todo_row_pad = 12;
+TodoRowLayout todo_row_layout[MAX_TODOS];
+size_t todo_row_layout_len = 0;
+int todo_clear_x = 0, todo_clear_y = 0, todo_clear_w = 0, todo_clear_h = 0;
+std::unique_ptr<AgentStatus> agents;
+size_t agent_count = 0;
+size_t agent_needs_input = 0;
+time_t agents_last_refresh = 0;
+char agent_status_dir[PATH_MAX];
+Window agent_sidebar_win = None;
+Monitor *agent_sidebar_mon = NULL;
+int agent_sidebar_visible = 0;
+enum SidebarAnim agent_anim_state = SidebarAnimIdle;
+struct timeval agent_anim_start;
+int agent_anim_from_x = 0;
+int agent_anim_to_x = 0;
+int agent_sidebar_cur_x = 0;
+int agent_scroll_offset = 0;
+const int agent_sidebar_w = 360;
+const int agent_anim_duration_ms = 220;
+const int agent_row_pad = 12;
+AgentRowLayout agent_row_layout[MAX_AGENTS];
+size_t agent_row_layout_len = 0;
+int agent_clear_x = 0, agent_clear_y = 0, agent_clear_w = 0, agent_clear_h = 0;
+unsigned int agent_last_jumped_id = 0;
+std::vector<std::string> launcher_apps;
+std::vector<std::string> projects;
+int projects_loaded = 0;
+char active_project_path[PATH_MAX] = "";
+Window project_win = None;
+Monitor *project_mon = NULL;
+int project_visible = 0;
+enum PickerMode project_mode = PickerModeCombined;
+char project_query[PICKER_QUERY_MAX];
+size_t project_query_len = 0;
+ProjectMatch project_filtered[MAX_PICK_CANDIDATES];
+size_t project_filtered_len = 0;
+int project_sel = 0;
+size_t project_scroll = 0; /* index of the first visible row */
+const int project_w = 560;
+ProjectRowLayout project_row_layout[PROJECT_MAX_RESULTS];
+char agent_launch_command[64] = "claude";
+Window keybind_help_win = None;
+int keybind_help_visible = 0;
+Monitor *keybind_help_mon = NULL;
+Atom xdndatom[XdndLast];
+Window deskwin = None;
+DesktopIcon desktop_icons[MAX_DESKTOP_ICONS];
+size_t desktop_icons_len = 0;
+const int desktop_cell_w = 90;
+const int desktop_cell_h = 86;
+const int desktop_glyph_h = 40;
+const int desktop_margin = 12;
+int desktop_drag_active = 0;
+size_t desktop_drag_index = 0;
+int desktop_drag_x = 0;
+int desktop_drag_y = 0;
+struct timeval desktop_last_click_time;
+int desktop_last_click_index = -1;
+Window xdnd_source = None;
+int xdnd_version = 0;
+Atom xdnd_desired_type = None;
+int xdnd_last_x = 0, xdnd_last_y = 0;
+Window xdnd_pending_source = None;
+std::vector<Workspace> workspaces;
+Window root, wmcheckwin;
+int command_prompt_active = 0;
+char command_prompt[1024];
+size_t command_prompt_len;
+char command_prompt_feedback[1024];
+int wm_command_fd = -1;
+int wm_command_reply_fd = -1;
+char *wm_capture_buffer = NULL;
+size_t wm_capture_buffer_size = 0;
+size_t wm_capture_buffer_len = 0;
+char wm_socket_path[sizeof(((struct sockaddr_un *)0)->sun_path)];
+char **saved_argv;
+char backlight_dir[PATH_MAX];
+char backlight_brightness_path[PATH_MAX];
+char backlight_max_path[PATH_MAX];
+char battery_dir[PATH_MAX];
+char battery_capacity_path[PATH_MAX];
+char battery_status_path[PATH_MAX];
+int backlight_percent = -1;
+int battery_percent = -1;
+int battery_charging = 0;
+int volume_percent = -1;
+int volume_muted = 0;
+int mic_percent = -1;
+int mic_muted = 0;
+char mic_control[16] = "Capture";
+int mic_control_resolved = 0;
+unsigned long mic_next_probe_tick = 0;
+double load_avg1 = -1.0;
+double load_avg5 = -1.0;
+double load_avg15 = -1.0;
+char git_project_path[PATH_MAX];
+char git_branch[64];
+int git_dirty = 0;
+int git_ahead = 0;
+int git_behind = 0;
+int git_valid = 0;
+char git_last_project_path[PATH_MAX];
+unsigned long git_next_tick = 0;
+char media_status[16];
+char media_title[192];
+char kb_layout[16];
+char kb_layout_names[KB_LAYOUT_MAX][16];
+int kb_layout_count = 0;
+unsigned long kb_layout_list_next_tick = 0;
+long cpu_prev_total = -1;
+long cpu_prev_idle = -1;
+int cpu_percent = -1;
+int mem_percent = -1;
+long info_mem_total_kb = -1;
+long info_mem_avail_kb = -1;
+long info_mem_swap_total_kb = -1;
+long info_mem_swap_free_kb = -1;
+int disk_percent = -1;
+char net_iface[64];
+int net_up = 0;
+char net_last_iface[64];
+long net_prev_rx = -1;
+long net_prev_tx = -1;
+time_t net_prev_time = 0;
+double net_rx_kbps = 0;
+double net_tx_kbps = 0;
+char wifi_iface[64];
+int wifi_blocked = 0;
+int wifi_up = 0;
+int wifi_quality = -1; /* 0-70 per /proc/net/wireless, -1 = unknown */
+char wifi_ssid[128];
+const int wifi_popup_w = 320;
+Window wifi_win = None;
+int wifi_visible = 0;
+Monitor *wifi_mon = NULL;
+WifiNetwork wifi_networks[MAX_WIFI_NETWORKS];
+size_t wifi_networks_len = 0;
+int wifi_sel = 0;
+int wifi_scanning = 0;
+int wifi_connecting = 0;
+char wifi_connecting_ssid[128] = "";
+char wifi_status_msg[192] = "";
+int wifi_password_mode = 0;
+char wifi_password_ssid[128] = "";
+char wifi_password_query[128] = "";
+size_t wifi_password_query_len = 0;
+enum WifiJobKind wifi_job_kind = WifiJobNone;
+pid_t wifi_job_pid = -1;
+int wifi_job_fd = -1;
+int wifi_job_capture_stderr = 0;
+char wifi_job_buf[8192];
+size_t wifi_job_buf_len = 0;
+const int info_popup_w = 280;
+Window info_popup_win = None;
+Monitor *info_popup_mon = NULL;
+int info_popup_visible = 0;
+enum InfoPopupKind info_popup_kind = InfoBattery;
+InfoDiskMount info_disk_mounts[INFO_DISK_MAX_MOUNTS];
+size_t info_disk_mounts_len = 0;
+const int bt_popup_w = 280;
+Window bt_win = None;
+int bt_visible = 0;
+Monitor *bt_mon = NULL;
+BtDevice bt_devices[MAX_BT_DEVICES];
+size_t bt_devices_len = 0;
+char bt_status_msg[128] = "";
+int bt_blocked = 0;
+int bt_connected_count = 0;
+char bt_first_device[128];
+time_t widgets_last_refresh = 0;
+unsigned long widget_tick = 0;
+WidgetLayout widget_layout[WidgetCount];
+static inline const enum WidgetId widget_draw_order[] = {
     WidgetBattery, WidgetBacklight, WidgetVolume,    WidgetMic,   WidgetMedia,
     WidgetTheme,   WidgetGit,
-    WidgetProjects, WidgetLoad,     WidgetCpu,       WidgetMem,   WidgetDisk,
-    WidgetWifi,     WidgetKbLayout,
+    WidgetLoad,    WidgetCpu,       WidgetMem,       WidgetDisk,    WidgetNet,
+    WidgetWifi,    WidgetBluetooth, WidgetKbLayout,
 };
-static Window slider_popup_win = None;
-static Monitor *slider_popup_mon = NULL;
-static int slider_popup_visible = 0;
-static int slider_popup_dragging = 0;
-static enum SliderWidget slider_popup_kind = SliderBacklight;
-static const int slider_popup_w = 240;
-static const int slider_popup_h = 64;
-static const int slider_popup_pad = 12;
-static const int slider_popup_slider_h = 8;
-static const int slider_popup_slider_y = 34;
-static const int slider_popup_knob_w = 12;
-static const int slider_popup_knob_h = 20;
-
-static std::array<void (*)(XEvent *), LASTEvent> make_handler_table(void) {
-  std::array<void (*)(XEvent *), LASTEvent> handlers = {};
-  handlers[ButtonPress] = buttonpress;
-  handlers[ButtonRelease] = buttonrelease;
-  handlers[ClientMessage] = clientmessage;
-  handlers[ConfigureRequest] = configurerequest;
-  handlers[ConfigureNotify] = configurenotify;
-  handlers[DestroyNotify] = destroynotify;
-  handlers[EnterNotify] = enternotify;
-  handlers[Expose] = expose;
-  handlers[FocusIn] = focusin;
-  handlers[KeyPress] = keypress;
-  handlers[MappingNotify] = mappingnotify;
-  handlers[MapRequest] = maprequest;
-  handlers[MotionNotify] = motionnotify;
-  handlers[PropertyNotify] = propertynotify;
-  handlers[SelectionNotify] = selectionnotify;
-  handlers[UnmapNotify] = unmapnotify;
-  return handlers;
-}
-
-static int read_long_from_file(const char *path, long *value) {
-  FILE *fp;
-  long parsed;
-
-  if (!path || path[0] == '\0' || !value) {
-    return 0;
-  }
-  fp = fopen(path, "r");
-  if (!fp) {
-    return 0;
-  }
-  if (fscanf(fp, "%ld", &parsed) != 1) {
-    fclose(fp);
-    return 0;
-  }
-  fclose(fp);
-  *value = parsed;
-  return 1;
-}
-
-/* Runs argv[0] with cwd (if given) via fork/exec -- no shell, so a project
- * path with odd characters (spaces, quotes) can't break out of a command
- * line the way it could through popen()/system(). Captures stdout, discards
- * stderr, returns whether the child exited 0.
- *
- * This runs on the main thread inside the X11 event loop, so a child that
- * hangs or just runs long (e.g. `git status` walking a huge or
- * network-mounted tree) would freeze the whole window manager for as long
- * as it takes. timeout_ms bounds that: past the deadline the child is
- * SIGKILLed and this reports failure, same as any other non-zero exit. */
-static int run_capture_argv(const char *cwd, char *const argv[], char *out, size_t outsz,
-                            int timeout_ms) {
-  int pipefd[2];
-  pid_t pid;
-  int status;
-  struct timespec start, now;
-  size_t total = 0;
-  int timed_out = 0;
-
-  out[0] = '\0';
-  if (pipe(pipefd) != 0) {
-    return 0;
-  }
-  pid = fork();
-  if (pid < 0) {
-    close(pipefd[0]);
-    close(pipefd[1]);
-    return 0;
-  }
-  if (pid == 0) {
-    int devnull;
-    close(pipefd[0]);
-    dup2(pipefd[1], STDOUT_FILENO);
-    close(pipefd[1]);
-    devnull = open("/dev/null", O_WRONLY);
-    if (devnull >= 0) {
-      dup2(devnull, STDERR_FILENO);
-      close(devnull);
-    }
-    if (cwd && cwd[0] && chdir(cwd) != 0) {
-      _exit(127);
-    }
-    execvp(argv[0], argv);
-    _exit(127);
-  }
-  close(pipefd[1]);
-
-  clock_gettime(CLOCK_MONOTONIC, &start);
-  for (;;) {
-    fd_set readfds;
-    struct timeval tv;
-    long elapsed_ms;
-    long remaining_ms;
-    int sr;
-    ssize_t n;
-
-    clock_gettime(CLOCK_MONOTONIC, &now);
-    elapsed_ms = (now.tv_sec - start.tv_sec) * 1000 +
-                (now.tv_nsec - start.tv_nsec) / 1000000;
-    remaining_ms = timeout_ms - elapsed_ms;
-    if (remaining_ms <= 0) {
-      timed_out = 1;
-      break;
-    }
-
-    FD_ZERO(&readfds);
-    FD_SET(pipefd[0], &readfds);
-    tv.tv_sec = remaining_ms / 1000;
-    tv.tv_usec = (remaining_ms % 1000) * 1000;
-
-    sr = select(pipefd[0] + 1, &readfds, NULL, NULL, &tv);
-    if (sr <= 0) {
-      if (sr < 0 && errno == EINTR) {
-        continue;
-      }
-      timed_out = (sr == 0);
-      break;
-    }
-    n = read(pipefd[0], out + total, outsz - 1 - total);
-    if (n <= 0) {
-      break; /* EOF, or a read error -- either way the child is done talking */
-    }
-    total += (size_t)n;
-    if (total >= outsz - 1) {
-      break;
-    }
-  }
-  out[total] = '\0';
-  close(pipefd[0]);
-
-  /* Unconditional, not just on timeout: closing the read end above without
-   * having drained everything (e.g. the buffer-full break) leaves the
-   * child to discover that on its next write() -- normally via SIGPIPE,
-   * but that's an assumption about the child's signal disposition this
-   * function shouldn't have to make. Killing an already-exited pid here is
-   * a harmless no-op, so there's no cost to always doing it. */
-  kill(pid, SIGKILL);
-  waitpid(pid, &status, 0);
-  return !timed_out && WIFEXITED(status) && WEXITSTATUS(status) == 0;
-}
-
-static void widget_init_paths(void) {
-  DIR *dir;
-  struct dirent *entry;
-
-  if (backlight_brightness_path[0] == '\0') {
-    dir = opendir("/sys/class/backlight");
-    if (dir) {
-      while ((entry = readdir(dir))) {
-        if (entry->d_name[0] == '.') {
-          continue;
-        }
-        snprintf(backlight_dir, sizeof(backlight_dir), "/sys/class/backlight/%s",
-                 entry->d_name);
-        snprintf(backlight_brightness_path, sizeof(backlight_brightness_path),
-                 "%s/brightness", backlight_dir);
-        snprintf(backlight_max_path, sizeof(backlight_max_path), "%s/max_brightness",
-                 backlight_dir);
-        break;
-      }
-      closedir(dir);
-    }
-  }
-
-  if (battery_capacity_path[0] == '\0') {
-    dir = opendir("/sys/class/power_supply");
-    if (dir) {
-      while ((entry = readdir(dir))) {
-        if (entry->d_name[0] == '.' || strncmp(entry->d_name, "BAT", 3) != 0) {
-          continue;
-        }
-        snprintf(battery_capacity_path, sizeof(battery_capacity_path),
-                 "/sys/class/power_supply/%s/capacity", entry->d_name);
-        snprintf(battery_status_path, sizeof(battery_status_path),
-                 "/sys/class/power_supply/%s/status", entry->d_name);
-        break;
-      }
-      closedir(dir);
-    }
-  }
-}
-
-/* Standalone (not folded into updatewidgets()) so the volume/backlight
- * slider popups can refresh just the one value they care about after a
- * drag motion event, instead of paying for every other widget's refresh
- * (several of which shell out or hit the network) on every mouse move --
- * see widget_set_backlight_percent_absolute(). */
-static void widget_update_backlight(void) {
-  long value;
-  long max_value;
-
-  backlight_percent = -1;
-  if (read_long_from_file(backlight_brightness_path, &value) &&
-      read_long_from_file(backlight_max_path, &max_value) && max_value > 0) {
-    backlight_percent = (int)((value * 100 + (max_value / 2)) / max_value);
-  }
-}
-
-static void updatewidgets(void) {
-  FILE *fp;
-  char status[64];
-  long value;
-
-  widget_tick++;
-  widget_init_paths();
-
-  widget_update_backlight();
-
-  battery_percent = -1;
-  battery_charging = 0;
-  if (read_long_from_file(battery_capacity_path, &value)) {
-    battery_percent = (int)value;
-  }
-  if (battery_status_path[0] != '\0') {
-    fp = fopen(battery_status_path, "r");
-    if (fp) {
-      if (fgets(status, sizeof(status), fp)) {
-        battery_charging =
-            strncmp(status, "Charging", 8) == 0 || strncmp(status, "Full", 4) == 0;
-      }
-      fclose(fp);
-    }
-  }
-
-  widget_update_cpu();
-  widget_update_mem();
-  widget_update_disk();
-  widget_update_net();
-  widget_update_wifi();
-  widget_update_bluetooth();
-  widget_update_volume();
-  widget_update_mic();
-  widget_update_media();
-  widget_update_load();
-  widget_update_git();
-  widget_update_kblayout();
-  widget_update_theme();
-  widget_update_lua_widgets();
-}
-
-static void widget_update_cpu(void) {
-  FILE *fp;
-  char line[256];
-  long user = 0, nice_val = 0, sys_val = 0, idle = 0, iowait = 0, irq = 0,
-       softirq = 0, steal = 0;
-  long total, idle_all, delta_total, delta_idle;
-
-  cpu_percent = -1;
-  fp = fopen("/proc/stat", "r");
-  if (!fp) {
-    return;
-  }
-  if (!fgets(line, sizeof(line), fp)) {
-    fclose(fp);
-    return;
-  }
-  fclose(fp);
-
-  if (sscanf(line, "cpu %ld %ld %ld %ld %ld %ld %ld %ld", &user, &nice_val,
-             &sys_val, &idle, &iowait, &irq, &softirq, &steal) < 4) {
-    return;
-  }
-
-  idle_all = idle + iowait;
-  total = user + nice_val + sys_val + idle + iowait + irq + softirq + steal;
-
-  if (cpu_prev_total >= 0) {
-    delta_total = total - cpu_prev_total;
-    delta_idle = idle_all - cpu_prev_idle;
-    if (delta_total > 0) {
-      cpu_percent = (int)(100 * (delta_total - delta_idle) / delta_total);
-      cpu_percent = MAX(0, MIN(100, cpu_percent));
-    }
-  }
-  cpu_prev_total = total;
-  cpu_prev_idle = idle_all;
-}
-
-static void widget_update_mem(void) {
-  FILE *fp;
-  char line[256];
-  long mem_total = -1;
-  long mem_avail = -1;
-
-  mem_percent = -1;
-  fp = fopen("/proc/meminfo", "r");
-  if (!fp) {
-    return;
-  }
-  while (fgets(line, sizeof(line), fp)) {
-    if (mem_total < 0 && sscanf(line, "MemTotal: %ld", &mem_total) == 1) {
-      continue;
-    }
-    if (mem_avail < 0 && sscanf(line, "MemAvailable: %ld", &mem_avail) == 1) {
-      continue;
-    }
-    if (mem_total >= 0 && mem_avail >= 0) {
-      break;
-    }
-  }
-  fclose(fp);
-
-  if (mem_total > 0 && mem_avail >= 0) {
-    mem_percent = (int)(100 * (mem_total - mem_avail) / mem_total);
-  }
-}
-
-static void widget_update_disk(void) {
-  struct statvfs vfs;
-  unsigned long long used;
-  unsigned long long avail_for_calc;
-
-  disk_percent = -1;
-  if (statvfs("/", &vfs) != 0 || vfs.f_blocks == 0) {
-    return;
-  }
-  used = (unsigned long long)(vfs.f_blocks - vfs.f_bfree);
-  avail_for_calc = used + vfs.f_bavail;
-  if (avail_for_calc == 0) {
-    return;
-  }
-  disk_percent = (int)(used * 100 / avail_for_calc);
-}
-
-static void widget_update_net(void) {
-  FILE *fp;
-  char line[256];
-  char iface[64] = "";
-  char state[32] = "";
-  char path[128];
-
-  net_iface[0] = '\0';
-  net_up = 0;
-
-  fp = fopen("/proc/net/route", "r");
-  if (!fp) {
-    return;
-  }
-  if (fgets(line, sizeof(line), fp)) {
-    /* discard header line */
-  }
-  while (fgets(line, sizeof(line), fp)) {
-    char ifname[64];
-    unsigned long dest;
-    if (sscanf(line, "%63s %lx", ifname, &dest) == 2 && dest == 0) {
-      snprintf(iface, sizeof(iface), "%s", ifname);
-      break;
-    }
-  }
-  fclose(fp);
-
-  if (iface[0] == '\0') {
-    net_rx_kbps = net_tx_kbps = 0;
-    net_prev_time = 0;
-    return;
-  }
-
-  snprintf(path, sizeof(path), "/sys/class/net/%s/operstate", iface);
-  fp = fopen(path, "r");
-  if (fp) {
-    if (fgets(state, sizeof(state), fp)) {
-      state[strcspn(state, "\n")] = '\0';
-    }
-    fclose(fp);
-  }
-
-  snprintf(net_iface, sizeof(net_iface), "%s", iface);
-  net_up = (strcmp(state, "up") == 0);
-
-  if (net_up) {
-    char rx_path[160];
-    char tx_path[160];
-    long rx = -1, tx = -1;
-    time_t now = time(NULL);
-
-    snprintf(rx_path, sizeof(rx_path), "/sys/class/net/%s/statistics/rx_bytes", iface);
-    snprintf(tx_path, sizeof(tx_path), "/sys/class/net/%s/statistics/tx_bytes", iface);
-    if (read_long_from_file(rx_path, &rx) && read_long_from_file(tx_path, &tx)) {
-      if (net_prev_time > 0 && now > net_prev_time &&
-          strcmp(net_last_iface, iface) == 0 && rx >= net_prev_rx && tx >= net_prev_tx) {
-        double dt = (double)(now - net_prev_time);
-        net_rx_kbps = (double)(rx - net_prev_rx) / 1024.0 / dt;
-        net_tx_kbps = (double)(tx - net_prev_tx) / 1024.0 / dt;
-      } else {
-        /* first sample, an interface change, or a counter reset */
-        net_rx_kbps = net_tx_kbps = 0;
-      }
-      net_prev_rx = rx;
-      net_prev_tx = tx;
-      net_prev_time = now;
-      snprintf(net_last_iface, sizeof(net_last_iface), "%s", iface);
-    }
-  } else {
-    net_rx_kbps = net_tx_kbps = 0;
-    net_prev_time = 0;
-  }
-}
-
-/* Returns 1 if any rfkill device of the given type ("wlan"/"bluetooth") is
- * soft- or hard-blocked, 0 if none are, -1 if no device of that type exists. */
-static int widget_rfkill_blocked(const char *type_name) {
-  DIR *dp = opendir("/sys/class/rfkill");
-  struct dirent *de;
-  int found = 0;
-  int blocked = 0;
-
-  if (!dp) {
-    return -1;
-  }
-  while ((de = readdir(dp)) != NULL) {
-    char path[160];
-    char type[32] = "";
-    FILE *fp;
-    long soft = 0, hard = 0;
-
-    if (de->d_name[0] == '.') {
-      continue;
-    }
-    snprintf(path, sizeof(path), "/sys/class/rfkill/%s/type", de->d_name);
-    fp = fopen(path, "r");
-    if (!fp) {
-      continue;
-    }
-    if (fgets(type, sizeof(type), fp)) {
-      type[strcspn(type, "\n")] = '\0';
-    }
-    fclose(fp);
-    if (strcmp(type, type_name) != 0) {
-      continue;
-    }
-    found = 1;
-    snprintf(path, sizeof(path), "/sys/class/rfkill/%s/soft", de->d_name);
-    read_long_from_file(path, &soft);
-    snprintf(path, sizeof(path), "/sys/class/rfkill/%s/hard", de->d_name);
-    read_long_from_file(path, &hard);
-    if (soft || hard) {
-      blocked = 1;
-    }
-  }
-  closedir(dp);
-  return found ? blocked : -1;
-}
-
-static void widget_update_wifi(void) {
-  FILE *fp;
-  char line[256];
-  int blocked;
-
-  wifi_iface[0] = '\0';
-  wifi_up = 0;
-  wifi_quality = -1;
-  wifi_ssid[0] = '\0';
-
-  blocked = widget_rfkill_blocked("wlan");
-  wifi_blocked = blocked > 0;
-  if (blocked < 0) {
-    return; /* no wifi hardware */
-  }
-
-  fp = fopen("/proc/net/wireless", "r");
-  if (fp) {
-    if (fgets(line, sizeof(line), fp)) {
-      /* discard header line 1 */
-    }
-    if (fgets(line, sizeof(line), fp)) {
-      /* discard header line 2 */
-    }
-    if (fgets(line, sizeof(line), fp)) {
-      char *colon = strchr(line, ':');
-      if (colon) {
-        int len = (int)(colon - line);
-        double quality;
-        char *p = line;
-        if (len > 0 && len < (int)sizeof(wifi_iface)) {
-          line[len] = '\0';
-          while (*p == ' ') {
-            p++;
-          }
-          snprintf(wifi_iface, sizeof(wifi_iface), "%s", p);
-        }
-        if (sscanf(colon + 1, "%*x %lf", &quality) == 1) {
-          wifi_quality = (int)quality;
-        }
-      }
-    }
-    fclose(fp);
-  }
-
-  if (wifi_iface[0] != '\0' && !wifi_blocked) {
-    char path[128];
-    char state[32] = "";
-    snprintf(path, sizeof(path), "/sys/class/net/%s/operstate", wifi_iface);
-    fp = fopen(path, "r");
-    if (fp) {
-      if (fgets(state, sizeof(state), fp)) {
-        state[strcspn(state, "\n")] = '\0';
-      }
-      fclose(fp);
-    }
-    wifi_up = (strcmp(state, "up") == 0);
-
-    if (wifi_up) {
-      fp = popen("nmcli -t -f active,ssid dev wifi 2>/dev/null", "r");
-      if (fp) {
-        char buf[4096];
-        size_t len = fread(buf, 1, sizeof(buf) - 1, fp);
-        char *saveptr = NULL;
-        char *tok;
-        pclose(fp);
-        buf[len] = '\0';
-        tok = strtok_r(buf, "\n", &saveptr);
-        while (tok) {
-          if (strncmp(tok, "yes:", 4) == 0) {
-            snprintf(wifi_ssid, sizeof(wifi_ssid), "%s", tok + 4);
-            break;
-          }
-          tok = strtok_r(NULL, "\n", &saveptr);
-        }
-      }
-    }
-  }
-}
-
-static void widget_update_bluetooth(void) {
-  FILE *fp;
-  int blocked;
-
-  bt_connected_count = 0;
-  bt_first_device[0] = '\0';
-
-  blocked = widget_rfkill_blocked("bluetooth");
-  bt_blocked = blocked > 0;
-  if (blocked < 0 || bt_blocked) {
-    return;
-  }
-
-  fp = popen("bluetoothctl devices Connected 2>/dev/null", "r");
-  if (fp) {
-    char buf[4096];
-    size_t len = fread(buf, 1, sizeof(buf) - 1, fp);
-    char *saveptr = NULL;
-    char *tok;
-    pclose(fp);
-    buf[len] = '\0';
-    tok = strtok_r(buf, "\n", &saveptr);
-    while (tok) {
-      if (strncmp(tok, "Device ", 7) == 0) {
-        if (bt_connected_count == 0) {
-          const char *name = tok + 7;
-          const char *name_start = strchr(name, ' ');
-          snprintf(bt_first_device, sizeof(bt_first_device), "%s",
-                   name_start ? name_start + 1 : name);
-        }
-        bt_connected_count++;
-      }
-      tok = strtok_r(NULL, "\n", &saveptr);
-    }
-  }
-}
-
-static void widget_toggle_bluetooth(void) {
-  system(bt_blocked ? "rfkill unblock bluetooth" : "rfkill block bluetooth");
-  widget_update_bluetooth();
-  drawbars();
-}
-
-/* Shared by the Master (output) and Capture/Mic (input) widgets -- amixer's
- * "get" output has the same "[NN%] ... [on|off]" shape for both. */
-static void widget_amixer_read(const char *control, int *percent, int *muted) {
-  FILE *fp;
-  char cmd[64];
-  char buf[1024];
-  size_t len;
-  char *pct_end;
-  char *digits_start;
-  int pct;
-
-  *percent = -1;
-  *muted = 0;
-
-  snprintf(cmd, sizeof(cmd), "amixer get %s 2>/dev/null", control);
-  fp = popen(cmd, "r");
-  if (!fp) {
-    return;
-  }
-  len = fread(buf, 1, sizeof(buf) - 1, fp);
-  pclose(fp);
-  buf[len] = '\0';
-
-  pct_end = strstr(buf, "%]");
-  if (!pct_end) {
-    return;
-  }
-  digits_start = pct_end;
-  while (digits_start > buf && *(digits_start - 1) != '[') {
-    digits_start--;
-  }
-  if (sscanf(digits_start, "%d", &pct) == 1) {
-    *percent = MAX(0, MIN(100, pct));
-    *muted = strstr(buf, "[off]") != NULL;
-  }
-}
-
-static void widget_update_volume(void) {
-  widget_amixer_read("Master", &volume_percent, &volume_muted);
-}
-
-/* Tries the common ALSA capture control names; most setups expose the mic
- * as "Capture", some HDA codecs use "Mic" instead. Once one resolves, stick
- * with it -- otherwise every tick would fork amixer twice forever just to
- * keep re-discovering the same answer. On a mic-less machine the "Mic"
- * fallback is only retried occasionally rather than on every tick, so it
- * doesn't cost two forks/tick indefinitely for a widget that's always
- * blank. */
-static void widget_update_mic(void) {
-  if (mic_control_resolved) {
-    widget_amixer_read(mic_control, &mic_percent, &mic_muted);
-    if (mic_percent >= 0) {
-      return;
-    }
-    mic_control_resolved = 0; /* control disappeared -- reprobe below */
-  }
-
-  widget_amixer_read("Capture", &mic_percent, &mic_muted);
-  if (mic_percent >= 0) {
-    snprintf(mic_control, sizeof(mic_control), "Capture");
-    mic_control_resolved = 1;
-    return;
-  }
-
-  if (widget_tick < mic_next_probe_tick) {
-    return;
-  }
-  mic_next_probe_tick = widget_tick + 15; /* ~30s at the 2s tick cadence */
-
-  widget_amixer_read("Mic", &mic_percent, &mic_muted);
-  if (mic_percent >= 0) {
-    snprintf(mic_control, sizeof(mic_control), "Mic");
-    mic_control_resolved = 1;
-  }
-}
-
-static void widget_toggle_mic_mute(void) {
-  char cmd[64];
-
-  if (mic_percent < 0) {
-    return;
-  }
-  snprintf(cmd, sizeof(cmd), "amixer -q set %s toggle", mic_control);
-  system(cmd);
-  widget_update_mic();
-  drawbars();
-}
-
-static void widget_update_load(void) {
-  FILE *fp;
-  double l1, l5, l15;
-
-  load_avg1 = -1.0;
-  fp = fopen("/proc/loadavg", "r");
-  if (!fp) {
-    return;
-  }
-  if (fscanf(fp, "%lf %lf %lf", &l1, &l5, &l15) == 3) {
-    load_avg1 = l1;
-  }
-  fclose(fp);
-}
-
-static long widget_ncpu(void) {
-  static long n = 0;
-  if (n <= 0) {
-    n = sysconf(_SC_NPROCESSORS_ONLN);
-    if (n <= 0) {
-      n = 1;
-    }
-  }
-  return n;
-}
-
-/* Git status for the project backing the current workspace (same
- * current-project derivation as the projects bar widget). Leaves git_valid
- * false -- and the widget blank -- when the workspace isn't a saved
- * project's, or that project isn't a git repo. */
-/* Returns the integer following the first occurrence of `marker` in `s`, or
- * 0 if `marker` doesn't appear -- used to pull "ahead N"/"behind N" out of
- * git's porcelain branch header. */
-static int widget_git_int_after(const char *s, const char *marker) {
-  const char *p = strstr(s, marker);
-  if (!p) {
-    return 0;
-  }
-  return atoi(p + strlen(marker));
-}
-
-static void widget_update_git(void) {
-  char out[512];
-  char *nl;
-  char *line;
-  char header[400];
-  const char *argv_status[] = {"git", "status", "--porcelain=v1", "--branch", NULL};
-
-  if (!selmon || active_project_path[0] == '\0') {
-    git_valid = 0;
-    git_project_path[0] = '\0';
-    return;
-  }
-
-  /* git status is a fork+exec that scales with repo size and can stall
-   * badly on a huge or network-mounted tree; run_capture_argv bounds any
-   * single call, but there's no need to pay even the bounded cost every
-   * 2s tick. Refresh immediately when the project changes (so switching
-   * feels instant) and otherwise only every ~10s. */
-  if (strcmp(active_project_path, git_last_project_path) == 0 && widget_tick < git_next_tick) {
-    return;
-  }
-  git_next_tick = widget_tick + 5; /* ~10s at the 2s tick cadence */
-  snprintf(git_last_project_path, sizeof(git_last_project_path), "%s", active_project_path);
-
-  git_valid = 0;
-  git_branch[0] = '\0';
-  git_dirty = 0;
-  git_ahead = 0;
-  git_behind = 0;
-  git_project_path[0] = '\0';
-
-  if (!run_capture_argv(active_project_path, (char *const *)argv_status, out, sizeof(out), 300)) {
-    return; /* not a git repo, git isn't installed, or it timed out */
-  }
-
-  nl = strchr(out, '\n');
-  if (nl) {
-    git_dirty = nl[1] != '\0';
-    *nl = '\0';
-  }
-  line = out;
-  if (strncmp(line, "## ", 3) != 0) {
-    return;
-  }
-  line += 3;
-  /* branch-name truncation below mutates line in place, so grab the
-   * ahead/behind counts from an untouched copy first */
-  snprintf(header, sizeof(header), "%s", line);
-  git_ahead = widget_git_int_after(header, "ahead ");
-  git_behind = widget_git_int_after(header, "behind ");
-
-  if (strncmp(line, "HEAD (no branch)", 16) == 0) {
-    snprintf(git_branch, sizeof(git_branch), "detached");
-  } else {
-    char *end = line;
-    while (*end && *end != '.' && *end != ' ') {
-      end++;
-    }
-    *end = '\0';
-    snprintf(git_branch, sizeof(git_branch), "%s", line);
-  }
-  snprintf(git_project_path, sizeof(git_project_path), "%s", active_project_path);
-  git_valid = 1;
-}
-
-static void widget_git_open_terminal(void) {
-  Arg a = {0};
-  const char *argv_term[4];
-
-  if (!git_valid || git_project_path[0] == '\0') {
-    return;
-  }
-  argv_term[0] = terminal_cmd;
-  argv_term[1] = "-d";
-  argv_term[2] = git_project_path;
-  argv_term[3] = NULL;
-  a.v = argv_term;
-  spawn(&a);
-}
-
-/* {{{ widget icons (Nerd Font Private Use Area glyphs; see `fonts[]`) */
-static const char icon_battery_full[] = "";
-static const char icon_battery_75[] = "";
-static const char icon_battery_50[] = "";
-static const char icon_battery_25[] = "";
-static const char icon_battery_empty[] = "";
-static const char icon_battery_charging[] = "";
-static const char icon_backlight[] = "\U000F0599";
-static const char icon_volume_muted[] = "";
-static const char icon_volume_low[] = "";
-static const char icon_volume_high[] = "";
-static const char icon_theme_dark[] = "";
-static const char icon_theme_light[] = "\U000F0599";
-static const char icon_theme_auto[] = "";
-static const char icon_bell[] = "";
-static const char icon_bell_outline[] = "";
-static const char icon_cpu[] = "\U000F061A";
-static const char icon_mem[] = "\U000F035B";
-static const char icon_disk[] = "";
-static const char icon_net[] = "";
-static const char icon_clock[] = "";
-static const char icon_close[] = "";
-static const char icon_todo[] = "\U0000F0AE";
-static const char icon_checkbox_unchecked[] = "\U0000F096";
-static const char icon_checkbox_checked[] = "\U0000F046";
-static const char icon_agents[] = "\U0000F120";
-static const char icon_launcher[] = "\U0000F135";
-static const char icon_projects[] = "\U0000F07B";
-static const char icon_desktop_folder[] = "\U0000F07B";
-static const char icon_desktop_file[] = "\U0000F016";
-static const char icon_desktop_image[] = "\U0000F03E";
-static const char icon_desktop_archive[] = "\U0000F1C6";
-static const char icon_desktop_audio[] = "\U0000F1C7";
-static const char icon_desktop_video[] = "\U0000F1C8";
-static const char icon_desktop_pdf[] = "\U0000F1C1";
-static const char icon_desktop_text[] = "\U0000F0F6";
-static const char icon_trash_empty[] = "\U0000F1F8";
-static const char icon_trash_full[] = "\U0000F014";
-static const char icon_wifi[] = "\U0000F1EB";
-static const char icon_lock[] = "\U0000F023";
-static const char icon_bluetooth[] = "\U0000F293";
-static const char icon_mic[] = "\U0000F130";
-static const char icon_mic_muted[] = "\U0000F131";
-static const char icon_load[] = "\U0000F0E4";
-static const char icon_git[] = "\U0000F126";
-static const char icon_media[] = "\U0000F001";
-static const char icon_keyboard[] = "\U0000F11C";
-static const char icon_firefox[] = "\U0000F269";
-static const char icon_terminal[] = "\U0000F120";
-static const char icon_info[] = "\U0000F05A";              /* fa-info_circle */
-static const char icon_layout_tile[] = "\U0000F00A";       /* fa-th */
-static const char icon_layout_floating[] = "\U0000F2D2";   /* fa-window_restore */
-static const char icon_layout_monocle[] = "\U0000F2D0";    /* fa-window_maximize */
-static const char icon_layout_other[] = "\U0000F009";      /* fa-th_large (lua layouts) */
-static const char icon_os_tux[] = "\U0000F31A";            /* linux-tux (generic fallback) */
-static const char icon_os_nixos[] = "\U0000F313";          /* linux-nixos */
-static const char icon_os_archlinux[] = "\U0000F303";      /* linux-archlinux */
-static const char icon_os_ubuntu[] = "\U0000F31B";         /* linux-ubuntu */
-static const char icon_os_fedora[] = "\U0000F30A";         /* linux-fedora */
-static const char icon_os_debian[] = "\U0000F306";         /* linux-debian */
-static const char icon_os_opensuse[] = "\U0000F314";       /* linux-opensuse */
-static const char icon_os_void[] = "\U0000F32E";           /* linux-void */
-static const char icon_os_manjaro[] = "\U0000F312";        /* linux-manjaro */
-/* }}} widget icons */
-
-/* {{{ corner buttons (OS logo + layout symbol; see drawleftbar/drawrightbar) */
-/* Reads /etc/os-release once and caches the matching distro glyph so the
- * bottom-left corner shows the right logo without hardcoding one distro. */
-static const char *os_logo_glyph(void) {
-  static const char *cached = NULL;
-  static int initialized = 0;
-  char id[64] = "";
-  FILE *f;
-  char line[256];
-
-  if (initialized) {
-    return cached;
-  }
-  initialized = 1;
-  cached = icon_os_tux;
-
-  f = fopen("/etc/os-release", "r");
-  if (f) {
-    while (fgets(line, sizeof line, f)) {
-      if (!strncmp(line, "ID=", 3)) {
-        char *v = line + 3;
-        size_t len;
-        if (*v == '"') {
-          v++;
-        }
-        len = strcspn(v, "\"\n");
-        if (len >= sizeof id) {
-          len = sizeof id - 1;
-        }
-        memcpy(id, v, len);
-        id[len] = '\0';
-        break;
-      }
-    }
-    fclose(f);
-  }
-
-  if (!strcmp(id, "nixos")) {
-    cached = icon_os_nixos;
-  } else if (!strcmp(id, "arch")) {
-    cached = icon_os_archlinux;
-  } else if (!strcmp(id, "ubuntu")) {
-    cached = icon_os_ubuntu;
-  } else if (!strcmp(id, "fedora")) {
-    cached = icon_os_fedora;
-  } else if (!strcmp(id, "debian")) {
-    cached = icon_os_debian;
-  } else if (!strncmp(id, "opensuse", 8)) {
-    cached = icon_os_opensuse;
-  } else if (!strcmp(id, "void")) {
-    cached = icon_os_void;
-  } else if (!strcmp(id, "manjaro")) {
-    cached = icon_os_manjaro;
-  }
-
-  return cached;
-}
-
-/* Maps a layout's ltsymbol (see setlayout()) to a corner-button glyph; any
- * symbol outside the three compiled-in layouts (Lua layouts included) falls
- * back to a generic layout icon. */
-static const char *layout_symbol_glyph(const char *ltsymbol) {
-  if (!strcmp(ltsymbol, "[]=")) {
-    return icon_layout_tile;
-  }
-  if (!strcmp(ltsymbol, "><>")) {
-    return icon_layout_floating;
-  }
-  if (!strcmp(ltsymbol, "[M]")) {
-    return icon_layout_monocle;
-  }
-  return icon_layout_other;
-}
-/* }}} corner buttons */
-
-/* MPRIS via playerctl -- it already does the DBus property/variant
- * unpacking for us, so there's no player running, or playerctl isn't
- * installed. Both leave media_status empty and blank the widget, matching
- * how the other optional-tool widgets (amixer, bluetoothctl, nmcli) behave
- * when their tool or device is absent.
- *
- * Status and title come out of a single playerctl call (its format string
- * supports {{status}} directly) rather than two -- one fork/tick instead of
- * two for something we already re-poll every 2s. */
-static void widget_update_media(void) {
-  FILE *fp;
-  char buf[256];
-  size_t len;
-  char *sep;
-
-  media_status[0] = '\0';
-  media_title[0] = '\0';
-
-  fp = popen("playerctl metadata --format '{{status}}|{{ artist }} - {{ title }}' 2>/dev/null",
-             "r");
-  if (!fp) {
-    return;
-  }
-  len = fread(buf, 1, sizeof(buf) - 1, fp);
-  pclose(fp);
-  buf[len] = '\0';
-  buf[strcspn(buf, "\n")] = '\0';
-  if (buf[0] == '\0') {
-    return; /* no MPRIS player running */
-  }
-
-  sep = strchr(buf, '|');
-  if (!sep) {
-    return;
-  }
-  *sep = '\0';
-  snprintf(media_status, sizeof(media_status), "%s", buf);
-  snprintf(media_title, sizeof(media_title), "%s", sep + 1);
-}
-
-static void widget_format_media(char *buf, size_t size) {
-  if (media_status[0] == '\0') {
-    buf[0] = '\0';
-    return;
-  }
-  if (media_title[0] != '\0') {
-    snprintf(buf, size, "%s %s", icon_media, media_title);
-  } else {
-    snprintf(buf, size, "%s", icon_media);
-  }
-}
-
-static void widget_media_play_pause(void) {
-  system("playerctl play-pause >/dev/null 2>&1");
-  widget_update_media();
-  drawbars();
-}
-
-static void widget_media_next(void) {
-  system("playerctl next >/dev/null 2>&1");
-  widget_update_media();
-  drawbars();
-}
-
-static void widget_media_previous(void) {
-  system("playerctl previous >/dev/null 2>&1");
-  widget_update_media();
-  drawbars();
-}
-
-/* The configured layout list (setxkbmap -query) essentially never changes
- * at runtime -- only re-fetch it occasionally rather than forking
- * setxkbmap every 2s tick just to re-derive the same answer. */
-static void widget_refresh_kblayout_list(void) {
-  FILE *fp;
-  char layouts[256] = "";
-  char line[256];
-  char *tok;
-  char *saveptr = NULL;
-  int i;
-
-  kb_layout_count = 0;
-
-  fp = popen("setxkbmap -query 2>/dev/null", "r");
-  if (!fp) {
-    return;
-  }
-  while (fgets(line, sizeof(line), fp)) {
-    if (strncmp(line, "layout:", 7) == 0) {
-      char *p = line + 7;
-      while (*p == ' ' || *p == '\t') {
-        p++;
-      }
-      p[strcspn(p, "\n")] = '\0';
-      snprintf(layouts, sizeof(layouts), "%s", p);
-      break;
-    }
-  }
-  pclose(fp);
-
-  if (layouts[0] == '\0') {
-    return;
-  }
-
-  tok = strtok_r(layouts, ",", &saveptr);
-  for (i = 0; tok && i < KB_LAYOUT_MAX; i++) {
-    snprintf(kb_layout_names[i], sizeof(kb_layout_names[i]), "%s", tok);
-    tok = strtok_r(NULL, ",", &saveptr);
-  }
-  kb_layout_count = i;
-}
-
-/* Active XKB group, mapped to a name via the cached layout list above.
- * XkbGetState is a native X11 call (no fork), so the displayed group stays
- * live every tick even though the list itself is only refreshed
- * occasionally. Blank when there's only one configured layout -- nothing to
- * indicate. */
-static void widget_update_kblayout(void) {
-  XkbStateRec state;
-  int group;
-
-  kb_layout[0] = '\0';
-
-  if (!dpy || XkbGetState(dpy, XkbUseCoreKbd, &state) != Success) {
-    return;
-  }
-
-  if (widget_tick >= kb_layout_list_next_tick) {
-    widget_refresh_kblayout_list();
-    kb_layout_list_next_tick = widget_tick + 30; /* ~60s at the 2s tick cadence */
-  }
-
-  group = state.group;
-  if (group >= 0 && group < kb_layout_count) {
-    snprintf(kb_layout, sizeof(kb_layout), "%s", kb_layout_names[group]);
-  }
-}
-
-static void widget_format_kblayout(char *buf, size_t size) {
-  if (kb_layout_count <= 1 || kb_layout[0] == '\0') {
-    buf[0] = '\0';
-    return;
-  }
-  snprintf(buf, size, "%s %s", icon_keyboard, kb_layout);
-}
-
-static void widget_cycle_kblayout(void) {
-  XkbStateRec state;
-  int next;
-
-  if (!dpy || kb_layout_count <= 1) {
-    return;
-  }
-  if (XkbGetState(dpy, XkbUseCoreKbd, &state) != Success) {
-    return;
-  }
-  next = (state.group + 1) % kb_layout_count;
-  XkbLockGroup(dpy, XkbUseCoreKbd, next);
-  widget_update_kblayout();
-  drawbars();
-}
-
-static void widget_format_backlight(char *buf, size_t size) {
-  snprintf(buf, size, "%s", icon_backlight);
-}
-
-static void widget_format_battery(char *buf, size_t size) {
-  const char *icon;
-
-  if (battery_percent < 0) {
-    snprintf(buf, size, "%s n/a", icon_battery_full);
-    return;
-  }
-  if (battery_charging) {
-    icon = icon_battery_charging;
-  } else if (battery_percent >= 90) {
-    icon = icon_battery_full;
-  } else if (battery_percent >= 65) {
-    icon = icon_battery_75;
-  } else if (battery_percent >= 40) {
-    icon = icon_battery_50;
-  } else if (battery_percent >= 15) {
-    icon = icon_battery_25;
-  } else {
-    icon = icon_battery_empty;
-  }
-  snprintf(buf, size, "%s %d%%", icon, battery_percent);
-}
-
-static void widget_format_volume(char *buf, size_t size) {
-  const char *icon;
-
-  if (volume_percent < 0) {
-    icon = icon_volume_high;
-  } else if (volume_muted || volume_percent == 0) {
-    icon = icon_volume_muted;
-  } else if (volume_percent < 50) {
-    icon = icon_volume_low;
-  } else {
-    icon = icon_volume_high;
-  }
-  snprintf(buf, size, "%s", icon);
-}
-
-/* Blank (not "n/a") when there's no capture device at all -- unlike output
- * volume, plenty of desktops legitimately have no mic, and a permanent
- * "n/a" would just be noise. */
-static void widget_format_mic(char *buf, size_t size) {
-  if (mic_percent < 0) {
-    buf[0] = '\0';
-    return;
-  }
-  if (mic_muted) {
-    snprintf(buf, size, "%s", icon_mic_muted);
-    return;
-  }
-  snprintf(buf, size, "%s", icon_mic);
-}
-
-static void widget_format_load(char *buf, size_t size) {
-  if (load_avg1 < 0) {
-    snprintf(buf, size, "%s n/a", icon_load);
-    return;
-  }
-  snprintf(buf, size, "%s %.2f", icon_load, load_avg1);
-}
-
-/* Blank outside a project workspace or a non-git project, same reasoning as
- * the mic widget -- most workspaces (mail, chat) have nothing to show. */
-static void widget_format_git(char *buf, size_t size) {
-  char counts[32] = "";
-
-  if (!git_valid) {
-    buf[0] = '\0';
-    return;
-  }
-  if (git_ahead > 0 && git_behind > 0) {
-    snprintf(counts, sizeof(counts), " %d↑%d↓", git_ahead, git_behind);
-  } else if (git_ahead > 0) {
-    snprintf(counts, sizeof(counts), " %d↑", git_ahead);
-  } else if (git_behind > 0) {
-    snprintf(counts, sizeof(counts), " %d↓", git_behind);
-  }
-  snprintf(buf, size, "%s %s%s%s", icon_git, git_branch, git_dirty ? "*" : "", counts);
-}
-
-static void widget_format_cpu(char *buf, size_t size) {
-  if (cpu_percent < 0) {
-    snprintf(buf, size, "%s ...", icon_cpu);
-    return;
-  }
-  snprintf(buf, size, "%s %d%%", icon_cpu, cpu_percent);
-}
-
-static void widget_format_mem(char *buf, size_t size) {
-  if (mem_percent < 0) {
-    snprintf(buf, size, "%s n/a", icon_mem);
-    return;
-  }
-  snprintf(buf, size, "%s %d%%", icon_mem, mem_percent);
-}
-
-static void widget_format_disk(char *buf, size_t size) {
-  if (disk_percent < 0) {
-    snprintf(buf, size, "%s n/a", icon_disk);
-    return;
-  }
-  snprintf(buf, size, "%s %d%%", icon_disk, disk_percent);
-}
-
-static void widget_format_net_rate(double kbps, char *buf, size_t size) {
-  if (kbps >= 1024.0) {
-    snprintf(buf, size, "%.1fM", kbps / 1024.0);
-  } else {
-    snprintf(buf, size, "%.0fK", kbps);
-  }
-}
-
-static void widget_format_net(char *buf, size_t size) {
-  char rx_buf[16];
-  char tx_buf[16];
-
-  if (net_iface[0] == '\0') {
-    snprintf(buf, size, "%s down", icon_net);
-    return;
-  }
-  if (!net_up) {
-    snprintf(buf, size, "%s %s down", icon_net, net_iface);
-    return;
-  }
-  widget_format_net_rate(net_rx_kbps, rx_buf, sizeof(rx_buf));
-  widget_format_net_rate(net_tx_kbps, tx_buf, sizeof(tx_buf));
-  snprintf(buf, size, "%s ↓%s ↑%s", icon_net, rx_buf, tx_buf);
-}
-
-static void widget_format_wifi(char *buf, size_t size) {
-  if (wifi_iface[0] == '\0') {
-    snprintf(buf, size, "%s n/a", icon_wifi);
-    return;
-  }
-  if (wifi_blocked) {
-    snprintf(buf, size, "%s off", icon_wifi);
-    return;
-  }
-  if (!wifi_up) {
-    snprintf(buf, size, "%s down", icon_wifi);
-    return;
-  }
-  if (wifi_ssid[0] != '\0') {
-    snprintf(buf, size, "%s %s", icon_wifi, wifi_ssid);
-    return;
-  }
-  snprintf(buf, size, "%s %s", icon_wifi, wifi_iface);
-}
-
-static void widget_format_bluetooth(char *buf, size_t size) {
-  if (bt_blocked) {
-    snprintf(buf, size, "%s off", icon_bluetooth);
-    return;
-  }
-  if (bt_connected_count > 1) {
-    snprintf(buf, size, "%s %s +%d", icon_bluetooth, bt_first_device,
-             bt_connected_count - 1);
-  } else if (bt_connected_count == 1) {
-    snprintf(buf, size, "%s %s", icon_bluetooth, bt_first_device);
-  } else {
-    snprintf(buf, size, "%s", icon_bluetooth);
-  }
-}
-
-static void widget_format_clock(char *buf, size_t size) {
-  time_t now = time(NULL);
-  struct tm tm_buf;
-  char timebuf[48];
-
-  localtime_r(&now, &tm_buf);
-  strftime(timebuf, sizeof(timebuf), "%a %m-%d %H:%M", &tm_buf);
-  snprintf(buf, size, "%s %s", icon_clock, timebuf);
-}
-
-static void widget_set_backlight_percent_absolute(int percent) {
-  FILE *fp;
-  long max_brightness;
-  long next_brightness;
-
-  widget_init_paths();
-  if (!read_long_from_file(backlight_max_path, &max_brightness) ||
-      max_brightness <= 0 || backlight_brightness_path[0] == '\0') {
-    return;
-  }
-
-  if (percent < 1) {
-    percent = 1;
-  }
-  if (percent > 100) {
-    percent = 100;
-  }
-
-  next_brightness = (max_brightness * percent + 50) / 100;
-  if (next_brightness < 1) {
-    next_brightness = 1;
-  }
-  if (next_brightness > max_brightness) {
-    next_brightness = max_brightness;
-  }
-
-  fp = fopen(backlight_brightness_path, "w");
-  if (!fp) {
-    return;
-  }
-  fprintf(fp, "%ld\n", next_brightness);
-  fclose(fp);
-  widget_update_backlight();
-  drawbars();
-  draw_slider_popup();
-}
-
-static int widget_set_backlight_percent(int delta_percent) {
-  FILE *fp;
-  long brightness;
-  long max_brightness;
-  long next_brightness;
-
-  widget_init_paths();
-  if (!read_long_from_file(backlight_brightness_path, &brightness) ||
-      !read_long_from_file(backlight_max_path, &max_brightness) ||
-      max_brightness <= 0 || backlight_brightness_path[0] == '\0') {
-    return 0;
-  }
-
-  next_brightness = brightness + (max_brightness * delta_percent) / 100;
-  if (next_brightness < 1) {
-    next_brightness = 1;
-  }
-  if (next_brightness > max_brightness) {
-    next_brightness = max_brightness;
-  }
-
-  fp = fopen(backlight_brightness_path, "w");
-  if (!fp) {
-    return 0;
-  }
-  fprintf(fp, "%ld\n", next_brightness);
-  fclose(fp);
-  widget_update_backlight();
-  drawbars();
-  draw_slider_popup();
-  return 1;
-}
-
-/* Fire-and-forget: forks and execs `cmd` via /bin/sh -c, but -- unlike
- * system() -- never waits for it, so the caller isn't blocked on however
- * long the child takes to run. setup() ignores SIGCHLD with SA_NOCLDWAIT,
- * so the kernel reaps the child on its own; nothing here needs to wait()
- * it. Needed for anything that can fire many times a second, like the
- * volume slider while dragging -- system()'s blocking fork+exec+wait per
- * call was slow enough (tens of ms for amixer) that a fast drag queued up
- * a visible backlog of motion/release events, making the slider look like
- * it kept moving on its own for a moment after the button was actually
- * released. */
-static void run_detached_shell(const char *cmd) {
-  pid_t pid = fork();
-  if (pid == 0) {
-    if (dpy) {
-      close(ConnectionNumber(dpy));
-    }
-    setsid();
-    execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
-    _exit(127);
-  }
-}
-
-static void widget_set_volume_percent_absolute(int percent) {
-  char cmd[128];
-
-  percent = MAX(0, MIN(100, percent));
-  snprintf(cmd, sizeof(cmd), "amixer -q set Master %d%% unmute", percent);
-  run_detached_shell(cmd);
-  /* Optimistic: the amixer call above is fire-and-forget, so re-querying it
-   * with an immediate widget_update_volume() would just race the still-
-   * running child and often read back the stale value. We already know
-   * what we asked for; the next periodic refresh (~2s) reconciles with
-   * whatever amixer actually landed on. */
-  volume_percent = percent;
-  volume_muted = 0;
-  drawbars();
-  draw_slider_popup();
-}
-
-static int widget_set_volume_percent(int delta_percent) {
-  if (volume_percent < 0) {
-    return 0;
-  }
-  widget_set_volume_percent_absolute(volume_percent + delta_percent);
-  return 1;
-}
-
-static void widget_toggle_volume_mute(void) {
-  system("amixer -q set Master toggle");
-  updatewidgets();
-  drawbars();
-  if (slider_popup_visible && slider_popup_kind == SliderVolume) {
-    draw_slider_popup();
-  }
-}
-
-static int widget_slider_current_percent(enum SliderWidget kind) {
-  return kind == SliderVolume ? volume_percent : backlight_percent;
-}
-
-static void widget_slider_set_absolute(enum SliderWidget kind, int percent) {
-  if (kind == SliderVolume) {
-    widget_set_volume_percent_absolute(percent);
-  } else {
-    widget_set_backlight_percent_absolute(percent);
-  }
-}
-
-static void widget_slider_label(enum SliderWidget kind, char *buf, size_t size) {
-  if (kind == SliderVolume) {
-    widget_format_volume(buf, size);
-  } else {
-    widget_format_backlight(buf, size);
-  }
-}
-
-static void widget_position_slider_popup(Monitor *m) {
-  enum WidgetId id = (slider_popup_kind == SliderVolume) ? WidgetVolume : WidgetBacklight;
-  int anchor_x;
-  int anchor_w;
-  int popup_x;
-  int popup_y;
-
-  if (!m || slider_popup_win == None) {
-    return;
-  }
-
-  anchor_x = widget_layout[id].x;
-  anchor_w = widget_layout[id].w;
-
-  popup_x = m->wx + anchor_x + (anchor_w / 2) - (slider_popup_w / 2);
-  if (popup_x < m->wx) {
-    popup_x = m->wx;
-  }
-  if (popup_x + slider_popup_w > m->wx + m->ww) {
-    popup_x = m->wx + m->ww - slider_popup_w;
-  }
-
-  popup_y = m->bby - slider_popup_h - 8;
-  if (popup_y < m->my) {
-    popup_y = m->my;
-  }
-
-  XMoveResizeWindow(dpy, slider_popup_win, popup_x, popup_y, slider_popup_w,
-                    slider_popup_h);
-}
-
-static void widget_open_slider_popup(Monitor *m, enum SliderWidget kind) {
-  XSetWindowAttributes wa = {};
-
-  if (!m) {
-    return;
-  }
-
-  if (slider_popup_win == None) {
-    wa.override_redirect = True;
-    wa.background_pixel = scheme[SchemeNorm][ColBg].pixel;
-    wa.border_pixel = scheme[SchemeSel][ColBorder].pixel;
-    wa.event_mask = ExposureMask | ButtonPressMask | ButtonReleaseMask |
-                    PointerMotionMask;
-    slider_popup_win = XCreateWindow(
-        dpy, root, m->wx, m->bby - slider_popup_h, slider_popup_w,
-        slider_popup_h, 1, DefaultDepth(dpy, screen), CopyFromParent,
-        DefaultVisual(dpy, screen),
-        CWOverrideRedirect | CWBackPixel | CWBorderPixel | CWEventMask, &wa);
-    XDefineCursor(dpy, slider_popup_win, cursor[CurNormal]->cursor);
-  }
-
-  slider_popup_kind = kind;
-  slider_popup_mon = m;
-  slider_popup_visible = 1;
-  slider_popup_dragging = 0;
-  widget_position_slider_popup(m);
-  XMapRaised(dpy, slider_popup_win);
-  draw_slider_popup();
-}
-
-static void widget_close_slider_popup(void) {
-  slider_popup_dragging = 0;
-  slider_popup_visible = 0;
-  slider_popup_mon = NULL;
-  if (slider_popup_win != None) {
-    XUnmapWindow(dpy, slider_popup_win);
-  }
-}
-
-static void draw_slider_popup(void) {
-  char label[64];
-  int slider_x;
-  int slider_w;
-  int fill_w;
-  int knob_x;
-  int knob_y;
-  int percent;
-
-  if (!slider_popup_visible || slider_popup_win == None) {
-    return;
-  }
-
-  drw_setscheme(drw, scheme[SchemeNorm]);
-  drw_rect(drw, 0, 0, slider_popup_w, slider_popup_h, 1, 1);
-
-  widget_slider_label(slider_popup_kind, label, sizeof(label));
-  drw_setscheme(drw, scheme[SchemeSel]);
-  drw_text(drw, slider_popup_pad, 8, slider_popup_w - 2 * slider_popup_pad,
-           drw->fonts->h + 4, 0, label, 0);
-
-  slider_x = slider_popup_pad;
-  slider_w = slider_popup_w - 2 * slider_popup_pad;
-  drw_setscheme(drw, scheme[SchemeNorm]);
-  drw_rect(drw, slider_x, slider_popup_slider_y, slider_w,
-           slider_popup_slider_h, 1, 0);
-
-  percent = widget_slider_current_percent(slider_popup_kind);
-  if (percent >= 0) {
-    fill_w = (slider_w * percent) / 100;
-    if (fill_w < (slider_popup_knob_w / 2)) {
-      fill_w = slider_popup_knob_w / 2;
-    }
-    if (fill_w > slider_w) {
-      fill_w = slider_w;
-    }
-    drw_setscheme(drw, scheme[SchemeSel]);
-    drw_rect(drw, slider_x, slider_popup_slider_y, fill_w,
-             slider_popup_slider_h, 1, 1);
-
-    knob_x = slider_x + fill_w - (slider_popup_knob_w / 2);
-    if (knob_x < slider_x) {
-      knob_x = slider_x;
-    }
-    if (knob_x > slider_x + slider_w - slider_popup_knob_w) {
-      knob_x = slider_x + slider_w - slider_popup_knob_w;
-    }
-    knob_y = slider_popup_slider_y + (slider_popup_slider_h / 2) -
-             (slider_popup_knob_h / 2);
-    /* Knob must stay legible regardless of fill percentage, so it can't
-     * reuse ColFg like the track/fill above -- those are near-identical
-     * shades in some themes and the knob would vanish into a full bar. */
-    drw_setscheme(drw, scheme[SchemeNorm]);
-    drw_rect(drw, knob_x, knob_y, slider_popup_knob_w, slider_popup_knob_h,
-             1, 1);
-    drw_setscheme(drw, scheme[SchemeSel]);
-    drw_rect(drw, knob_x, knob_y, slider_popup_knob_w, slider_popup_knob_h,
-             0, 1);
-  }
-
-  drw_map(drw, slider_popup_win, 0, 0, slider_popup_w, slider_popup_h);
-}
-
-static int slider_popup_handle_motion(XMotionEvent *ev) {
-  int slider_x;
-  int slider_w;
-  int relative_x;
-  int percent;
-
-  if (!slider_popup_visible || !slider_popup_dragging ||
-      ev->window != slider_popup_win) {
-    return 0;
-  }
-
-  slider_x = slider_popup_pad;
-  slider_w = slider_popup_w - 2 * slider_popup_pad;
-  relative_x = ev->x - slider_x;
-  if (relative_x < 0) {
-    relative_x = 0;
-  }
-  if (relative_x > slider_w) {
-    relative_x = slider_w;
-  }
-  percent = (relative_x * 100) / slider_w;
-  widget_slider_set_absolute(slider_popup_kind, percent);
-  return 1;
-}
-
-static int slider_popup_handle_button(XButtonPressedEvent *ev) {
-  int slider_x;
-  int slider_w;
-  int slider_y;
-  int relative_x;
-  int percent;
-
-  if (!slider_popup_visible) {
-    return 0;
-  }
-
-  if (ev->window != slider_popup_win) {
-    widget_close_slider_popup();
-    return 0;
-  }
-
-  if (ev->button != Button1) {
-    return 1;
-  }
-
-  slider_x = slider_popup_pad;
-  slider_w = slider_popup_w - 2 * slider_popup_pad;
-  slider_y = slider_popup_slider_y -
-             ((slider_popup_knob_h - slider_popup_slider_h) / 2);
-  if (ev->y < slider_y || ev->y > slider_y + slider_popup_knob_h) {
-    return 1;
-  }
-  relative_x = ev->x - slider_x;
-  if (relative_x < 0) {
-    relative_x = 0;
-  }
-  if (relative_x > slider_w) {
-    relative_x = slider_w;
-  }
-  percent = (relative_x * 100) / slider_w;
-  slider_popup_dragging = 1;
-  widget_slider_set_absolute(slider_popup_kind, percent);
-  return 1;
-}
-
-static int widget_hit(enum WidgetId id, int x) {
-  return x >= widget_layout[id].x && x < widget_layout[id].x + widget_layout[id].w;
-}
-
-static int widget_handle_button(Monitor *m, XButtonPressedEvent *ev) {
-  if (!m || ev->window != m->widgetbarwin) {
-    return 0;
-  }
-
-  if (ev->x >= launcher_btn_x && ev->x < launcher_btn_x + launcher_btn_w) {
-    if (ev->button == Button1) {
-      project_toggle(m, PickerModeCombined);
-    }
-    return 1;
-  }
-
-  if (widget_hit(WidgetBacklight, ev->x)) {
-    if (ev->button == Button1) {
-      if (slider_popup_visible && slider_popup_kind == SliderBacklight &&
-          slider_popup_mon == m) {
-        widget_close_slider_popup();
-      } else {
-        widget_open_slider_popup(m, SliderBacklight);
-      }
-      return 1;
-    }
-    if (ev->button == Button4) {
-      return widget_set_backlight_percent(+5);
-    }
-    if (ev->button == Button3 || ev->button == Button5) {
-      return widget_set_backlight_percent(-5);
-    }
-    return 1;
-  }
-
-  if (widget_hit(WidgetVolume, ev->x)) {
-    if (ev->button == Button1) {
-      if (slider_popup_visible && slider_popup_kind == SliderVolume &&
-          slider_popup_mon == m) {
-        widget_close_slider_popup();
-      } else {
-        widget_open_slider_popup(m, SliderVolume);
-      }
-      return 1;
-    }
-    if (ev->button == Button2) {
-      widget_toggle_volume_mute();
-      return 1;
-    }
-    if (ev->button == Button4) {
-      return widget_set_volume_percent(+5);
-    }
-    if (ev->button == Button3 || ev->button == Button5) {
-      return widget_set_volume_percent(-5);
-    }
-    return 1;
-  }
-
-  if (widget_hit(WidgetMic, ev->x)) {
-    if (ev->button == Button1) {
-      widget_toggle_mic_mute();
-    }
-    return 1;
-  }
-
-  if (widget_hit(WidgetMedia, ev->x)) {
-    if (ev->button == Button1) {
-      widget_media_play_pause();
-      return 1;
-    }
-    if (ev->button == Button4) {
-      widget_media_next();
-      return 1;
-    }
-    if (ev->button == Button5) {
-      widget_media_previous();
-      return 1;
-    }
-    return 1;
-  }
-
-  if (widget_hit(WidgetTheme, ev->x)) {
-    if (ev->button == Button1 || ev->button == Button4) {
-      widget_cycle_theme_mode(+1);
-      return 1;
-    }
-    if (ev->button == Button3 || ev->button == Button5) {
-      widget_cycle_theme_mode(-1);
-      return 1;
-    }
-    if (ev->button == Button2) {
-      project_toggle(m, PickerModeTheme);
-      return 1;
-    }
-    return 1;
-  }
-
-  if (widget_hit(WidgetGit, ev->x)) {
-    if (ev->button == Button1) {
-      widget_git_open_terminal();
-    }
-    return 1;
-  }
-
-  if (widget_hit(WidgetProjects, ev->x)) {
-    if (ev->button == Button1) {
-      project_toggle(m, PickerModeProjectOnly);
-    }
-    return 1;
-  }
-
-  if (widget_hit(WidgetWifi, ev->x)) {
-    if (ev->button == Button1) {
-      wifi_popup_toggle(m);
-    }
-    return 1;
-  }
-
-  if (widget_hit(WidgetBluetooth, ev->x)) {
-    if (ev->button == Button1) {
-      widget_toggle_bluetooth();
-    }
-    return 1;
-  }
-
-  if (widget_hit(WidgetKbLayout, ev->x)) {
-    if (ev->button == Button1) {
-      widget_cycle_kblayout();
-    }
-    return 1;
-  }
-
-  {
-    size_t i;
-    for (i = 0; i < lua_widgets_len; i++) {
-      if (ev->x >= lua_widgets[i].x &&
-          ev->x < lua_widgets[i].x + lua_widgets[i].w) {
-        widget_lua_click(i, ev->button);
-        return 1;
-      }
-    }
-  }
-
-  return 1;
-}
-
-/* Interning this on every save/restore call cost a server round trip per
- * client -- with several clients open, GC'ing an empty workspace on switch
- * (which re-saves every client's tags, see workspace_remove_index) turned
- * into a burst of blocking round trips and made switching feel laggy. */
-static Atom workspace_tags_atom(void) {
-  static Atom atom = None;
-  if (atom == None) {
-    atom = XInternAtom(dpy, "_MWM_WORKSPACE_TAGS", False);
-  }
-  return atom;
-}
-
-static void client_save_workspace_tags(const Client *c) {
-  Atom property;
-  unsigned long data[2];
-
-  if (!c) {
-    return;
-  }
-  property = workspace_tags_atom();
-  data[0] = (unsigned long)(c->tags & 0xFFFFFFFFULL);
-  data[1] = (unsigned long)((c->tags >> 32) & 0xFFFFFFFFULL);
-  XChangeProperty(dpy, c->win, property, XA_CARDINAL, 32, PropModeReplace,
-                  reinterpret_cast<unsigned char *>(data), 2);
-}
-
-static int client_restore_workspace_tags(Window w, WorkspaceMask *tags) {
-  Atom property;
-  Atom actual_type;
-  int actual_format;
-  unsigned long nitems;
-  unsigned long bytes_after;
-  unsigned char *data = NULL;
-  WorkspaceMask restored = 0;
-  int ok = 0;
-
-  if (!tags) {
-    return 0;
-  }
-
-  property = workspace_tags_atom();
-  if (XGetWindowProperty(dpy, w, property, 0, 2, False, XA_CARDINAL,
-                         &actual_type, &actual_format, &nitems, &bytes_after,
-                         &data) != Success) {
-    return 0;
-  }
-
-  if (actual_type == XA_CARDINAL && actual_format == 32 && data) {
-    unsigned long *values = reinterpret_cast<unsigned long *>(data);
-    if (nitems >= 1) {
-      restored = (WorkspaceMask)values[0];
-      if (nitems >= 2) {
-        restored |= ((WorkspaceMask)values[1]) << 32;
-      }
-      restored &= get_full_workspace_mask();
-      if (restored) {
-        *tags = restored;
-        ok = 1;
-      }
-    }
-  }
-
-  if (data) {
-    XFree(data);
-  }
-  return ok;
-}
-
-// }}} Variables
-
-// {{{ config
-
-/* configuration, allows nested code to access above variables */
-
-/* See LICENSE file for copyright and license details. */
-
-/* appearance */
-static unsigned int borderpx = 1; /* border pixel of windows; overridable via mwm.set_border_width() */
-static unsigned int snap = 32;          /* snap pixel; overridable via mwm.set_snap() */
-static int gappx = 0; /* gap around every tiled client, all layouts; overridable via mwm.set_gaps() */
-static const int showbar = 1;           /* 0 means no bar */
-static const int showsystray = 1;       /* 0 means no system tray */
-static const unsigned int systrayspacing = 6;
-static const int topbar = 1;            /* 0 means bottom bar */
-/* Second entry is a fallback used only for glyphs missing from the primary
- * font -- widget icons live in the Nerd Font Private Use Area ranges, so a
- * Nerd Font must be installed for them to render instead of tofu boxes. */
-static const char *fonts[] = {"monospace:size=15", "UbuntuMono Nerd Font Mono:size=26"};
-static const char dmenufont[] = "monospace:size=10";
-static const char default_col_gray1[] = "#222222";
-static const char default_col_gray2[] = "#444444";
-static const char default_col_gray3[] = "#bbbbbb";
-static const char default_col_gray4[] = "#eeeeee";
-static const char default_col_cyan[] = "#005577";
-static const char default_col_light_bg[] = "#f4f5f7";
-static const char default_col_light_fg[] = "#24292f";
-static const char default_col_light_border[] = "#d0d5dd";
-static const char default_col_light_accent[] = "#2d6cdf";
-static const char default_col_light_accent_fg[] = "#ffffff";
-
-static const Rule rules[] = {
+Window slider_popup_win = None;
+Monitor *slider_popup_mon = NULL;
+int slider_popup_visible = 0;
+int slider_popup_dragging = 0;
+enum SliderWidget slider_popup_kind = SliderBacklight;
+const int slider_popup_w = 240;
+const int slider_popup_h = 64;
+const int slider_popup_pad = 12;
+const int slider_popup_slider_h = 8;
+const int slider_popup_slider_y = 34;
+const int slider_popup_knob_w = 12;
+const int slider_popup_knob_h = 20;
+static inline const char icon_battery_full[] = "";
+static inline const char icon_battery_75[] = "";
+static inline const char icon_battery_50[] = "";
+static inline const char icon_battery_25[] = "";
+static inline const char icon_battery_empty[] = "";
+static inline const char icon_battery_charging[] = "";
+static inline const char icon_backlight[] = "\U000F0599";
+static inline const char icon_volume_muted[] = "";
+static inline const char icon_volume_low[] = "";
+static inline const char icon_volume_high[] = "";
+static inline const char icon_theme_dark[] = "";
+static inline const char icon_theme_light[] = "\U000F0599";
+static inline const char icon_theme_auto[] = "";
+static inline const char icon_bell[] = "";
+static inline const char icon_bell_outline[] = "";
+static inline const char icon_cpu[] = "\U000F061A";
+static inline const char icon_mem[] = "\U000F035B";
+static inline const char icon_disk[] = "";
+static inline const char icon_net[] = "";
+static inline const char icon_clock[] = "";
+static inline const char icon_close[] = "";
+static inline const char icon_todo[] = "\U0000F0AE";
+static inline const char icon_checkbox_unchecked[] = "\U0000F096";
+static inline const char icon_checkbox_checked[] = "\U0000F046";
+static inline const char icon_agents[] = "\U0000F120";
+static inline const char icon_launcher[] = "\U0000F135";
+static inline const char icon_projects[] = "\U0000F07B";
+static inline const char icon_desktop_folder[] = "\U0000F07B";
+static inline const char icon_desktop_file[] = "\U0000F016";
+static inline const char icon_desktop_image[] = "\U0000F03E";
+static inline const char icon_desktop_archive[] = "\U0000F1C6";
+static inline const char icon_desktop_audio[] = "\U0000F1C7";
+static inline const char icon_desktop_video[] = "\U0000F1C8";
+static inline const char icon_desktop_pdf[] = "\U0000F1C1";
+static inline const char icon_desktop_text[] = "\U0000F0F6";
+static inline const char icon_trash_empty[] = "\U0000F1F8";
+static inline const char icon_trash_full[] = "\U0000F014";
+static inline const char icon_wifi[] = "\U0000F1EB";
+static inline const char icon_lock[] = "\U0000F023";
+static inline const char icon_bluetooth[] = "\U0000F293";
+static inline const char icon_mic[] = "\U0000F130";
+static inline const char icon_mic_muted[] = "\U0000F131";
+static inline const char icon_load[] = "\U0000F0E4";
+static inline const char icon_git[] = "\U0000F126";
+static inline const char icon_media[] = "\U0000F001";
+static inline const char icon_media_prev[] = "\U0000F048";
+static inline const char icon_media_play[] = "\U0000F04B";
+static inline const char icon_media_pause[] = "\U0000F04C";
+static inline const char icon_media_next[] = "\U0000F051";
+static inline const char icon_keyboard[] = "\U0000F11C";
+static inline const char icon_firefox[] = "\U0000F269";
+static inline const char icon_terminal[] = "\U0000F120";
+static inline const char icon_inkscape[] = "\U0000E801";
+static inline const char icon_gimp[] = "\U0000E7E7";
+static inline const char icon_libreoffice[] = "\U0000F376";
+static inline const char icon_vscode[] = "\U0000E8DA";
+static inline const char icon_emacs[] = "\U0000E7CF";
+static inline const char icon_info[] = "\U0000F05A";              /* fa-info_circle */
+static inline const char icon_layout_tile[] = "\U0000F00A";       /* fa-th */
+static inline const char icon_layout_floating[] = "\U0000F2D2";   /* fa-window_restore */
+static inline const char icon_layout_monocle[] = "\U0000F2D0";    /* fa-window_maximize */
+static inline const char icon_layout_other[] = "\U0000F009";      /* fa-th_large (lua layouts) */
+static inline const char icon_os_tux[] = "\U0000F31A";            /* linux-tux (generic fallback) */
+static inline const char icon_os_nixos[] = "\U0000F313";          /* linux-nixos */
+static inline const char icon_os_archlinux[] = "\U0000F303";      /* linux-archlinux */
+static inline const char icon_os_ubuntu[] = "\U0000F31B";         /* linux-ubuntu */
+static inline const char icon_os_fedora[] = "\U0000F30A";         /* linux-fedora */
+static inline const char icon_os_debian[] = "\U0000F306";         /* linux-debian */
+static inline const char icon_os_opensuse[] = "\U0000F314";       /* linux-opensuse */
+static inline const char icon_os_void[] = "\U0000F32E";           /* linux-void */
+static inline const char icon_os_manjaro[] = "\U0000F312";        /* linux-manjaro */
+unsigned int borderpx = 1; /* border pixel of windows; overridable via mwm.set_border_width() */
+unsigned int snap = 32;          /* snap pixel; overridable via mwm.set_snap() */
+int gappx = 0; /* gap around every tiled client, all layouts; overridable via mwm.set_gaps() */
+const int showbar = 1;           /* 0 means no bar */
+const int showsystray = 1;       /* 0 means no system tray */
+const unsigned int systrayspacing = 6;
+const int topbar = 1;            /* 0 means bottom bar */
+static inline const char *fonts[] = {"monospace:size=15", "UbuntuMono Nerd Font Mono:size=26"};
+static inline const char dmenufont[] = "monospace:size=10";
+static inline const char default_col_gray1[] = "#222222";
+static inline const char default_col_gray2[] = "#444444";
+static inline const char default_col_gray3[] = "#bbbbbb";
+static inline const char default_col_gray4[] = "#eeeeee";
+static inline const char default_col_cyan[] = "#005577";
+static inline const char default_col_light_bg[] = "#f4f5f7";
+static inline const char default_col_light_fg[] = "#24292f";
+static inline const char default_col_light_border[] = "#d0d5dd";
+static inline const char default_col_light_accent[] = "#2d6cdf";
+static inline const char default_col_light_accent_fg[] = "#ffffff";
+static inline const Rule rules[] = {
     /*  xprop(1):
      *  WM_CLASS(STRING) = instance, class
      *  WM_NAME(STRING) = title
@@ -3864,851 +2113,122 @@ static const Rule rules[] = {
     {"Gimp", NULL, NULL, 0, 1, -1},
     {"Firefox", NULL, NULL, 1ULL << 8, 0, -1},
 };
-
-/* layout(s) -- overridable via mwm.set_mfact()/mwm.set_nmaster() */
-static float mfact = 0.55; /* factor of master area size [0.05..0.95] */
-static int nmaster = 1;    /* number of clients in master area */
-static const int resizehints =
+float mfact = 0.55; /* factor of master area size [0.05..0.95] */
+int nmaster = 1;    /* number of clients in master area */
+const int resizehints =
     1; /* 1 means respect size hints in tiled resizals */
-static const int lockfullscreen =
+const int lockfullscreen =
     1; /* 1 will force focus on the fullscreen window */
-
-static const Layout layouts[] = {
+static inline const Layout layouts[] = {
     /* symbol     arrange function */
-    {"[]=", tile, -1}, /* first entry is default */
+    {"[]=", &WM::tile, -1}, /* first entry is default */
     {"><>", NULL, -1}, /* no layout function means floating behavior */
-    {"[M]", monocle, -1},
+    {"[M]", &WM::monocle, -1},
 };
-
-/* key definitions */
-#define MODKEY Mod4Mask
-#define WORKSPACEKEYS(KEY, INDEX, LABEL)                                       \
-  {MODKEY, KEY, viewnth, {.i = INDEX}, "View workspace " LABEL},               \
-      {MODKEY | ControlMask, KEY, toggleviewnth, {.i = INDEX},                 \
-       "Toggle workspace " LABEL " in view"},                                  \
-      {MODKEY | ShiftMask, KEY, tagnth, {.i = INDEX},                          \
-       "Move focused window to workspace " LABEL},                            \
-      {MODKEY | ControlMask | ShiftMask, KEY, toggletagnth, {.i = INDEX},      \
-       "Toggle focused window on workspace " LABEL},
-
-/* helper for spawning shell commands in the pre dwm-5.0 fashion */
-#define SHCMD(cmd)                                                             \
-  {                                                                            \
-    .v = (const char *[]) { "/bin/sh", "-c", cmd, NULL }                       \
-  }
-
-enum { DIR_LEFT, DIR_DOWN, DIR_UP, DIR_RIGHT };
-
-/* commands */
-static char dmenumon[2] =
+static inline char dmenumon[2] =
     "0"; /* component of dmenucmd, manipulated in spawn() */
-static const char *dmenucmd[] = {
+static inline const char *dmenucmd[] = {
     "dmenu_run", "-m",      dmenumon, "-fn",    dmenufont, "-nb",
     default_col_gray1, "-nf", default_col_gray3, "-sb", default_col_cyan,
     "-sf",       default_col_gray4, NULL};
-/* termcmd[0] points at the mutable terminal_cmd buffer (declared with the
- * other Lua-config globals above) so mwm.set_terminal() takes effect here
- * too, without needing to rebuild this array. */
-static const char *termcmd[] = {terminal_cmd, NULL};
-/* Left dock's Firefox button (see drawleftbar()). */
-static const char *firefoxcmd[] = {"firefox", NULL};
-
-static const Key keys[] = {
+static inline const char *termcmd[] = {terminal_cmd, NULL};
+static inline const char *firefoxcmd[] = {"firefox", NULL};
+static inline const char *inkscapecmd[] = {"inkscape", NULL};
+static inline const char *gimpcmd[] = {"gimp", NULL};
+static inline const char *libreofficecmd[] = {"libreoffice", NULL};
+static inline const char *vscodecmd[] = {"code", NULL};
+static inline const char *emacscmd[] = {"emacs", NULL};
+static inline const Key keys[] = {
     /* modifier                     key        function        argument */
     /* One picker window (see "project picker" further down), four scopes:
      * Mod4+p is a rofi-style app launcher (search $PATH only), Mod4+space
      * jumps straight to a project, Mod4+o is the original combined search
      * across both, and Mod4+Shift+t (further down, by the layout keys)
      * browses color themes. */
-    {MODKEY, XK_p, project_toggle_key, {.i = PickerModeAppOnly}, "Open app launcher"},
-    {MODKEY, XK_Return, spawn, {.v = termcmd}, "Open a terminal"},
-    {MODKEY, XK_o, project_toggle_key, {.i = PickerModeCombined},
+    {MODKEY, XK_p, &WM::project_toggle_key, {.i = PickerModeAppOnly}, "Open app launcher"},
+    {MODKEY, XK_Return, &WM::spawn, {.v = termcmd}, "Open a terminal"},
+    {MODKEY, XK_o, &WM::project_toggle_key, {.i = PickerModeCombined},
      "Open combined project/app picker"},
-    {MODKEY, XK_a, agent_jump_next_needs_input, {0}, "Jump to next agent needing input"},
-    {MODKEY, XK_b, togglebar, {0}, "Toggle the bars"},
-    {MODKEY, XK_r, reloadconfig, {0}, "Reload Lua config"},
-    {MODKEY, XK_h, focusdir, {.i = DIR_LEFT}, "Focus window to the left"},
-    {MODKEY, XK_j, focusdir, {.i = DIR_DOWN}, "Focus window below"},
-    {MODKEY, XK_k, focusdir, {.i = DIR_UP}, "Focus window above"},
-    {MODKEY, XK_l, focusdir, {.i = DIR_RIGHT}, "Focus window to the right"},
-    {MODKEY | ShiftMask, XK_r, restartwm, {0}, "Restart mwm"},
-    {MODKEY | ShiftMask, XK_h, resizebydir, {.i = DIR_LEFT}, "Grow/shrink window to the left"},
-    {MODKEY | ShiftMask, XK_j, resizebydir, {.i = DIR_DOWN}, "Grow/shrink window downward"},
-    {MODKEY | ShiftMask, XK_k, resizebydir, {.i = DIR_UP}, "Grow/shrink window upward"},
-    {MODKEY | ShiftMask, XK_l, resizebydir, {.i = DIR_RIGHT}, "Grow/shrink window to the right"},
-    {MODKEY | ControlMask, XK_j, focusstack, {.i = +1}, "Focus next window in stack"},
-    {MODKEY | ControlMask, XK_k, focusstack, {.i = -1}, "Focus previous window in stack"},
-    {MODKEY, XK_i, incnmaster, {.i = +1}, "Increase number of master windows"},
-    {MODKEY, XK_d, incnmaster, {.i = -1}, "Decrease number of master windows"},
-    {MODKEY | ControlMask, XK_h, setmfact, {.f = -0.05}, "Shrink master area"},
-    {MODKEY | ControlMask, XK_l, setmfact, {.f = +0.05}, "Grow master area"},
+    {MODKEY, XK_a, &WM::agent_jump_next_needs_input, {0}, "Jump to next agent needing input"},
+    {MODKEY, XK_b, &WM::togglebar, {0}, "Toggle the bars"},
+    {MODKEY, XK_r, &WM::reloadconfig, {0}, "Reload Lua config"},
+    {MODKEY, XK_h, &WM::focusdir, {.i = DIR_LEFT}, "Focus window to the left"},
+    {MODKEY, XK_j, &WM::focusdir, {.i = DIR_DOWN}, "Focus window below"},
+    {MODKEY, XK_k, &WM::focusdir, {.i = DIR_UP}, "Focus window above"},
+    {MODKEY, XK_l, &WM::focusdir, {.i = DIR_RIGHT}, "Focus window to the right"},
+    {MODKEY | ShiftMask, XK_r, &WM::restartwm, {0}, "Restart mwm"},
+    {MODKEY | ShiftMask, XK_h, &WM::resizebydir, {.i = DIR_LEFT}, "Grow/shrink window to the left"},
+    {MODKEY | ShiftMask, XK_j, &WM::resizebydir, {.i = DIR_DOWN}, "Grow/shrink window downward"},
+    {MODKEY | ShiftMask, XK_k, &WM::resizebydir, {.i = DIR_UP}, "Grow/shrink window upward"},
+    {MODKEY | ShiftMask, XK_l, &WM::resizebydir, {.i = DIR_RIGHT}, "Grow/shrink window to the right"},
+    {MODKEY | ControlMask, XK_j, &WM::focusstack, {.i = +1}, "Focus next window in stack"},
+    {MODKEY | ControlMask, XK_k, &WM::focusstack, {.i = -1}, "Focus previous window in stack"},
+    {MODKEY, XK_i, &WM::incnmaster, {.i = +1}, "Increase number of master windows"},
+    {MODKEY, XK_d, &WM::incnmaster, {.i = -1}, "Decrease number of master windows"},
+    {MODKEY | ControlMask, XK_h, &WM::setmfact, {.f = -0.05}, "Shrink master area"},
+    {MODKEY | ControlMask, XK_l, &WM::setmfact, {.f = +0.05}, "Grow master area"},
     /* zoom (swap the focused client with master) previously had no
      * keyboard binding at all -- only the ClkWinTitle middle-click below,
      * which nobody discovers on their own. */
-    {MODKEY, XK_z, zoom, {0}, "Swap focused window with master"},
+    {MODKEY, XK_z, &WM::zoom, {0}, "Swap focused window with master"},
     /* Scratchpad: designate a window (Shift+minus), then show/hide it from
      * anywhere with plain minus -- it keeps running in the background
      * between toggles, same as i3's scratchpad. */
-    {MODKEY, XK_minus, scratchpad_toggle, {0}, "Show/hide scratchpad window"},
-    {MODKEY | ShiftMask, XK_minus, scratchpad_set, {0}, "Designate focused window as scratchpad"},
-    {MODKEY, XK_Tab, view, {0}, "View previous workspace"},
-    {MODKEY | ShiftMask, XK_c, killclient, {0}, "Close focused window"},
-    {MODKEY | ShiftMask, XK_colon, promptcommand, {0}, "Open Lua command prompt"},
-    {MODKEY, XK_t, setlayout, {.v = &layouts[0]}, "Switch to tiled layout"},
-    {MODKEY, XK_f, setlayout, {.v = &layouts[1]}, "Switch to floating layout"},
-    {MODKEY, XK_m, setlayout, {.v = &layouts[2]}, "Switch to monocle layout"},
+    {MODKEY, XK_minus, &WM::scratchpad_toggle, {0}, "Show/hide scratchpad window"},
+    {MODKEY | ShiftMask, XK_minus, &WM::scratchpad_set, {0}, "Designate focused window as scratchpad"},
+    {MODKEY, XK_Tab, &WM::view, {0}, "View previous workspace"},
+    {MODKEY | ShiftMask, XK_c, &WM::killclient, {0}, "Close focused window"},
+    {MODKEY | ShiftMask, XK_colon, &WM::promptcommand, {0}, "Open Lua command prompt"},
+    {MODKEY, XK_t, &WM::setlayout, {.v = &layouts[0]}, "Switch to tiled layout"},
+    {MODKEY, XK_f, &WM::setlayout, {.v = &layouts[1]}, "Switch to floating layout"},
+    {MODKEY, XK_m, &WM::setlayout, {.v = &layouts[2]}, "Switch to monocle layout"},
     /* Same picker, fourth scope: browse and apply the named color themes in
      * color_themes[] (also reachable by middle-clicking the theme widget). */
-    {MODKEY | ShiftMask, XK_t, project_toggle_key, {.i = PickerModeTheme},
+    {MODKEY | ShiftMask, XK_t, &WM::project_toggle_key, {.i = PickerModeTheme},
      "Open color theme picker"},
     /* Used to be setlayout({0})'s "toggle to the other layout" -- redundant
      * with Ctrl+Mod+space (cyclelayout) and Mod+t/f/m (pick one directly),
      * so it's free for the project picker instead. */
-    {MODKEY, XK_space, project_toggle_key, {.i = PickerModeProjectOnly}, "Open project picker"},
-    {MODKEY | ShiftMask, XK_space, togglefloating, {0}, "Toggle focused window floating"},
-    {MODKEY | ControlMask, XK_space, cyclelayout, {.i = +1}, "Cycle to next layout"},
-    {MODKEY | ControlMask | ShiftMask, XK_space, cyclelayout, {.i = -1},
+    {MODKEY, XK_space, &WM::project_toggle_key, {.i = PickerModeProjectOnly}, "Open project picker"},
+    {MODKEY | ShiftMask, XK_space, &WM::togglefloating, {0}, "Toggle focused window floating"},
+    {MODKEY | ControlMask, XK_space, &WM::cyclelayout, {.i = +1}, "Cycle to next layout"},
+    {MODKEY | ControlMask | ShiftMask, XK_space, &WM::cyclelayout, {.i = -1},
      "Cycle to previous layout"},
-    {MODKEY, XK_0, view, {.ull = ~0ULL}, "View all workspaces"},
-    {MODKEY | ShiftMask, XK_0, tag, {.ull = ~0ULL}, "Put focused window on all workspaces"},
-    {MODKEY, XK_comma, focusmon, {.i = -1}, "Focus previous monitor"},
-    {MODKEY, XK_period, focusmon, {.i = +1}, "Focus next monitor"},
-    {MODKEY | ShiftMask, XK_comma, tagmon, {.i = -1}, "Move focused window to previous monitor"},
-    {MODKEY | ShiftMask, XK_period, tagmon, {.i = +1}, "Move focused window to next monitor"},
+    {MODKEY, XK_0, &WM::view, {.ull = ~0ULL}, "View all workspaces"},
+    {MODKEY | ShiftMask, XK_0, &WM::tag, {.ull = ~0ULL}, "Put focused window on all workspaces"},
+    {MODKEY, XK_comma, &WM::focusmon, {.i = -1}, "Focus previous monitor"},
+    {MODKEY, XK_period, &WM::focusmon, {.i = +1}, "Focus next monitor"},
+    {MODKEY | ShiftMask, XK_comma, &WM::tagmon, {.i = -1}, "Move focused window to previous monitor"},
+    {MODKEY | ShiftMask, XK_period, &WM::tagmon, {.i = +1}, "Move focused window to next monitor"},
     /* Mod+s, mnemonic "show shortcuts" -- see keybind_help_toggle_key() and
      * the "keybinding help" section further down. */
-    {MODKEY, XK_s, keybind_help_toggle_key, {0}, "Show this keybinding help"},
+    {MODKEY, XK_s, &WM::keybind_help_toggle_key, {0}, "Show this keybinding help"},
     WORKSPACEKEYS(XK_1, 0, "1") WORKSPACEKEYS(XK_2, 1, "2") WORKSPACEKEYS(XK_3, 2, "3")
         WORKSPACEKEYS(XK_4, 3, "4") WORKSPACEKEYS(XK_5, 4, "5")
             WORKSPACEKEYS(XK_6, 5, "6") WORKSPACEKEYS(XK_7, 6, "7")
                 WORKSPACEKEYS(XK_8, 7, "8") WORKSPACEKEYS(XK_9, 8, "9"){
-                    MODKEY | ShiftMask, XK_q, quit, {0}, "Quit mwm"},
+                    MODKEY | ShiftMask, XK_q, &WM::quit, {0}, "Quit mwm"},
 };
-
-/* button definitions */
-/* click can be ClkTagBar, ClkLtSymbol, ClkStatusText, ClkWinTitle,
- * ClkClientWin, or ClkRootWin */
-static const Button buttons[] = {
+static inline const Button buttons[] = {
     /* click                event mask      button          function argument */
-    {ClkLtSymbol, 0, Button1, setlayout, {0}},
-    {ClkLtSymbol, 0, Button3, setlayout, {.v = &layouts[2]}},
-    {ClkWinTitle, 0, Button2, zoom, {0}},
-    {ClkStatusText, 0, Button2, spawn, {.v = termcmd}},
-    {ClkClientWin, MODKEY, Button1, movemouse, {0}},
-    {ClkClientWin, MODKEY, Button2, togglefloating, {0}},
-    {ClkClientWin, MODKEY, Button3, resizemouse, {0}},
+    {ClkLtSymbol, 0, Button1, &WM::setlayout, {0}},
+    {ClkLtSymbol, 0, Button3, &WM::setlayout, {.v = &layouts[2]}},
+    {ClkWinTitle, 0, Button1, &WM::tasklist_focus, {0}},
+    {ClkWinTitle, 0, Button2, &WM::zoom, {0}},
+    {ClkStatusText, 0, Button2, &WM::spawn, {.v = termcmd}},
+    {ClkClientWin, MODKEY, Button1, &WM::movemouse, {0}},
+    {ClkClientWin, MODKEY, Button2, &WM::togglefloating, {0}},
+    {ClkClientWin, MODKEY, Button3, &WM::resizemouse, {0}},
     /* *nth, not the plain mask-based versions -- buttonpress() hands these
      * arg.i = the clicked slot (0-8) within the active project's own 9,
      * same convention WORKSPACEKEYS uses for Mod+1-9. */
-    {ClkTagBar, 0, Button1, viewnth, {0}},
-    {ClkTagBar, 0, Button3, toggleviewnth, {0}},
-    {ClkTagBar, MODKEY, Button1, tagnth, {0}},
-    {ClkTagBar, MODKEY, Button3, toggletagnth, {0}},
-    {ClkClock, 0, Button1, calendar_toggle_key, {0}},
+    {ClkTagBar, 0, Button1, &WM::viewnth, {0}},
+    {ClkTagBar, 0, Button3, &WM::toggleviewnth, {0}},
+    {ClkTagBar, MODKEY, Button1, &WM::tagnth, {0}},
+    {ClkTagBar, MODKEY, Button3, &WM::toggletagnth, {0}},
+    {ClkClock, 0, Button1, &WM::calendar_toggle_key, {0}},
 };
-
-// }}} config
-
-static char *xstrdup_local(const char *src) {
-  size_t len;
-  char *dst;
-  if (!src) {
-    src = "";
-  }
-  len = strlen(src);
-  dst = ecalloc_type<char>(len + 1);
-  memcpy(dst, src, len);
-  return dst;
-}
-
-static void write_all(int fd, const char *buf, size_t len) {
-  while (len > 0) {
-    ssize_t written = write(fd, buf, len);
-    if (written <= 0) {
-      if (errno == EINTR) {
-        continue;
-      }
-      return;
-    }
-    buf += (size_t)written;
-    len -= (size_t)written;
-  }
-}
-
-static void wm_output_append(const char *buf, size_t len) {
-  if (wm_command_reply_fd >= 0) {
-    write_all(wm_command_reply_fd, buf, len);
-  }
-  if (wm_capture_buffer && wm_capture_buffer_size > 0) {
-    size_t available = wm_capture_buffer_size - 1;
-    if (wm_capture_buffer_len < available) {
-      size_t to_copy = MIN(len, available - wm_capture_buffer_len);
-      memcpy(wm_capture_buffer + wm_capture_buffer_len, buf, to_copy);
-      wm_capture_buffer_len += to_copy;
-      wm_capture_buffer[wm_capture_buffer_len] = '\0';
-    }
-  }
-}
-
-static WorkspaceMask get_full_workspace_mask(void) {
-  if (workspaces.empty()) {
-    return 0;
-  }
-  if (workspaces.size() >= 64) {
-    return ~0ULL;
-  }
-  return (1ULL << workspaces.size()) - 1ULL;
-}
-
-static Workspace *workspace_by_index(size_t index) {
-  if (index >= workspaces.size()) {
-    return NULL;
-  }
-  return &workspaces[index];
-}
-
-static WorkspaceMask workspace_mask_from_index(size_t index) {
-  if (index >= 64) {
-    return 0;
-  }
-  return 1ULL << index;
-}
-
-static const char *workspace_name_from_mask(WorkspaceMask mask) {
-  for (size_t i = 0; i < workspaces.size(); i++) {
-    if (mask & workspace_mask_from_index(i)) {
-      return workspaces[i].name.c_str();
-    }
-  }
-  return "";
-}
-
-static size_t workspace_find(const char *name) {
-  if (!name || name[0] == '\0') {
-    return SIZE_MAX;
-  }
-  for (size_t i = 0; i < workspaces.size(); i++) {
-    if (workspaces[i].name == name) {
-      return i;
-    }
-  }
-  return SIZE_MAX;
-}
-
-static size_t workspace_index_from_mask(WorkspaceMask mask) {
-  if (!mask || (mask & (mask - 1ULL))) {
-    return SIZE_MAX;
-  }
-  for (size_t i = 0; i < workspaces.size(); i++) {
-    if (mask == workspace_mask_from_index(i)) {
-      return i;
-    }
-  }
-  return SIZE_MAX;
-}
-
-static int workspace_has_clients(size_t index) {
-  Monitor *m;
-  WorkspaceMask mask;
-  Client *c;
-
-  if (index >= workspaces.size()) {
-    return 0;
-  }
-  mask = workspace_mask_from_index(index);
-  for (m = mons.get(); m; m = m->next.get()) {
-    for (c = m->clients.get(); c; c = c->next.get()) {
-      if (c->tags & mask) {
-        return 1;
-      }
-    }
-  }
-  return 0;
-}
-
-static int workspace_is_visible_on_any_monitor(size_t index) {
-  Monitor *m;
-  WorkspaceMask mask;
-
-  if (index >= workspaces.size()) {
-    return 0;
-  }
-  mask = workspace_mask_from_index(index);
-  for (m = mons.get(); m; m = m->next.get()) {
-    if (m->tagset[m->seltags] & mask) {
-      return 1;
-    }
-  }
-  return 0;
-}
-
-static WorkspaceMask workspace_reindex_mask_after_remove(WorkspaceMask mask,
-                                                         size_t removed_index) {
-  WorkspaceMask result = 0;
-  size_t i;
-
-  for (i = 0; i < 64; i++) {
-    WorkspaceMask bit = 1ULL << i;
-    if (!(mask & bit)) {
-      continue;
-    }
-    if (i == removed_index) {
-      continue;
-    }
-    if (i > removed_index) {
-      result |= 1ULL << (i - 1);
-    } else {
-      result |= bit;
-    }
-  }
-  return result;
-}
-
-static void workspace_sync_after_registry_change(void) {
-  Monitor *m;
-  WorkspaceMask full = get_full_workspace_mask();
-  WorkspaceMask fallback = !workspaces.empty() ? workspace_mask_from_index(0) : 0;
-
-  for (m = mons.get(); m; m = m->next.get()) {
-    m->tagset[0] &= full;
-    m->tagset[1] &= full;
-    if (!m->tagset[0]) {
-      m->tagset[0] = fallback;
-    }
-    if (!m->tagset[1]) {
-      m->tagset[1] = fallback;
-    }
-  }
-}
-
-static size_t workspace_ensure(const char *name) {
-  size_t found;
-
-  if (!name || name[0] == '\0') {
-    return SIZE_MAX;
-  }
-  found = workspace_find(name);
-  if (found != SIZE_MAX) {
-    return found;
-  }
-  if (workspaces.size() >= 64) {
-    return SIZE_MAX;
-  }
-  workspaces.push_back(
-      Workspace{workspace_mask_from_index(workspaces.size()), name});
-  workspace_sync_after_registry_change();
-  return workspaces.size() - 1;
-}
-
-static int workspace_remove_index(size_t index) {
-  Monitor *m;
-
-  if (index >= workspaces.size()) {
-    return 0;
-  }
-
-  workspaces.erase(workspaces.begin() + (ptrdiff_t)index);
-  for (size_t i = index; i < workspaces.size(); i++) {
-    workspaces[i].mask = workspace_mask_from_index(i);
-  }
-
-  for (m = mons.get(); m; m = m->next.get()) {
-    Client *c;
-    m->tagset[0] = workspace_reindex_mask_after_remove(m->tagset[0], index);
-    m->tagset[1] = workspace_reindex_mask_after_remove(m->tagset[1], index);
-    for (c = m->clients.get(); c; c = c->next.get()) {
-      c->tags = workspace_reindex_mask_after_remove(c->tags, index);
-      client_save_workspace_tags(c);
-    }
-  }
-
-  workspace_sync_after_registry_change();
-  return 1;
-}
-
-static int workspace_rename(size_t index, const char *name) {
-  size_t found;
-  if (index >= workspaces.size() || !name || name[0] == '\0') {
-    return 0;
-  }
-  found = workspace_find(name);
-  if (found != SIZE_MAX && found != index) {
-    return 0;
-  }
-  workspaces[index].name = name;
-  return 1;
-}
-
-static void workspace_set_defaults(void) {
-  char name[16];
-  if (!workspaces.empty()) {
-    return;
-  }
-  for (size_t i = 0; i < 9; i++) {
-    snprintf(name, sizeof(name), "%zu", i + 1);
-    if (workspace_ensure(name) == SIZE_MAX) {
-      die("failed to create default workspace");
-    }
-  }
-}
-
-static int workspace_set_list_from_lua(lua_State *L, int index) {
-  size_t len;
-  std::vector<Workspace> old_workspaces = std::move(workspaces);
-
-  luaL_checktype(L, index, LUA_TTABLE);
-  workspaces.clear();
-  len = (size_t)lua_rawlen(L, index);
-  for (size_t i = 1; i <= len; i++) {
-    lua_rawgeti(L, index, (int)i);
-    if (!lua_isstring(L, -1) ||
-        workspace_ensure(lua_tostring(L, -1)) == SIZE_MAX) {
-      lua_pop(L, 1);
-      workspaces = std::move(old_workspaces);
-      return 0;
-    }
-    lua_pop(L, 1);
-  }
-  if (workspaces.empty()) {
-    workspace_set_defaults();
-  }
-  workspace_sync_after_registry_change();
-  return 1;
-}
-
-static void workspace_view_mask(Monitor *m, WorkspaceMask mask) {
-  if (!m) {
-    return;
-  }
-  if ((mask & get_full_workspace_mask()) == m->tagset[m->seltags]) {
-    return;
-  }
-  m->seltags ^= 1;
-  if (mask & get_full_workspace_mask()) {
-    m->tagset[m->seltags] = mask & get_full_workspace_mask();
-  }
-  if (!m->tagset[m->seltags] && !workspaces.empty()) {
-    m->tagset[m->seltags] = workspace_mask_from_index(0);
-  }
-  focus(NULL);
-  arrange(m);
-}
-
-static void get_workspace_socket_path(char *buf, size_t size) {
-  const char *runtime = getenv("XDG_RUNTIME_DIR");
-  const char *display_name = getenv("DISPLAY");
-  if (runtime && runtime[0] != '\0') {
-    snprintf(buf, size, "%s/mwm-%s.sock", runtime,
-             display_name && display_name[0] ? display_name : "display");
-    return;
-  }
-  snprintf(buf, size, "/tmp/mwm-%s.sock",
-           display_name && display_name[0] ? display_name : "display");
-}
-
-// {{{ void applyrules(Client *c)
-void applyrules(Client *c) {
-  const char *class_name, *instance;
-  unsigned int i;
-  size_t li;
-  const Rule *r;
-  Monitor *m;
-  XClassHint ch = {NULL, NULL};
-
-  /* rule matching */
-  c->isfloating = 0;
-  c->tags = 0;
-  XGetClassHint(dpy, c->win, &ch);
-  class_name = ch.res_class ? ch.res_class : broken;
-  instance = ch.res_name ? ch.res_name : broken;
-
-  for (i = 0; i < LENGTH(rules); i++) {
-    r = &rules[i];
-    if ((!r->title || strstr(c->name, r->title)) &&
-        (!r->class_name || strstr(class_name, r->class_name)) &&
-        (!r->instance || strstr(instance, r->instance))) {
-      c->isfloating = r->isfloating;
-      c->tags |= r->tags;
-      for (m = mons.get(); m && m->num != r->monitor; m = m->next.get()) {
-        ;
-      }
-      if (m) {
-        c->mon = m;
-      }
-    }
-  }
-
-  /* mwm.rule() from Lua -- applied after the compiled-in rules[] above, so
-   * a user's Lua config always has the final say for windows it matches. */
-  for (li = 0; li < lua_rules_len; li++) {
-    LuaRule *lr = &lua_rules[li];
-    if ((!lr->class_name[0] || strstr(class_name, lr->class_name)) &&
-        (!lr->instance[0] || strstr(instance, lr->instance)) &&
-        (!lr->title[0] || strstr(c->name, lr->title))) {
-      if (lr->has_isfloating) {
-        c->isfloating = lr->isfloating;
-      }
-      if (lr->workspace[0]) {
-        size_t widx = workspace_ensure(lr->workspace);
-        if (widx != SIZE_MAX) {
-          c->tags = workspace_mask_from_index(widx);
-        }
-      }
-    }
-  }
-
-  if (ch.res_class) {
-    XFree(ch.res_class);
-  }
-  if (ch.res_name) {
-    XFree(ch.res_name);
-  }
-  c->tags = c->tags & get_full_workspace_mask()
-                ? c->tags & get_full_workspace_mask()
-                : c->mon->tagset[c->mon->seltags];
-}
-// }}} void applyrules(Client *c)
-
-// {{{ int applysizehints(Client *c, int *x, int
-//                        *y, int *w, int *h, int interact)
-int applysizehints(Client *c, int *x, int *y, int *w, int *h, int interact) {
-  int baseismin;
-  Monitor *m = c->mon;
-
-  /* set minimum possible */
-  *w = MAX(1, *w);
-  *h = MAX(1, *h);
-  if (interact) {
-    if (*x > sw) {
-      *x = sw - WIDTH(c);
-    }
-    if (*y > sh) {
-      *y = sh - HEIGHT(c);
-    }
-    if (*x + *w + 2 * c->bw < 0) {
-      *x = 0;
-    }
-    if (*y + *h + 2 * c->bw < 0) {
-      *y = 0;
-    }
-  } else {
-    if (*x >= m->wx + m->ww) {
-      *x = m->wx + m->ww - WIDTH(c);
-    }
-    if (*y >= m->wy + m->wh) {
-      *y = m->wy + m->wh - HEIGHT(c);
-    }
-    if (*x + *w + 2 * c->bw <= m->wx) {
-      *x = m->wx;
-    }
-    if (*y + *h + 2 * c->bw <= m->wy) {
-      *y = m->wy;
-    }
-  }
-  if (*h < bh) {
-    *h = bh;
-  }
-  if (*w < bh) {
-    *w = bh;
-  }
-  if (resizehints || c->isfloating || !c->mon->lt[c->mon->sellt]->arrange) {
-    if (!c->hintsvalid) {
-      updatesizehints(c);
-    }
-    /* see last two sentences in ICCCM 4.1.2.3 */
-    baseismin = c->basew == c->minw && c->baseh == c->minh;
-    if (!baseismin) { /* temporarily remove base dimensions */
-      *w -= c->basew;
-      *h -= c->baseh;
-    }
-    /* adjust for aspect limits */
-    if (c->mina > 0 && c->maxa > 0) {
-      if (c->maxa < (float)*w / *h) {
-        *w = *h * c->maxa + 0.5;
-      } else if (c->mina < (float)*h / *w) {
-        *h = *w * c->mina + 0.5;
-      }
-    }
-    if (baseismin) { /* increment calculation requires this */
-      *w -= c->basew;
-      *h -= c->baseh;
-    }
-    /* adjust for increment value */
-    if (c->incw) {
-      *w -= *w % c->incw;
-    }
-    if (c->inch) {
-      *h -= *h % c->inch;
-    }
-    /* restore base dimensions */
-    *w = MAX(*w + c->basew, c->minw);
-    *h = MAX(*h + c->baseh, c->minh);
-    if (c->maxw) {
-      *w = MIN(*w, c->maxw);
-    }
-    if (c->maxh) {
-      *h = MIN(*h, c->maxh);
-    }
-  }
-  return *x != c->x || *y != c->y || *w != c->w || *h != c->h;
-}
-// }}} int applysizehints()
-
-// {{{ void arrange(Monitor *m)
-void arrange(Monitor *m) {
-  if (m) {
-    showhide(m->stack.get());
-  } else {
-    for (m = mons.get(); m; m = m->next.get()) {
-      showhide(m->stack.get());
-    }
-  }
-  if (m) {
-    arrangemon(m);
-    restack(m);
-  } else {
-    for (m = mons.get(); m; m = m->next.get()) {
-      arrangemon(m);
-    }
-  }
-}
-// }}} void arrange(Monitor *m)
-
-// {{{ void arrangemon(Monitor *m)
-void arrangemon(Monitor *m) {
-  strncpy(m->ltsymbol, m->lt[m->sellt]->symbol, sizeof m->ltsymbol);
-  if (m->lt[m->sellt]->arrange) {
-    m->lt[m->sellt]->arrange(m);
-  }
-}
-// }}} void arrangemon(Monitor *m)
-
-// {{{ void attach(Client *c)
-void attach(Client *c) {
-  c->next = c->mon->clients;
-  c->mon->clients = c->shared_from_this();
-}
-// }}} void attach(Client *c)
-
-// {{{ void attachstack(Client *c)
-void attachstack(Client *c) {
-  c->snext = c->mon->stack;
-  c->mon->stack = c->shared_from_this();
-}
-// }}} void attachstack(Client *c)
-
-// {{{ void buttonpress(XEvent *e)
-void buttonpress(XEvent *e) {
-  unsigned int x, click;
-  size_t i;
-  Arg arg = {0};
-  Client *c;
-  Monitor *m;
-  XButtonPressedEvent *ev = &e->xbutton;
-  unsigned int statusw, trayw, clockw;
-
-  click = ClkRootWin;
-  if (keybind_help_handle_button(ev)) {
-    return;
-  }
-  if (calendar_handle_button(ev)) {
-    return;
-  }
-  if (wifi_handle_button(ev)) {
-    return;
-  }
-  if (project_handle_button(ev)) {
-    return;
-  }
-  if (desktop_handle_button(ev)) {
-    return;
-  }
-  if (slider_popup_handle_button(ev)) {
-    return;
-  }
-  if (notif_sidebar_handle_button(ev)) {
-    return;
-  }
-  if (todo_sidebar_handle_button(ev)) {
-    return;
-  }
-  if (agent_sidebar_handle_button(ev)) {
-    return;
-  }
-  /* focus the monitor if necessary */
-  if ((m = wintomon(ev->window)) && m != selmon) {
-    unfocus(selmon->sel, 1);
-    selmon = m;
-    focus(NULL);
-  }
-  if (widget_handle_button(m, ev)) {
-    return;
-  }
-  if (leftbar_handle_button(m, ev)) {
-    return;
-  }
-  if (rightbar_handle_button(m, ev)) {
-    return;
-  }
-  // If the window is equal to the selected monitor's bar window
-  if (ev->window == selmon->barwin) {
-    char project_label[288];
-    char base[256];
-
-    /* Must match drawbar()'s layout exactly: project label, then the
-     * active project's 9 fixed slots ("1".."9", always all of them,
-     * whether or not each has actually been created yet), starting past
-     * the label rather than at the left edge. */
-    project_basename(active_project_path, base, sizeof(base));
-    snprintf(project_label, sizeof(project_label), "%s %s", icon_projects, base);
-    x = (int)TEXTW(project_label);
-    statusw = TEXTW(stext);
-    trayw = (showsystray && systray && selmon == m) ? getsystraywidth() : 0;
-    clockw = (unsigned int)clock_reserved_w;
-    i = 10; /* sentinel: no slot matched */
-    for (size_t n = 1; n <= 9; n++) {
-      char label[4];
-      snprintf(label, sizeof(label), "%zu", n);
-      x += TEXTW(label);
-      if (ev->x < x) {
-        i = n - 1; /* 0-8, same convention as WORKSPACEKEYS' arg.i */
-        break;
-      }
-    }
-    if (i < 9) {
-      char name[300];
-      size_t idx;
-
-      click = ClkTagBar;
-      arg.i = (int)i;
-      /* Materialize the slot now, mainly so the lua_buttons[] path below
-       * has a real mask to turn back into a name -- the *nth function
-       * this ultimately dispatches to (see the buttons[] table) will just
-       * find it already there via its own workspace_ensure() call. */
-      project_workspace_name((int)i + 1, name, sizeof(name));
-      idx = workspace_ensure(name);
-      arg.ull = idx == SIZE_MAX ? 0 : workspace_mask_from_index(idx);
-    } else if (ev->x < x + TEXTW(selmon->ltsymbol)) {
-      click = ClkLtSymbol;
-    } else if (ev->x > selmon->ww - (int)clockw) {
-      click = ClkClock;
-    } else if (ev->x > selmon->ww - (int)statusw - (int)trayw - (int)clockw) {
-      click = ClkStatusText;
-    } else {
-      click = ClkWinTitle;
-    }
-  } else if ((c = wintoclient(ev->window))) {
-    focus(c);
-    restack(selmon);
-    XAllowEvents(dpy, ReplayPointer, CurrentTime);
-    click = ClkClientWin;
-  }
-  // Iterate over all buttons in buttons list
-  for (i = 0; i < LENGTH(buttons); i++) {
-    // If click event matches
-    if (click == buttons[i].click && buttons[i].func &&
-        buttons[i].button == ev->button &&
-        CLEANMASK(buttons[i].mask) == CLEANMASK(ev->state)) {
-      buttons[i].func(click == ClkTagBar && buttons[i].arg.i == 0 ? &arg
-                                                                  : &buttons[i].arg);
-    }
-  }
-  for (i = 0; i < lua_buttons_len; i++) {
-    if (click == (unsigned int)lua_buttons[i].click && lua_buttons[i].button == ev->button &&
-        CLEANMASK(lua_buttons[i].mod) == CLEANMASK(ev->state)) {
-      const char *wsname = click == ClkTagBar ? workspace_name_from_mask(arg.ull) : NULL;
-      lua_button_invoke(i, wsname);
-    }
-  }
-}
-// }}} void buttonpress(XEvent *e)
-
-// {{{ void buttonrelease(XEvent *e)
-void buttonrelease(XEvent *e) {
-  XButtonReleasedEvent *ev = &e->xbutton;
-
-  (void)ev;
-  slider_popup_dragging = 0;
-}
-// }}} void buttonrelease(XEvent *e)
-
-// {{{ void checkargs(int argc, char *argv[])
-void checkargs(int argc, char *argv[]) {
-  if (argc == 2 && !strcmp("-v", argv[1])) {
-    die(" ");
-  } else if (argc != 1) {
-    die("usage: mwm [-v]");
-  }
-}
-// }}} void checkargs(int argc, char *argv[])
-
-// {{{ void checklocale(void)
-void checklocale(void) {
-  if (!setlocale(LC_CTYPE, "") || !XSupportsLocale()) {
-    fputs("warning: no locale support\n", stderr);
-  }
-}
-// }}} void checklocale(void)
-
-// {{{ void checkotherwm(void)
-void checkotherwm(void) {
-  xerrorxlib = XSetErrorHandler(xerrorstart);
-  /* this causes an error if some other window manager is running */
-  XSelectInput(dpy, DefaultRootWindow(dpy), SubstructureRedirectMask);
-  XSync(dpy, False);
-  XSetErrorHandler(xerror);
-  XSync(dpy, False);
-}
-// }}} void checkotherwm(void)
-
-// {{{ void checkx11(void)
-void checkx11(void) {
-  dpy_owner.reset(XOpenDisplay(NULL));
-  dpy = dpy_owner.get();
-  if (!dpy) {
-    die("mwm: cannot open display");
-  }
-}
-// }}} void checkx11(void)
-
-// {{{ theme config
-static void copy_color_value(char dest[32], const char *src) {
-  if (!dest || !src) {
-    return;
-  }
-  snprintf(dest, 32, "%s", src);
-}
-
-static void set_default_bar_theme(void) {
-  copy_color_value(bar_theme_dark.normal.fg, default_col_gray3);
-  copy_color_value(bar_theme_dark.normal.bg, default_col_gray1);
-  copy_color_value(bar_theme_dark.normal.border, default_col_gray2);
-  copy_color_value(bar_theme_dark.selected.fg, default_col_gray4);
-  copy_color_value(bar_theme_dark.selected.bg, default_col_cyan);
-  copy_color_value(bar_theme_dark.selected.border, default_col_cyan);
-
-  copy_color_value(bar_theme_light.normal.fg, default_col_light_fg);
-  copy_color_value(bar_theme_light.normal.bg, default_col_light_bg);
-  copy_color_value(bar_theme_light.normal.border, default_col_light_border);
-  copy_color_value(bar_theme_light.selected.fg, default_col_light_accent_fg);
-  copy_color_value(bar_theme_light.selected.bg, default_col_light_accent);
-  copy_color_value(bar_theme_light.selected.border, default_col_light_accent);
-}
-
-typedef struct {
-  const char *name;
-  int is_light;
-  BarThemeConfig colors; /* {normal{fg,bg,border}, selected{fg,bg,border}} */
-} ColorTheme;
-
-/* Picked from the Mod+Shift+t / theme-widget-middle-click picker (see
- * PickerModeTheme in project_filter()/project_launch()) -- selecting one
- * copies .colors into both bar_theme_dark and bar_theme_light via
- * color_theme_apply(), since each entry here is one complete look rather
- * than a dark/light pair. "Default Dark"/"Default Light" are the original
- * hardcoded scheme from set_default_bar_theme(), kept as entries 0 and 1 so
- * they're reachable from the same list. */
-static const ColorTheme color_themes[] = {
+static inline const ColorTheme color_themes[] = {
     {"Default Dark", 0, {{"#bbbbbb", "#222222", "#444444"}, {"#eeeeee", "#005577", "#005577"}}},
     {"Default Light", 1, {{"#24292f", "#f4f5f7", "#d0d5dd"}, {"#ffffff", "#2d6cdf", "#2d6cdf"}}},
     {"Dracula", 0, {{"#6272a4", "#282a36", "#44475a"}, {"#f8f8f2", "#bd93f9", "#bd93f9"}}},
@@ -5075,8 +2595,2830 @@ static const ColorTheme color_themes[] = {
     {"Base16: Zenbones", 0, {{"#b77e64", "#191919", "#de6e7c"}, {"#191919", "#cf86c1", "#cf86c1"}}},
     {"Base16: Zenburn", 0, {{"#6f6f6f", "#383838", "#404040"}, {"#383838", "#7cb8bb", "#7cb8bb"}}},
 };
+};
+// }}} class WM
 
-static int color_theme_find_by_name(const char *name) {
+// {{{ lua_wm
+/* Every lua_mwm_* function below is registered with lua_pushcfunction(),
+ * which requires the bare int(*)(lua_State*) C signature Lua's API is
+ * built around -- there's no slot for an implicit `this`, so these can't
+ * be WM members. This is how they reach the one WM instance instead: it's
+ * stashed in the Lua registry (see WM::load_config_from_lua()), keyed by
+ * a name namespaced against collision with anything a user's config or a
+ * library it loads might also stash there. */
+static WM *lua_wm(lua_State *L) {
+  WM *wm;
+  lua_getfield(L, LUA_REGISTRYINDEX, "mwm_wm_instance");
+  wm = static_cast<WM *>(lua_touserdata(L, -1));
+  lua_pop(L, 1);
+  return wm;
+}
+// }}} lua_wm
+
+
+// {{{ Function declarations
+static int lua_mwm_agent_command(lua_State *L);
+static int lua_mwm_create_workspace(lua_State *L);
+static int lua_mwm_current_project(lua_State *L);
+static int lua_mwm_exec(lua_State *L);
+static int lua_mwm_focus_workspace(lua_State *L);
+static int lua_mwm_list_projects(lua_State *L);
+static int lua_mwm_list_workspaces(lua_State *L);
+static int lua_mwm_rename_workspace(lua_State *L);
+static int lua_mwm_switch_project(lua_State *L);
+static int lua_mwm_theme(lua_State *L);
+static int lua_mwm_widget(lua_State *L);
+static int lua_mwm_workspaces(lua_State *L);
+static int lua_mwm_keybind(lua_State *L);
+static int lua_mwm_rule(lua_State *L);
+static int lua_mwm_set_terminal(lua_State *L);
+static int lua_mwm_set_mfact(lua_State *L);
+static int lua_mwm_set_nmaster(lua_State *L);
+static int lua_mwm_set_snap(lua_State *L);
+static int lua_mwm_set_border_width(lua_State *L);
+static int lua_mwm_set_gaps(lua_State *L);
+static int lua_mwm_scratchpad_toggle(lua_State *L);
+static int lua_mwm_scratchpad_set(lua_State *L);
+static int lua_mwm_zoom(lua_State *L);
+static int lua_mwm_toggle_floating(lua_State *L);
+static int lua_mwm_kill_client(lua_State *L);
+static int lua_mwm_toggle_bar(lua_State *L);
+static int lua_mwm_mousebind(lua_State *L);
+static int lua_mwm_set_layout(lua_State *L);
+static int lua_mwm_layout(lua_State *L);
+static int lua_mwm_cycle_layout(lua_State *L);
+
+/* {{{ notification sidebar declarations */
+/* }}} notification sidebar declarations */
+
+/* {{{ todo sidebar declarations */
+/* }}} todo sidebar declarations */
+
+/* {{{ agent sidebar declarations */
+/* }}} agent sidebar declarations */
+
+/* {{{ launcher declarations (app index only -- see launcher globals above) */
+/* }}} launcher declarations */
+
+/* {{{ project picker declarations */
+/* }}} project picker declarations */
+
+/* {{{ keybinding help declarations */
+/* }}} keybinding help declarations */
+
+/* {{{ wifi popup declarations */
+static int wifi_network_cmp(const void *a, const void *b);
+/* }}} wifi popup declarations */
+
+/* {{{ info popup declarations */
+/* }}} info popup declarations */
+
+/* {{{ bluetooth popup declarations */
+/* }}} bluetooth popup declarations */
+
+/* {{{ desktop icons declarations */
+/* }}} desktop icons declarations */
+
+
+static int xerror(Display *dpy, XErrorEvent *ee);
+static int xerrordummy(Display *dpy, XErrorEvent *ee);
+static int xerrorstart(Display *dpy, XErrorEvent *ee);
+
+// }}} Function declarations
+
+// {{{ Variables
+/* Pixels drawbar() reserves for the clock at the far right of the top bar,
+ * past the systray -- updatesystray() shifts the tray left by this much so
+ * the two never overlap. Set in drawbar() just before it calls
+ * updatesystray(); 0 on any monitor that isn't selmon (no clock drawn there). */
+
+/* {{{ calendar popup globals */
+/* }}} calendar popup globals */
+/* The one designated scratchpad client, if any -- see scratchpad_toggle().
+ * Cleared by unmanage() when this client is closed, so it never dangles. */
+/* -1 means "no named theme picked -- just following theme_mode's plain
+ * dark/light/system default"; otherwise an index into color_themes[] whose
+ * colors were copied into both bar_theme_dark and bar_theme_light (a named
+ * theme is one complete look, not a dark/light pair) by color_theme_apply(). */
+/* Layout* handles for the Lua layouts above, so setlayout()/m->lt[] can
+ * point at something -- one static entry per lua_layouts[] slot, each
+ * carrying its index via Layout.lua_index. */
+
+/* {{{ notification sidebar globals */
+
+/* }}} notification sidebar globals */
+
+/* {{{ todo sidebar globals */
+
+
+/* }}} todo sidebar globals */
+
+/* {{{ agent sidebar globals */
+
+
+/* }}} agent sidebar globals */
+
+/* {{{ launcher globals */
+/* The picker window itself is now project_*'s (see below) -- this is just
+ * the $PATH-scanned app index it searches alongside saved projects. The
+ * picker is opened via the top-left corner button on the left dock bar
+ * (see drawleftbar()/leftbar_handle_button()); the bottom widget bar no
+ * longer has its own launcher/project buttons. */
+/* }}} launcher globals */
+
+/* {{{ project picker globals */
+/* The project shown in drawbar()'s top-left corner -- independent of
+ * whichever workspace/tag happens to be in view, so it doesn't disappear
+ * just because you've switched to a plain numbered workspace. Always
+ * non-empty: set to $HOME at every startup (see project_init_default() in
+ * setup()) and updated whenever the picker or mwm.switch_project() actually
+ * switches projects (project_set_active()). Deliberately not persisted --
+ * every session starts on "default" again, per the user's request. */
+
+/* }}} project picker globals */
+
+/* {{{ keybinding help globals */
+/* }}} keybinding help globals */
+
+/* {{{ desktop icons globals */
+
+
+
+
+/* xdnd target-side drag-in state */
+/* }}} desktop icons globals */
+
+/* {{{ wifi popup globals */
+
+
+/* }}} wifi popup globals */
+
+/* {{{ info popup globals */
+/* Shared by every "just show me more detail" widget (battery, load, cpu,
+ * mem, disk, net, git, keyboard layout, media) -- one popup window and one
+ * content switch, the same way slider_popup covers backlight/volume/mic
+ * instead of three separate windows. */
+
+/* }}} info popup globals */
+
+/* {{{ bluetooth popup globals */
+/* }}} bluetooth popup globals */
+
+/* Incremented once per updatewidgets() call (~every 2s); lets individual
+ * widgets throttle expensive work to less than every tick without each one
+ * tracking its own wall-clock timer. */
+/* WidgetClock is deliberately absent -- it's drawn directly in drawbar()
+ * instead, at the far right of the top bar past the systray, rather than
+ * among these in the bottom widget bar. */
+/* WidgetNotif/WidgetTodo/WidgetAgents are deliberately absent -- those three
+ * sidebar toggles live on the right dock bar now (see drawrightbar()),
+ * not among these in the bottom widget bar. WidgetClock is likewise absent,
+ * drawn instead at the far right of the top bar (see drawbar()). The
+ * project picker button is likewise absent from the bottom widget bar --
+ * it's opened via the top-left corner button on the left dock bar instead
+ * (see drawleftbar()/leftbar_handle_button()). */
+
+std::array<void (WM::*)(XEvent *), LASTEvent> WM::make_handler_table(void) {
+  std::array<void (WM::*)(XEvent *), LASTEvent> handlers = {};
+  handlers[ButtonPress] = &WM::buttonpress;
+  handlers[ButtonRelease] = &WM::buttonrelease;
+  handlers[ClientMessage] = &WM::clientmessage;
+  handlers[ConfigureRequest] = &WM::configurerequest;
+  handlers[ConfigureNotify] = &WM::configurenotify;
+  handlers[DestroyNotify] = &WM::destroynotify;
+  handlers[EnterNotify] = &WM::enternotify;
+  handlers[Expose] = &WM::expose;
+  handlers[FocusIn] = &WM::focusin;
+  handlers[KeyPress] = &WM::keypress;
+  handlers[MappingNotify] = &WM::mappingnotify;
+  handlers[MapRequest] = &WM::maprequest;
+  handlers[MotionNotify] = &WM::motionnotify;
+  handlers[PropertyNotify] = &WM::propertynotify;
+  handlers[SelectionNotify] = &WM::selectionnotify;
+  handlers[UnmapNotify] = &WM::unmapnotify;
+  return handlers;
+}
+
+int WM::read_long_from_file(const char *path, long *value) {
+  FILE *fp;
+  long parsed;
+
+  if (!path || path[0] == '\0' || !value) {
+    return 0;
+  }
+  fp = fopen(path, "r");
+  if (!fp) {
+    return 0;
+  }
+  if (fscanf(fp, "%ld", &parsed) != 1) {
+    fclose(fp);
+    return 0;
+  }
+  fclose(fp);
+  *value = parsed;
+  return 1;
+}
+
+/* Runs argv[0] with cwd (if given) via fork/exec -- no shell, so a project
+ * path with odd characters (spaces, quotes) can't break out of a command
+ * line the way it could through popen()/system(). Captures stdout, discards
+ * stderr, returns whether the child exited 0.
+ *
+ * This runs on the main thread inside the X11 event loop, so a child that
+ * hangs or just runs long (e.g. `git status` walking a huge or
+ * network-mounted tree) would freeze the whole window manager for as long
+ * as it takes. timeout_ms bounds that: past the deadline the child is
+ * SIGKILLed and this reports failure, same as any other non-zero exit. */
+int WM::run_capture_argv(const char *cwd, char *const argv[], char *out, size_t outsz,
+                            int timeout_ms) {
+  int pipefd[2];
+  pid_t pid;
+  int status;
+  struct timespec start, now;
+  size_t total = 0;
+  int timed_out = 0;
+
+  out[0] = '\0';
+  if (pipe(pipefd) != 0) {
+    return 0;
+  }
+  pid = fork();
+  if (pid < 0) {
+    close(pipefd[0]);
+    close(pipefd[1]);
+    return 0;
+  }
+  if (pid == 0) {
+    int devnull;
+    /* Same reasoning as spawn()/run_detached_shell()/wifi_job_start(): an
+     * unclosed X11 connection fd here would otherwise sit open for this
+     * child's entire lifetime (long past run_capture_argv() returning,
+     * for a grandchild a killed timeout victim leaves behind -- see the
+     * SOCK_CLOEXEC comment on wm_command_server_init() for the sibling
+     * bug this same pattern caused with the command-socket fd). */
+    if (dpy) {
+      close(ConnectionNumber(dpy));
+    }
+    close(pipefd[0]);
+    dup2(pipefd[1], STDOUT_FILENO);
+    close(pipefd[1]);
+    devnull = open("/dev/null", O_WRONLY);
+    if (devnull >= 0) {
+      dup2(devnull, STDERR_FILENO);
+      close(devnull);
+    }
+    if (cwd && cwd[0] && chdir(cwd) != 0) {
+      _exit(127);
+    }
+    execvp(argv[0], argv);
+    _exit(127);
+  }
+  close(pipefd[1]);
+
+  clock_gettime(CLOCK_MONOTONIC, &start);
+  for (;;) {
+    fd_set readfds;
+    struct timeval tv;
+    long elapsed_ms;
+    long remaining_ms;
+    int sr;
+    ssize_t n;
+
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    elapsed_ms = (now.tv_sec - start.tv_sec) * 1000 +
+                (now.tv_nsec - start.tv_nsec) / 1000000;
+    remaining_ms = timeout_ms - elapsed_ms;
+    if (remaining_ms <= 0) {
+      timed_out = 1;
+      break;
+    }
+
+    FD_ZERO(&readfds);
+    FD_SET(pipefd[0], &readfds);
+    tv.tv_sec = remaining_ms / 1000;
+    tv.tv_usec = (remaining_ms % 1000) * 1000;
+
+    sr = select(pipefd[0] + 1, &readfds, NULL, NULL, &tv);
+    if (sr <= 0) {
+      if (sr < 0 && errno == EINTR) {
+        continue;
+      }
+      timed_out = (sr == 0);
+      break;
+    }
+    n = read(pipefd[0], out + total, outsz - 1 - total);
+    if (n <= 0) {
+      break; /* EOF, or a read error -- either way the child is done talking */
+    }
+    total += (size_t)n;
+    if (total >= outsz - 1) {
+      break;
+    }
+  }
+  out[total] = '\0';
+  close(pipefd[0]);
+
+  /* Unconditional, not just on timeout: closing the read end above without
+   * having drained everything (e.g. the buffer-full break) leaves the
+   * child to discover that on its next write() -- normally via SIGPIPE,
+   * but that's an assumption about the child's signal disposition this
+   * function shouldn't have to make. Killing an already-exited pid here is
+   * a harmless no-op, so there's no cost to always doing it. */
+  kill(pid, SIGKILL);
+  waitpid(pid, &status, 0);
+
+  /* Diagnostic trail for the class of bug this function exists to bound:
+   * a slow-but-not-quite-timed-out external tool still stalls the event
+   * loop for however long it took, just under the SIGKILL threshold. Log
+   * it so an occasional multi-hundred-ms freeze is traceable to a specific
+   * command (and its actual latency) after the fact, from mwm's stderr,
+   * instead of showing up only as a vague user report of "it hangs
+   * sometimes". Threshold is well below timeout_ms so normal-but-slower
+   * runs still show up, not just outright timeouts. */
+  clock_gettime(CLOCK_MONOTONIC, &now);
+  {
+    long total_ms = (now.tv_sec - start.tv_sec) * 1000 +
+                    (now.tv_nsec - start.tv_nsec) / 1000000;
+    if (timed_out || total_ms >= timeout_ms / 3) {
+      fprintf(stderr, "mwm: [%ld] '%s' took %ldms%s\n", (long)time(NULL), argv[0],
+              total_ms, timed_out ? " (timed out, killed)" : "");
+    }
+  }
+
+  return !timed_out && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+void WM::widget_init_paths(void) {
+  DIR *dir;
+  struct dirent *entry;
+
+  if (backlight_brightness_path[0] == '\0') {
+    dir = opendir("/sys/class/backlight");
+    if (dir) {
+      while ((entry = readdir(dir))) {
+        if (entry->d_name[0] == '.') {
+          continue;
+        }
+        snprintf(backlight_dir, sizeof(backlight_dir), "/sys/class/backlight/%s",
+                 entry->d_name);
+        snprintf(backlight_brightness_path, sizeof(backlight_brightness_path),
+                 "%s/brightness", backlight_dir);
+        snprintf(backlight_max_path, sizeof(backlight_max_path), "%s/max_brightness",
+                 backlight_dir);
+        break;
+      }
+      closedir(dir);
+    }
+  }
+
+  if (battery_capacity_path[0] == '\0') {
+    dir = opendir("/sys/class/power_supply");
+    if (dir) {
+      while ((entry = readdir(dir))) {
+        if (entry->d_name[0] == '.' || strncmp(entry->d_name, "BAT", 3) != 0) {
+          continue;
+        }
+        snprintf(battery_dir, sizeof(battery_dir), "/sys/class/power_supply/%s",
+                 entry->d_name);
+        snprintf(battery_capacity_path, sizeof(battery_capacity_path),
+                 "/sys/class/power_supply/%s/capacity", entry->d_name);
+        snprintf(battery_status_path, sizeof(battery_status_path),
+                 "/sys/class/power_supply/%s/status", entry->d_name);
+        break;
+      }
+      closedir(dir);
+    }
+  }
+}
+
+/* Standalone (not folded into updatewidgets()) so the volume/backlight
+ * slider popups can refresh just the one value they care about after a
+ * drag motion event, instead of paying for every other widget's refresh
+ * (several of which shell out or hit the network) on every mouse move --
+ * see widget_set_backlight_percent_absolute(). */
+void WM::widget_update_backlight(void) {
+  long value;
+  long max_value;
+
+  backlight_percent = -1;
+  if (read_long_from_file(backlight_brightness_path, &value) &&
+      read_long_from_file(backlight_max_path, &max_value) && max_value > 0) {
+    backlight_percent = (int)((value * 100 + (max_value / 2)) / max_value);
+  }
+}
+
+void WM::updatewidgets(void) {
+  FILE *fp;
+  char status[64];
+  long value;
+
+  widget_tick++;
+  widget_init_paths();
+
+  widget_update_backlight();
+
+  battery_percent = -1;
+  battery_charging = 0;
+  if (read_long_from_file(battery_capacity_path, &value)) {
+    battery_percent = (int)value;
+  }
+  if (battery_status_path[0] != '\0') {
+    fp = fopen(battery_status_path, "r");
+    if (fp) {
+      if (fgets(status, sizeof(status), fp)) {
+        battery_charging =
+            strncmp(status, "Charging", 8) == 0 || strncmp(status, "Full", 4) == 0;
+      }
+      fclose(fp);
+    }
+  }
+
+  widget_update_cpu();
+  widget_update_mem();
+  widget_update_disk();
+  widget_update_net();
+  widget_update_wifi();
+  widget_update_bluetooth();
+  widget_update_volume();
+  widget_update_mic();
+  widget_update_media();
+  widget_update_load();
+  widget_update_git();
+  widget_update_kblayout();
+  widget_update_theme();
+  widget_update_lua_widgets();
+}
+
+void WM::widget_update_cpu(void) {
+  FILE *fp;
+  char line[256];
+  long user = 0, nice_val = 0, sys_val = 0, idle = 0, iowait = 0, irq = 0,
+       softirq = 0, steal = 0;
+  long total, idle_all, delta_total, delta_idle;
+
+  cpu_percent = -1;
+  fp = fopen("/proc/stat", "r");
+  if (!fp) {
+    return;
+  }
+  if (!fgets(line, sizeof(line), fp)) {
+    fclose(fp);
+    return;
+  }
+  fclose(fp);
+
+  if (sscanf(line, "cpu %ld %ld %ld %ld %ld %ld %ld %ld", &user, &nice_val,
+             &sys_val, &idle, &iowait, &irq, &softirq, &steal) < 4) {
+    return;
+  }
+
+  idle_all = idle + iowait;
+  total = user + nice_val + sys_val + idle + iowait + irq + softirq + steal;
+
+  if (cpu_prev_total >= 0) {
+    delta_total = total - cpu_prev_total;
+    delta_idle = idle_all - cpu_prev_idle;
+    if (delta_total > 0) {
+      cpu_percent = (int)(100 * (delta_total - delta_idle) / delta_total);
+      cpu_percent = MAX(0, MIN(100, cpu_percent));
+    }
+  }
+  cpu_prev_total = total;
+  cpu_prev_idle = idle_all;
+}
+
+void WM::widget_update_mem(void) {
+  FILE *fp;
+  char line[256];
+  long mem_total = -1;
+  long mem_avail = -1;
+
+  mem_percent = -1;
+  fp = fopen("/proc/meminfo", "r");
+  if (!fp) {
+    return;
+  }
+  while (fgets(line, sizeof(line), fp)) {
+    if (mem_total < 0 && sscanf(line, "MemTotal: %ld", &mem_total) == 1) {
+      continue;
+    }
+    if (mem_avail < 0 && sscanf(line, "MemAvailable: %ld", &mem_avail) == 1) {
+      continue;
+    }
+    if (mem_total >= 0 && mem_avail >= 0) {
+      break;
+    }
+  }
+  fclose(fp);
+
+  if (mem_total > 0 && mem_avail >= 0) {
+    mem_percent = (int)(100 * (mem_total - mem_avail) / mem_total);
+  }
+}
+
+void WM::widget_update_disk(void) {
+  struct statvfs vfs;
+  unsigned long long used;
+  unsigned long long avail_for_calc;
+
+  disk_percent = -1;
+  if (statvfs("/", &vfs) != 0 || vfs.f_blocks == 0) {
+    return;
+  }
+  used = (unsigned long long)(vfs.f_blocks - vfs.f_bfree);
+  avail_for_calc = used + vfs.f_bavail;
+  if (avail_for_calc == 0) {
+    return;
+  }
+  disk_percent = (int)(used * 100 / avail_for_calc);
+}
+
+void WM::widget_update_net(void) {
+  FILE *fp;
+  char line[256];
+  char iface[64] = "";
+  char state[32] = "";
+  char path[128];
+
+  net_iface[0] = '\0';
+  net_up = 0;
+
+  fp = fopen("/proc/net/route", "r");
+  if (!fp) {
+    return;
+  }
+  if (fgets(line, sizeof(line), fp)) {
+    /* discard header line */
+  }
+  while (fgets(line, sizeof(line), fp)) {
+    char ifname[64];
+    unsigned long dest;
+    if (sscanf(line, "%63s %lx", ifname, &dest) == 2 && dest == 0) {
+      snprintf(iface, sizeof(iface), "%s", ifname);
+      break;
+    }
+  }
+  fclose(fp);
+
+  if (iface[0] == '\0') {
+    net_rx_kbps = net_tx_kbps = 0;
+    net_prev_time = 0;
+    return;
+  }
+
+  snprintf(path, sizeof(path), "/sys/class/net/%s/operstate", iface);
+  fp = fopen(path, "r");
+  if (fp) {
+    if (fgets(state, sizeof(state), fp)) {
+      state[strcspn(state, "\n")] = '\0';
+    }
+    fclose(fp);
+  }
+
+  snprintf(net_iface, sizeof(net_iface), "%s", iface);
+  net_up = (strcmp(state, "up") == 0);
+
+  if (net_up) {
+    char rx_path[160];
+    char tx_path[160];
+    long rx = -1, tx = -1;
+    time_t now = time(NULL);
+
+    snprintf(rx_path, sizeof(rx_path), "/sys/class/net/%s/statistics/rx_bytes", iface);
+    snprintf(tx_path, sizeof(tx_path), "/sys/class/net/%s/statistics/tx_bytes", iface);
+    if (read_long_from_file(rx_path, &rx) && read_long_from_file(tx_path, &tx)) {
+      if (net_prev_time > 0 && now > net_prev_time &&
+          strcmp(net_last_iface, iface) == 0 && rx >= net_prev_rx && tx >= net_prev_tx) {
+        double dt = (double)(now - net_prev_time);
+        net_rx_kbps = (double)(rx - net_prev_rx) / 1024.0 / dt;
+        net_tx_kbps = (double)(tx - net_prev_tx) / 1024.0 / dt;
+      } else {
+        /* first sample, an interface change, or a counter reset */
+        net_rx_kbps = net_tx_kbps = 0;
+      }
+      net_prev_rx = rx;
+      net_prev_tx = tx;
+      net_prev_time = now;
+      snprintf(net_last_iface, sizeof(net_last_iface), "%s", iface);
+    }
+  } else {
+    net_rx_kbps = net_tx_kbps = 0;
+    net_prev_time = 0;
+  }
+}
+
+/* Returns 1 if any rfkill device of the given type ("wlan"/"bluetooth") is
+ * soft- or hard-blocked, 0 if none are, -1 if no device of that type exists. */
+int WM::widget_rfkill_blocked(const char *type_name) {
+  DIR *dp = opendir("/sys/class/rfkill");
+  struct dirent *de;
+  int found = 0;
+  int blocked = 0;
+
+  if (!dp) {
+    return -1;
+  }
+  while ((de = readdir(dp)) != NULL) {
+    char path[160];
+    char type[32] = "";
+    FILE *fp;
+    long soft = 0, hard = 0;
+
+    if (de->d_name[0] == '.') {
+      continue;
+    }
+    snprintf(path, sizeof(path), "/sys/class/rfkill/%s/type", de->d_name);
+    fp = fopen(path, "r");
+    if (!fp) {
+      continue;
+    }
+    if (fgets(type, sizeof(type), fp)) {
+      type[strcspn(type, "\n")] = '\0';
+    }
+    fclose(fp);
+    if (strcmp(type, type_name) != 0) {
+      continue;
+    }
+    found = 1;
+    snprintf(path, sizeof(path), "/sys/class/rfkill/%s/soft", de->d_name);
+    read_long_from_file(path, &soft);
+    snprintf(path, sizeof(path), "/sys/class/rfkill/%s/hard", de->d_name);
+    read_long_from_file(path, &hard);
+    if (soft || hard) {
+      blocked = 1;
+    }
+  }
+  closedir(dp);
+  return found ? blocked : -1;
+}
+
+void WM::widget_update_wifi(void) {
+  FILE *fp;
+  char line[256];
+  int blocked;
+
+  wifi_iface[0] = '\0';
+  wifi_up = 0;
+  wifi_quality = -1;
+  wifi_ssid[0] = '\0';
+
+  blocked = widget_rfkill_blocked("wlan");
+  wifi_blocked = blocked > 0;
+  if (blocked < 0) {
+    return; /* no wifi hardware */
+  }
+
+  fp = fopen("/proc/net/wireless", "r");
+  if (fp) {
+    if (fgets(line, sizeof(line), fp)) {
+      /* discard header line 1 */
+    }
+    if (fgets(line, sizeof(line), fp)) {
+      /* discard header line 2 */
+    }
+    if (fgets(line, sizeof(line), fp)) {
+      char *colon = strchr(line, ':');
+      if (colon) {
+        int len = (int)(colon - line);
+        double quality;
+        char *p = line;
+        if (len > 0 && len < (int)sizeof(wifi_iface)) {
+          line[len] = '\0';
+          while (*p == ' ') {
+            p++;
+          }
+          snprintf(wifi_iface, sizeof(wifi_iface), "%s", p);
+        }
+        if (sscanf(colon + 1, "%*x %lf", &quality) == 1) {
+          wifi_quality = (int)quality;
+        }
+      }
+    }
+    fclose(fp);
+  }
+
+  if (wifi_iface[0] != '\0' && !wifi_blocked) {
+    char path[128];
+    char state[32] = "";
+    snprintf(path, sizeof(path), "/sys/class/net/%s/operstate", wifi_iface);
+    fp = fopen(path, "r");
+    if (fp) {
+      if (fgets(state, sizeof(state), fp)) {
+        state[strcspn(state, "\n")] = '\0';
+      }
+      fclose(fp);
+    }
+    wifi_up = (strcmp(state, "up") == 0);
+
+    /* --rescan no: without it, "nmcli dev wifi" triggers a fresh hardware
+     * scan whenever NetworkManager's cached scan is stale, which can block
+     * for several seconds -- on the main thread, every 2s tick, that's a
+     * recurring multi-second freeze of the whole window manager. NM already
+     * scans periodically in the background on its own; this widget only
+     * needs whatever it already has cached. run_capture_argv's timeout is
+     * a backstop for nmcli/NetworkManager itself being slow to respond, not
+     * a substitute for avoiding the scan in the first place. */
+    if (wifi_up) {
+      char buf[4096];
+      char *const argv_nmcli[] = {(char *)"nmcli",  (char *)"-t",   (char *)"-f",
+                                   (char *)"active,ssid", (char *)"dev", (char *)"wifi",
+                                   (char *)"list",  (char *)"--rescan", (char *)"no", NULL};
+      char *saveptr = NULL;
+      char *tok;
+
+      if (run_capture_argv(NULL, argv_nmcli, buf, sizeof(buf), 300)) {
+        tok = strtok_r(buf, "\n", &saveptr);
+        while (tok) {
+          if (strncmp(tok, "yes:", 4) == 0) {
+            snprintf(wifi_ssid, sizeof(wifi_ssid), "%s", tok + 4);
+            break;
+          }
+          tok = strtok_r(NULL, "\n", &saveptr);
+        }
+      }
+    }
+  }
+}
+
+void WM::widget_update_bluetooth(void) {
+  char buf[4096];
+  char *const argv_bt[] = {(char *)"bluetoothctl", (char *)"devices", (char *)"Connected", NULL};
+  char *saveptr = NULL;
+  char *tok;
+  int blocked;
+
+  bt_connected_count = 0;
+  bt_first_device[0] = '\0';
+
+  blocked = widget_rfkill_blocked("bluetooth");
+  bt_blocked = blocked > 0;
+  if (blocked < 0 || bt_blocked) {
+    return;
+  }
+
+  if (!run_capture_argv(NULL, argv_bt, buf, sizeof(buf), 300)) {
+    return; /* bluetoothctl missing, errored, or timed out -- see mwm's stderr */
+  }
+  tok = strtok_r(buf, "\n", &saveptr);
+  while (tok) {
+    if (strncmp(tok, "Device ", 7) == 0) {
+      if (bt_connected_count == 0) {
+        const char *name = tok + 7;
+        const char *name_start = strchr(name, ' ');
+        snprintf(bt_first_device, sizeof(bt_first_device), "%s",
+                 name_start ? name_start + 1 : name);
+      }
+      bt_connected_count++;
+    }
+    tok = strtok_r(NULL, "\n", &saveptr);
+  }
+}
+
+/* Shared by the Master (output) and Capture/Mic (input) widgets -- amixer's
+ * "get" output has the same "[NN%] ... [on|off]" shape for both. */
+void WM::widget_amixer_read(const char *control, int *percent, int *muted) {
+  char *const argv_amixer[] = {(char *)"amixer", (char *)"get", (char *)control, NULL};
+  char buf[1024];
+  char *pct_end;
+  char *digits_start;
+  int pct;
+
+  *percent = -1;
+  *muted = 0;
+
+  if (!run_capture_argv(NULL, argv_amixer, buf, sizeof(buf), 300)) {
+    return;
+  }
+
+  pct_end = strstr(buf, "%]");
+  if (!pct_end) {
+    return;
+  }
+  digits_start = pct_end;
+  while (digits_start > buf && *(digits_start - 1) != '[') {
+    digits_start--;
+  }
+  if (sscanf(digits_start, "%d", &pct) == 1) {
+    *percent = MAX(0, MIN(100, pct));
+    *muted = strstr(buf, "[off]") != NULL;
+  }
+}
+
+void WM::widget_update_volume(void) {
+  widget_amixer_read("Master", &volume_percent, &volume_muted);
+}
+
+/* Tries the common ALSA capture control names; most setups expose the mic
+ * as "Capture", some HDA codecs use "Mic" instead. Once one resolves, stick
+ * with it -- otherwise every tick would fork amixer twice forever just to
+ * keep re-discovering the same answer. On a mic-less machine the "Mic"
+ * fallback is only retried occasionally rather than on every tick, so it
+ * doesn't cost two forks/tick indefinitely for a widget that's always
+ * blank. */
+void WM::widget_update_mic(void) {
+  if (mic_control_resolved) {
+    widget_amixer_read(mic_control, &mic_percent, &mic_muted);
+    if (mic_percent >= 0) {
+      return;
+    }
+    mic_control_resolved = 0; /* control disappeared -- reprobe below */
+  }
+
+  widget_amixer_read("Capture", &mic_percent, &mic_muted);
+  if (mic_percent >= 0) {
+    snprintf(mic_control, sizeof(mic_control), "Capture");
+    mic_control_resolved = 1;
+    return;
+  }
+
+  if (widget_tick < mic_next_probe_tick) {
+    return;
+  }
+  mic_next_probe_tick = widget_tick + 15; /* ~30s at the 2s tick cadence */
+
+  widget_amixer_read("Mic", &mic_percent, &mic_muted);
+  if (mic_percent >= 0) {
+    snprintf(mic_control, sizeof(mic_control), "Mic");
+    mic_control_resolved = 1;
+  }
+}
+
+void WM::widget_toggle_mic_mute(void) {
+  char cmd[64];
+
+  if (mic_percent < 0) {
+    return;
+  }
+  snprintf(cmd, sizeof(cmd), "amixer -q set %s toggle", mic_control);
+  system(cmd);
+  widget_update_mic();
+  drawbars();
+  if (slider_popup_visible && slider_popup_kind == SliderMic) {
+    draw_slider_popup();
+  }
+}
+
+void WM::widget_update_load(void) {
+  FILE *fp;
+  double l1, l5, l15;
+
+  load_avg1 = load_avg5 = load_avg15 = -1.0;
+  fp = fopen("/proc/loadavg", "r");
+  if (!fp) {
+    return;
+  }
+  if (fscanf(fp, "%lf %lf %lf", &l1, &l5, &l15) == 3) {
+    load_avg1 = l1;
+    load_avg5 = l5;
+    load_avg15 = l15;
+  }
+  fclose(fp);
+}
+
+long WM::widget_ncpu(void) {
+  static long n = 0;
+  if (n <= 0) {
+    n = sysconf(_SC_NPROCESSORS_ONLN);
+    if (n <= 0) {
+      n = 1;
+    }
+  }
+  return n;
+}
+
+/* Git status for the project backing the current workspace (same
+ * current-project derivation as the projects bar widget). Leaves git_valid
+ * false -- and the widget blank -- when the workspace isn't a saved
+ * project's, or that project isn't a git repo. */
+/* Returns the integer following the first occurrence of `marker` in `s`, or
+ * 0 if `marker` doesn't appear -- used to pull "ahead N"/"behind N" out of
+ * git's porcelain branch header. */
+int WM::widget_git_int_after(const char *s, const char *marker) {
+  const char *p = strstr(s, marker);
+  if (!p) {
+    return 0;
+  }
+  return atoi(p + strlen(marker));
+}
+
+void WM::widget_update_git(void) {
+  char out[512];
+  char *nl;
+  char *line;
+  char header[400];
+  const char *argv_status[] = {"git", "status", "--porcelain=v1", "--branch", NULL};
+
+  if (!selmon || active_project_path[0] == '\0') {
+    git_valid = 0;
+    git_project_path[0] = '\0';
+    return;
+  }
+
+  /* git status is a fork+exec that scales with repo size and can stall
+   * badly on a huge or network-mounted tree; run_capture_argv bounds any
+   * single call, but there's no need to pay even the bounded cost every
+   * 2s tick. Refresh immediately when the project changes (so switching
+   * feels instant) and otherwise only every ~10s. */
+  if (strcmp(active_project_path, git_last_project_path) == 0 && widget_tick < git_next_tick) {
+    return;
+  }
+  git_next_tick = widget_tick + 5; /* ~10s at the 2s tick cadence */
+  snprintf(git_last_project_path, sizeof(git_last_project_path), "%s", active_project_path);
+
+  git_valid = 0;
+  git_branch[0] = '\0';
+  git_dirty = 0;
+  git_ahead = 0;
+  git_behind = 0;
+  git_project_path[0] = '\0';
+
+  if (!run_capture_argv(active_project_path, (char *const *)argv_status, out, sizeof(out), 300)) {
+    return; /* not a git repo, git isn't installed, or it timed out */
+  }
+
+  nl = strchr(out, '\n');
+  if (nl) {
+    git_dirty = nl[1] != '\0';
+    *nl = '\0';
+  }
+  line = out;
+  if (strncmp(line, "## ", 3) != 0) {
+    return;
+  }
+  line += 3;
+  /* branch-name truncation below mutates line in place, so grab the
+   * ahead/behind counts from an untouched copy first */
+  snprintf(header, sizeof(header), "%s", line);
+  git_ahead = widget_git_int_after(header, "ahead ");
+  git_behind = widget_git_int_after(header, "behind ");
+
+  if (strncmp(line, "HEAD (no branch)", 16) == 0) {
+    snprintf(git_branch, sizeof(git_branch), "detached");
+  } else {
+    char *end = line;
+    while (*end && *end != '.' && *end != ' ') {
+      end++;
+    }
+    *end = '\0';
+    snprintf(git_branch, sizeof(git_branch), "%s", line);
+  }
+  snprintf(git_project_path, sizeof(git_project_path), "%s", active_project_path);
+  git_valid = 1;
+}
+
+void WM::widget_git_open_terminal(void) {
+  Arg a = {0};
+  const char *argv_term[4];
+
+  if (!git_valid || git_project_path[0] == '\0') {
+    return;
+  }
+  argv_term[0] = terminal_cmd;
+  argv_term[1] = "-d";
+  argv_term[2] = git_project_path;
+  argv_term[3] = NULL;
+  a.v = argv_term;
+  spawn(&a);
+}
+
+/* {{{ widget icons (Nerd Font Private Use Area glyphs; see `fonts[]`) */
+/* }}} widget icons */
+
+/* {{{ corner buttons (OS logo + layout symbol; see drawleftbar/drawrightbar) */
+/* Reads /etc/os-release once and caches the matching distro glyph so the
+ * bottom-left corner shows the right logo without hardcoding one distro. */
+const char *WM::os_logo_glyph(void) {
+  static const char *cached = NULL;
+  static int initialized = 0;
+  char id[64] = "";
+  FILE *f;
+  char line[256];
+
+  if (initialized) {
+    return cached;
+  }
+  initialized = 1;
+  cached = icon_os_tux;
+
+  f = fopen("/etc/os-release", "r");
+  if (f) {
+    while (fgets(line, sizeof line, f)) {
+      if (!strncmp(line, "ID=", 3)) {
+        char *v = line + 3;
+        size_t len;
+        if (*v == '"') {
+          v++;
+        }
+        len = strcspn(v, "\"\n");
+        if (len >= sizeof id) {
+          len = sizeof id - 1;
+        }
+        memcpy(id, v, len);
+        id[len] = '\0';
+        break;
+      }
+    }
+    fclose(f);
+  }
+
+  if (!strcmp(id, "nixos")) {
+    cached = icon_os_nixos;
+  } else if (!strcmp(id, "arch")) {
+    cached = icon_os_archlinux;
+  } else if (!strcmp(id, "ubuntu")) {
+    cached = icon_os_ubuntu;
+  } else if (!strcmp(id, "fedora")) {
+    cached = icon_os_fedora;
+  } else if (!strcmp(id, "debian")) {
+    cached = icon_os_debian;
+  } else if (!strncmp(id, "opensuse", 8)) {
+    cached = icon_os_opensuse;
+  } else if (!strcmp(id, "void")) {
+    cached = icon_os_void;
+  } else if (!strcmp(id, "manjaro")) {
+    cached = icon_os_manjaro;
+  }
+
+  return cached;
+}
+
+/* Maps a layout's ltsymbol (see setlayout()) to a corner-button glyph; any
+ * symbol outside the three compiled-in layouts (Lua layouts included) falls
+ * back to a generic layout icon. */
+const char *WM::layout_symbol_glyph(const char *ltsymbol) {
+  if (!strcmp(ltsymbol, "[]=")) {
+    return icon_layout_tile;
+  }
+  if (!strcmp(ltsymbol, "><>")) {
+    return icon_layout_floating;
+  }
+  if (!strcmp(ltsymbol, "[M]")) {
+    return icon_layout_monocle;
+  }
+  return icon_layout_other;
+}
+/* }}} corner buttons */
+
+/* MPRIS via playerctl -- it already does the DBus property/variant
+ * unpacking for us, so there's no player running, or playerctl isn't
+ * installed. Both leave media_status empty and blank the widget, matching
+ * how the other optional-tool widgets (amixer, bluetoothctl, nmcli) behave
+ * when their tool or device is absent.
+ *
+ * Status and title come out of a single playerctl call (its format string
+ * supports {{status}} directly) rather than two -- one fork/tick instead of
+ * two for something we already re-poll every 2s. */
+void WM::widget_update_media(void) {
+  char buf[256];
+  char *const argv_playerctl[] = {(char *)"playerctl", (char *)"metadata", (char *)"--format",
+                                   (char *)"{{status}}|{{ artist }} - {{ title }}", NULL};
+  char *sep;
+
+  media_status[0] = '\0';
+  media_title[0] = '\0';
+
+  if (!run_capture_argv(NULL, argv_playerctl, buf, sizeof(buf), 300)) {
+    return; /* no MPRIS player running, playerctl missing, or timed out */
+  }
+  buf[strcspn(buf, "\n")] = '\0';
+  if (buf[0] == '\0') {
+    return; /* no MPRIS player running */
+  }
+
+  sep = strchr(buf, '|');
+  if (!sep) {
+    return;
+  }
+  *sep = '\0';
+  snprintf(media_status, sizeof(media_status), "%s", buf);
+  snprintf(media_title, sizeof(media_title), "%s", sep + 1);
+}
+
+void WM::widget_format_media(char *buf, size_t size) {
+  if (media_status[0] == '\0') {
+    buf[0] = '\0';
+    return;
+  }
+  if (media_title[0] != '\0') {
+    snprintf(buf, size, "%s %s", icon_media, media_title);
+  } else {
+    snprintf(buf, size, "%s", icon_media);
+  }
+}
+
+void WM::widget_media_play_pause(void) {
+  system("playerctl play-pause >/dev/null 2>&1");
+  widget_update_media();
+  drawbars();
+}
+
+void WM::widget_media_next(void) {
+  system("playerctl next >/dev/null 2>&1");
+  widget_update_media();
+  drawbars();
+}
+
+void WM::widget_media_previous(void) {
+  system("playerctl previous >/dev/null 2>&1");
+  widget_update_media();
+  drawbars();
+}
+
+/* The configured layout list (setxkbmap -query) essentially never changes
+ * at runtime -- only re-fetch it occasionally rather than forking
+ * setxkbmap every 2s tick just to re-derive the same answer. */
+void WM::widget_refresh_kblayout_list(void) {
+  char *const argv_setxkbmap[] = {(char *)"setxkbmap", (char *)"-query", NULL};
+  char out[1024];
+  char layouts[256] = "";
+  char *line;
+  char *lsaveptr = NULL;
+  char *tok;
+  char *saveptr = NULL;
+  int i;
+
+  kb_layout_count = 0;
+
+  if (!run_capture_argv(NULL, argv_setxkbmap, out, sizeof(out), 300)) {
+    return;
+  }
+  for (line = strtok_r(out, "\n", &lsaveptr); line; line = strtok_r(NULL, "\n", &lsaveptr)) {
+    if (strncmp(line, "layout:", 7) == 0) {
+      char *p = line + 7;
+      while (*p == ' ' || *p == '\t') {
+        p++;
+      }
+      snprintf(layouts, sizeof(layouts), "%s", p);
+      break;
+    }
+  }
+
+  if (layouts[0] == '\0') {
+    return;
+  }
+
+  tok = strtok_r(layouts, ",", &saveptr);
+  for (i = 0; tok && i < KB_LAYOUT_MAX; i++) {
+    snprintf(kb_layout_names[i], sizeof(kb_layout_names[i]), "%s", tok);
+    tok = strtok_r(NULL, ",", &saveptr);
+  }
+  kb_layout_count = i;
+}
+
+/* Active XKB group, mapped to a name via the cached layout list above.
+ * XkbGetState is a native X11 call (no fork), so the displayed group stays
+ * live every tick even though the list itself is only refreshed
+ * occasionally. Blank when there's only one configured layout -- nothing to
+ * indicate. */
+void WM::widget_update_kblayout(void) {
+  XkbStateRec state;
+  int group;
+
+  kb_layout[0] = '\0';
+
+  if (!dpy || XkbGetState(dpy, XkbUseCoreKbd, &state) != Success) {
+    return;
+  }
+
+  if (widget_tick >= kb_layout_list_next_tick) {
+    widget_refresh_kblayout_list();
+    kb_layout_list_next_tick = widget_tick + 30; /* ~60s at the 2s tick cadence */
+  }
+
+  group = state.group;
+  if (group >= 0 && group < kb_layout_count) {
+    snprintf(kb_layout, sizeof(kb_layout), "%s", kb_layout_names[group]);
+  }
+}
+
+void WM::widget_format_kblayout(char *buf, size_t size) {
+  if (kb_layout_count <= 1 || kb_layout[0] == '\0') {
+    buf[0] = '\0';
+    return;
+  }
+  snprintf(buf, size, "%s %s", icon_keyboard, kb_layout);
+}
+
+void WM::widget_cycle_kblayout(void) {
+  XkbStateRec state;
+  int next;
+
+  if (!dpy || kb_layout_count <= 1) {
+    return;
+  }
+  if (XkbGetState(dpy, XkbUseCoreKbd, &state) != Success) {
+    return;
+  }
+  next = (state.group + 1) % kb_layout_count;
+  XkbLockGroup(dpy, XkbUseCoreKbd, next);
+  widget_update_kblayout();
+  drawbars();
+}
+
+void WM::widget_format_backlight(char *buf, size_t size) {
+  snprintf(buf, size, "%s", icon_backlight);
+}
+
+void WM::widget_format_battery(char *buf, size_t size) {
+  const char *icon;
+
+  if (battery_percent < 0) {
+    snprintf(buf, size, "%s n/a", icon_battery_full);
+    return;
+  }
+  if (battery_charging) {
+    icon = icon_battery_charging;
+  } else if (battery_percent >= 90) {
+    icon = icon_battery_full;
+  } else if (battery_percent >= 65) {
+    icon = icon_battery_75;
+  } else if (battery_percent >= 40) {
+    icon = icon_battery_50;
+  } else if (battery_percent >= 15) {
+    icon = icon_battery_25;
+  } else {
+    icon = icon_battery_empty;
+  }
+  snprintf(buf, size, "%s %d%%", icon, battery_percent);
+}
+
+void WM::widget_format_volume(char *buf, size_t size) {
+  const char *icon;
+
+  if (volume_percent < 0) {
+    icon = icon_volume_high;
+  } else if (volume_muted || volume_percent == 0) {
+    icon = icon_volume_muted;
+  } else if (volume_percent < 50) {
+    icon = icon_volume_low;
+  } else {
+    icon = icon_volume_high;
+  }
+  snprintf(buf, size, "%s", icon);
+}
+
+/* Blank (not "n/a") when there's no capture device at all -- unlike output
+ * volume, plenty of desktops legitimately have no mic, and a permanent
+ * "n/a" would just be noise. */
+void WM::widget_format_mic(char *buf, size_t size) {
+  if (mic_percent < 0) {
+    buf[0] = '\0';
+    return;
+  }
+  if (mic_muted) {
+    snprintf(buf, size, "%s", icon_mic_muted);
+    return;
+  }
+  snprintf(buf, size, "%s", icon_mic);
+}
+
+void WM::widget_format_load(char *buf, size_t size) {
+  if (load_avg1 < 0) {
+    snprintf(buf, size, "%s n/a", icon_load);
+    return;
+  }
+  snprintf(buf, size, "%s %.2f", icon_load, load_avg1);
+}
+
+/* Blank outside a project workspace or a non-git project, same reasoning as
+ * the mic widget -- most workspaces (mail, chat) have nothing to show. */
+void WM::widget_format_git(char *buf, size_t size) {
+  char counts[32] = "";
+
+  if (!git_valid) {
+    buf[0] = '\0';
+    return;
+  }
+  if (git_ahead > 0 && git_behind > 0) {
+    snprintf(counts, sizeof(counts), " %d↑%d↓", git_ahead, git_behind);
+  } else if (git_ahead > 0) {
+    snprintf(counts, sizeof(counts), " %d↑", git_ahead);
+  } else if (git_behind > 0) {
+    snprintf(counts, sizeof(counts), " %d↓", git_behind);
+  }
+  snprintf(buf, size, "%s %s%s%s", icon_git, git_branch, git_dirty ? "*" : "", counts);
+}
+
+void WM::widget_format_cpu(char *buf, size_t size) {
+  if (cpu_percent < 0) {
+    snprintf(buf, size, "%s ...", icon_cpu);
+    return;
+  }
+  snprintf(buf, size, "%s %d%%", icon_cpu, cpu_percent);
+}
+
+void WM::widget_format_mem(char *buf, size_t size) {
+  if (mem_percent < 0) {
+    snprintf(buf, size, "%s n/a", icon_mem);
+    return;
+  }
+  snprintf(buf, size, "%s %d%%", icon_mem, mem_percent);
+}
+
+void WM::widget_format_disk(char *buf, size_t size) {
+  if (disk_percent < 0) {
+    snprintf(buf, size, "%s n/a", icon_disk);
+    return;
+  }
+  snprintf(buf, size, "%s %d%%", icon_disk, disk_percent);
+}
+
+void WM::widget_format_net_rate(double kbps, char *buf, size_t size) {
+  if (kbps >= 1024.0) {
+    snprintf(buf, size, "%.1fM", kbps / 1024.0);
+  } else {
+    snprintf(buf, size, "%.0fK", kbps);
+  }
+}
+
+void WM::widget_format_net(char *buf, size_t size) {
+  char rx_buf[16];
+  char tx_buf[16];
+
+  if (net_iface[0] == '\0') {
+    snprintf(buf, size, "%s down", icon_net);
+    return;
+  }
+  if (!net_up) {
+    snprintf(buf, size, "%s %s down", icon_net, net_iface);
+    return;
+  }
+  widget_format_net_rate(net_rx_kbps, rx_buf, sizeof(rx_buf));
+  widget_format_net_rate(net_tx_kbps, tx_buf, sizeof(tx_buf));
+  snprintf(buf, size, "%s ↓%s ↑%s", icon_net, rx_buf, tx_buf);
+}
+
+void WM::widget_format_wifi(char *buf, size_t size) {
+  if (wifi_iface[0] == '\0') {
+    snprintf(buf, size, "%s n/a", icon_wifi);
+    return;
+  }
+  if (wifi_blocked) {
+    snprintf(buf, size, "%s off", icon_wifi);
+    return;
+  }
+  if (!wifi_up) {
+    snprintf(buf, size, "%s down", icon_wifi);
+    return;
+  }
+  if (wifi_ssid[0] != '\0') {
+    snprintf(buf, size, "%s %s", icon_wifi, wifi_ssid);
+    return;
+  }
+  snprintf(buf, size, "%s %s", icon_wifi, wifi_iface);
+}
+
+void WM::widget_format_bluetooth(char *buf, size_t size) {
+  if (bt_blocked) {
+    snprintf(buf, size, "%s off", icon_bluetooth);
+    return;
+  }
+  if (bt_connected_count > 1) {
+    snprintf(buf, size, "%s %s +%d", icon_bluetooth, bt_first_device,
+             bt_connected_count - 1);
+  } else if (bt_connected_count == 1) {
+    snprintf(buf, size, "%s %s", icon_bluetooth, bt_first_device);
+  } else {
+    snprintf(buf, size, "%s", icon_bluetooth);
+  }
+}
+
+void WM::widget_format_clock(char *buf, size_t size) {
+  time_t now = time(NULL);
+  struct tm tm_buf;
+  char timebuf[48];
+
+  localtime_r(&now, &tm_buf);
+  strftime(timebuf, sizeof(timebuf), "%a %m-%d %H:%M", &tm_buf);
+  snprintf(buf, size, "%s %s", icon_clock, timebuf);
+}
+
+void WM::widget_set_backlight_percent_absolute(int percent) {
+  FILE *fp;
+  long max_brightness;
+  long next_brightness;
+
+  widget_init_paths();
+  if (!read_long_from_file(backlight_max_path, &max_brightness) ||
+      max_brightness <= 0 || backlight_brightness_path[0] == '\0') {
+    return;
+  }
+
+  if (percent < 1) {
+    percent = 1;
+  }
+  if (percent > 100) {
+    percent = 100;
+  }
+
+  next_brightness = (max_brightness * percent + 50) / 100;
+  if (next_brightness < 1) {
+    next_brightness = 1;
+  }
+  if (next_brightness > max_brightness) {
+    next_brightness = max_brightness;
+  }
+
+  fp = fopen(backlight_brightness_path, "w");
+  if (!fp) {
+    return;
+  }
+  fprintf(fp, "%ld\n", next_brightness);
+  fclose(fp);
+  widget_update_backlight();
+  drawbars();
+  draw_slider_popup();
+}
+
+int WM::widget_set_backlight_percent(int delta_percent) {
+  FILE *fp;
+  long brightness;
+  long max_brightness;
+  long next_brightness;
+
+  widget_init_paths();
+  if (!read_long_from_file(backlight_brightness_path, &brightness) ||
+      !read_long_from_file(backlight_max_path, &max_brightness) ||
+      max_brightness <= 0 || backlight_brightness_path[0] == '\0') {
+    return 0;
+  }
+
+  next_brightness = brightness + (max_brightness * delta_percent) / 100;
+  if (next_brightness < 1) {
+    next_brightness = 1;
+  }
+  if (next_brightness > max_brightness) {
+    next_brightness = max_brightness;
+  }
+
+  fp = fopen(backlight_brightness_path, "w");
+  if (!fp) {
+    return 0;
+  }
+  fprintf(fp, "%ld\n", next_brightness);
+  fclose(fp);
+  widget_update_backlight();
+  drawbars();
+  draw_slider_popup();
+  return 1;
+}
+
+/* Fire-and-forget: forks and execs `cmd` via /bin/sh -c, but -- unlike
+ * system() -- never waits for it, so the caller isn't blocked on however
+ * long the child takes to run. setup() ignores SIGCHLD with SA_NOCLDWAIT,
+ * so the kernel reaps the child on its own; nothing here needs to wait()
+ * it. Needed for anything that can fire many times a second, like the
+ * volume slider while dragging -- system()'s blocking fork+exec+wait per
+ * call was slow enough (tens of ms for amixer) that a fast drag queued up
+ * a visible backlog of motion/release events, making the slider look like
+ * it kept moving on its own for a moment after the button was actually
+ * released. */
+void WM::run_detached_shell(const char *cmd) {
+  pid_t pid = fork();
+  if (pid == 0) {
+    if (dpy) {
+      close(ConnectionNumber(dpy));
+    }
+    setsid();
+    execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
+    _exit(127);
+  }
+}
+
+void WM::widget_set_volume_percent_absolute(int percent) {
+  char cmd[128];
+
+  percent = MAX(0, MIN(100, percent));
+  snprintf(cmd, sizeof(cmd), "amixer -q set Master %d%% unmute", percent);
+  run_detached_shell(cmd);
+  /* Optimistic: the amixer call above is fire-and-forget, so re-querying it
+   * with an immediate widget_update_volume() would just race the still-
+   * running child and often read back the stale value. We already know
+   * what we asked for; the next periodic refresh (~2s) reconciles with
+   * whatever amixer actually landed on. */
+  volume_percent = percent;
+  volume_muted = 0;
+  drawbars();
+  draw_slider_popup();
+}
+
+int WM::widget_set_volume_percent(int delta_percent) {
+  if (volume_percent < 0) {
+    return 0;
+  }
+  widget_set_volume_percent_absolute(volume_percent + delta_percent);
+  return 1;
+}
+
+void WM::widget_toggle_volume_mute(void) {
+  system("amixer -q set Master toggle");
+  updatewidgets();
+  drawbars();
+  if (slider_popup_visible && slider_popup_kind == SliderVolume) {
+    draw_slider_popup();
+  }
+}
+
+void WM::widget_set_mic_percent_absolute(int percent) {
+  char cmd[128];
+
+  if (mic_percent < 0) {
+    return;
+  }
+  percent = MAX(0, MIN(100, percent));
+  snprintf(cmd, sizeof(cmd), "amixer -q set %s %d%% unmute", mic_control, percent);
+  run_detached_shell(cmd);
+  /* Optimistic, same reasoning as widget_set_volume_percent_absolute(). */
+  mic_percent = percent;
+  mic_muted = 0;
+  drawbars();
+  draw_slider_popup();
+}
+
+int WM::widget_set_mic_percent(int delta_percent) {
+  if (mic_percent < 0) {
+    return 0;
+  }
+  widget_set_mic_percent_absolute(mic_percent + delta_percent);
+  return 1;
+}
+
+int WM::widget_slider_current_percent(enum SliderWidget kind) {
+  if (kind == SliderVolume) {
+    return volume_percent;
+  }
+  if (kind == SliderMic) {
+    return mic_percent;
+  }
+  return backlight_percent;
+}
+
+void WM::widget_slider_set_absolute(enum SliderWidget kind, int percent) {
+  if (kind == SliderVolume) {
+    widget_set_volume_percent_absolute(percent);
+  } else if (kind == SliderMic) {
+    widget_set_mic_percent_absolute(percent);
+  } else {
+    widget_set_backlight_percent_absolute(percent);
+  }
+}
+
+void WM::widget_slider_label(enum SliderWidget kind, char *buf, size_t size) {
+  if (kind == SliderVolume) {
+    widget_format_volume(buf, size);
+  } else if (kind == SliderMic) {
+    widget_format_mic(buf, size);
+  } else {
+    widget_format_backlight(buf, size);
+  }
+}
+
+enum WidgetId WM::widget_slider_anchor_id(enum SliderWidget kind) {
+  if (kind == SliderVolume) {
+    return WidgetVolume;
+  }
+  if (kind == SliderMic) {
+    return WidgetMic;
+  }
+  return WidgetBacklight;
+}
+
+void WM::widget_position_slider_popup(Monitor *m) {
+  enum WidgetId id = widget_slider_anchor_id(slider_popup_kind);
+  int anchor_x;
+  int anchor_w;
+  int popup_x;
+  int popup_y;
+
+  if (!m || slider_popup_win == None) {
+    return;
+  }
+
+  anchor_x = widget_layout[id].x;
+  anchor_w = widget_layout[id].w;
+
+  popup_x = m->wx + anchor_x + (anchor_w / 2) - (slider_popup_w / 2);
+  if (popup_x < m->wx) {
+    popup_x = m->wx;
+  }
+  if (popup_x + slider_popup_w > m->wx + m->ww) {
+    popup_x = m->wx + m->ww - slider_popup_w;
+  }
+
+  popup_y = m->bby - slider_popup_h - 8;
+  if (popup_y < m->my) {
+    popup_y = m->my;
+  }
+
+  XMoveResizeWindow(dpy, slider_popup_win, popup_x, popup_y, slider_popup_w,
+                    slider_popup_h);
+}
+
+void WM::widget_open_slider_popup(Monitor *m, enum SliderWidget kind) {
+  XSetWindowAttributes wa = {};
+
+  if (!m) {
+    return;
+  }
+
+  if (slider_popup_win == None) {
+    wa.override_redirect = True;
+    wa.background_pixel = scheme[SchemeNorm][ColBg].pixel;
+    wa.border_pixel = scheme[SchemeSel][ColBorder].pixel;
+    wa.event_mask = ExposureMask | ButtonPressMask | ButtonReleaseMask |
+                    PointerMotionMask;
+    slider_popup_win = XCreateWindow(
+        dpy, root, m->wx, m->bby - slider_popup_h, slider_popup_w,
+        slider_popup_h, 1, DefaultDepth(dpy, screen), CopyFromParent,
+        DefaultVisual(dpy, screen),
+        CWOverrideRedirect | CWBackPixel | CWBorderPixel | CWEventMask, &wa);
+    XDefineCursor(dpy, slider_popup_win, cursor[CurNormal]->cursor);
+  }
+
+  slider_popup_kind = kind;
+  slider_popup_mon = m;
+  slider_popup_visible = 1;
+  slider_popup_dragging = 0;
+  widget_position_slider_popup(m);
+  XMapRaised(dpy, slider_popup_win);
+  draw_slider_popup();
+}
+
+void WM::widget_close_slider_popup(void) {
+  slider_popup_dragging = 0;
+  slider_popup_visible = 0;
+  slider_popup_mon = NULL;
+  if (slider_popup_win != None) {
+    XUnmapWindow(dpy, slider_popup_win);
+  }
+}
+
+void WM::draw_slider_popup(void) {
+  char label[64];
+  int slider_x;
+  int slider_w;
+  int fill_w;
+  int knob_x;
+  int knob_y;
+  int percent;
+
+  if (!slider_popup_visible || slider_popup_win == None) {
+    return;
+  }
+
+  drw_setscheme(drw, scheme[SchemeNorm]);
+  drw_rect(drw, 0, 0, slider_popup_w, slider_popup_h, 1, 1);
+
+  widget_slider_label(slider_popup_kind, label, sizeof(label));
+  drw_setscheme(drw, scheme[SchemeSel]);
+  drw_text(drw, slider_popup_pad, 8, slider_popup_w - 2 * slider_popup_pad,
+           drw->fonts->h + 4, 0, label, 0);
+
+  slider_x = slider_popup_pad;
+  slider_w = slider_popup_w - 2 * slider_popup_pad;
+  drw_setscheme(drw, scheme[SchemeNorm]);
+  drw_rect(drw, slider_x, slider_popup_slider_y, slider_w,
+           slider_popup_slider_h, 1, 0);
+
+  percent = widget_slider_current_percent(slider_popup_kind);
+  if (percent >= 0) {
+    fill_w = (slider_w * percent) / 100;
+    if (fill_w < (slider_popup_knob_w / 2)) {
+      fill_w = slider_popup_knob_w / 2;
+    }
+    if (fill_w > slider_w) {
+      fill_w = slider_w;
+    }
+    drw_setscheme(drw, scheme[SchemeSel]);
+    drw_rect(drw, slider_x, slider_popup_slider_y, fill_w,
+             slider_popup_slider_h, 1, 1);
+
+    knob_x = slider_x + fill_w - (slider_popup_knob_w / 2);
+    if (knob_x < slider_x) {
+      knob_x = slider_x;
+    }
+    if (knob_x > slider_x + slider_w - slider_popup_knob_w) {
+      knob_x = slider_x + slider_w - slider_popup_knob_w;
+    }
+    knob_y = slider_popup_slider_y + (slider_popup_slider_h / 2) -
+             (slider_popup_knob_h / 2);
+    /* Knob must stay legible regardless of fill percentage, so it can't
+     * reuse ColFg like the track/fill above -- those are near-identical
+     * shades in some themes and the knob would vanish into a full bar. */
+    drw_setscheme(drw, scheme[SchemeNorm]);
+    drw_rect(drw, knob_x, knob_y, slider_popup_knob_w, slider_popup_knob_h,
+             1, 1);
+    drw_setscheme(drw, scheme[SchemeSel]);
+    drw_rect(drw, knob_x, knob_y, slider_popup_knob_w, slider_popup_knob_h,
+             0, 1);
+  }
+
+  drw_map(drw, slider_popup_win, 0, 0, slider_popup_w, slider_popup_h);
+}
+
+int WM::slider_popup_handle_motion(XMotionEvent *ev) {
+  int slider_x;
+  int slider_w;
+  int relative_x;
+  int percent;
+
+  if (!slider_popup_visible || !slider_popup_dragging ||
+      ev->window != slider_popup_win) {
+    return 0;
+  }
+
+  slider_x = slider_popup_pad;
+  slider_w = slider_popup_w - 2 * slider_popup_pad;
+  relative_x = ev->x - slider_x;
+  if (relative_x < 0) {
+    relative_x = 0;
+  }
+  if (relative_x > slider_w) {
+    relative_x = slider_w;
+  }
+  percent = (relative_x * 100) / slider_w;
+  widget_slider_set_absolute(slider_popup_kind, percent);
+  return 1;
+}
+
+int WM::slider_popup_handle_button(XButtonPressedEvent *ev) {
+  int slider_x;
+  int slider_w;
+  int slider_y;
+  int relative_x;
+  int percent;
+
+  if (!slider_popup_visible) {
+    return 0;
+  }
+
+  if (ev->window != slider_popup_win) {
+    widget_close_slider_popup();
+    return 0;
+  }
+
+  if (ev->button != Button1) {
+    return 1;
+  }
+
+  slider_x = slider_popup_pad;
+  slider_w = slider_popup_w - 2 * slider_popup_pad;
+  slider_y = slider_popup_slider_y -
+             ((slider_popup_knob_h - slider_popup_slider_h) / 2);
+  if (ev->y < slider_y || ev->y > slider_y + slider_popup_knob_h) {
+    return 1;
+  }
+  relative_x = ev->x - slider_x;
+  if (relative_x < 0) {
+    relative_x = 0;
+  }
+  if (relative_x > slider_w) {
+    relative_x = slider_w;
+  }
+  percent = (relative_x * 100) / slider_w;
+  slider_popup_dragging = 1;
+  widget_slider_set_absolute(slider_popup_kind, percent);
+  return 1;
+}
+
+int WM::widget_hit(enum WidgetId id, int x) {
+  return x >= widget_layout[id].x && x < widget_layout[id].x + widget_layout[id].w;
+}
+
+int WM::widget_handle_button(Monitor *m, XButtonPressedEvent *ev) {
+  if (!m || ev->window != m->widgetbarwin) {
+    return 0;
+  }
+
+  if (widget_hit(WidgetBattery, ev->x)) {
+    if (ev->button == Button1) {
+      info_popup_toggle(m, InfoBattery);
+    }
+    return 1;
+  }
+
+  if (widget_hit(WidgetBacklight, ev->x)) {
+    if (ev->button == Button1) {
+      if (slider_popup_visible && slider_popup_kind == SliderBacklight &&
+          slider_popup_mon == m) {
+        widget_close_slider_popup();
+      } else {
+        widget_open_slider_popup(m, SliderBacklight);
+      }
+      return 1;
+    }
+    if (ev->button == Button4) {
+      return widget_set_backlight_percent(+5);
+    }
+    if (ev->button == Button3 || ev->button == Button5) {
+      return widget_set_backlight_percent(-5);
+    }
+    return 1;
+  }
+
+  if (widget_hit(WidgetVolume, ev->x)) {
+    if (ev->button == Button1) {
+      if (slider_popup_visible && slider_popup_kind == SliderVolume &&
+          slider_popup_mon == m) {
+        widget_close_slider_popup();
+      } else {
+        widget_open_slider_popup(m, SliderVolume);
+      }
+      return 1;
+    }
+    if (ev->button == Button2) {
+      widget_toggle_volume_mute();
+      return 1;
+    }
+    if (ev->button == Button4) {
+      return widget_set_volume_percent(+5);
+    }
+    if (ev->button == Button3 || ev->button == Button5) {
+      return widget_set_volume_percent(-5);
+    }
+    return 1;
+  }
+
+  if (widget_hit(WidgetMic, ev->x)) {
+    if (ev->button == Button1) {
+      if (slider_popup_visible && slider_popup_kind == SliderMic && slider_popup_mon == m) {
+        widget_close_slider_popup();
+      } else {
+        widget_open_slider_popup(m, SliderMic);
+      }
+      return 1;
+    }
+    if (ev->button == Button2) {
+      widget_toggle_mic_mute();
+      return 1;
+    }
+    if (ev->button == Button4) {
+      return widget_set_mic_percent(+5);
+    }
+    if (ev->button == Button3 || ev->button == Button5) {
+      return widget_set_mic_percent(-5);
+    }
+    return 1;
+  }
+
+  if (widget_hit(WidgetMedia, ev->x)) {
+    if (ev->button == Button1) {
+      info_popup_toggle(m, InfoMedia);
+      return 1;
+    }
+    if (ev->button == Button2) {
+      widget_media_play_pause();
+      return 1;
+    }
+    if (ev->button == Button4) {
+      widget_media_next();
+      return 1;
+    }
+    if (ev->button == Button5) {
+      widget_media_previous();
+      return 1;
+    }
+    return 1;
+  }
+
+  if (widget_hit(WidgetTheme, ev->x)) {
+    if (ev->button == Button1 || ev->button == Button4) {
+      widget_cycle_theme_mode(+1);
+      return 1;
+    }
+    if (ev->button == Button3 || ev->button == Button5) {
+      widget_cycle_theme_mode(-1);
+      return 1;
+    }
+    if (ev->button == Button2) {
+      project_toggle(m, PickerModeTheme);
+      return 1;
+    }
+    return 1;
+  }
+
+  if (widget_hit(WidgetGit, ev->x)) {
+    if (ev->button == Button1) {
+      info_popup_toggle(m, InfoGit);
+    }
+    if (ev->button == Button2) {
+      widget_git_open_terminal();
+    }
+    return 1;
+  }
+
+  if (widget_hit(WidgetLoad, ev->x)) {
+    if (ev->button == Button1) {
+      info_popup_toggle(m, InfoLoad);
+    }
+    return 1;
+  }
+
+  if (widget_hit(WidgetCpu, ev->x)) {
+    if (ev->button == Button1) {
+      info_popup_toggle(m, InfoCpu);
+    }
+    return 1;
+  }
+
+  if (widget_hit(WidgetMem, ev->x)) {
+    if (ev->button == Button1) {
+      info_popup_toggle(m, InfoMem);
+    }
+    return 1;
+  }
+
+  if (widget_hit(WidgetDisk, ev->x)) {
+    if (ev->button == Button1) {
+      info_popup_toggle(m, InfoDisk);
+    }
+    return 1;
+  }
+
+  if (widget_hit(WidgetNet, ev->x)) {
+    if (ev->button == Button1) {
+      info_popup_toggle(m, InfoNet);
+    }
+    return 1;
+  }
+
+  if (widget_hit(WidgetWifi, ev->x)) {
+    if (ev->button == Button1) {
+      wifi_popup_toggle(m);
+    }
+    return 1;
+  }
+
+  if (widget_hit(WidgetBluetooth, ev->x)) {
+    if (ev->button == Button1) {
+      bt_popup_toggle(m);
+    }
+    return 1;
+  }
+
+  if (widget_hit(WidgetKbLayout, ev->x)) {
+    if (ev->button == Button1) {
+      info_popup_toggle(m, InfoKbLayout);
+      return 1;
+    }
+    if (ev->button == Button4) {
+      widget_cycle_kblayout();
+      return 1;
+    }
+    if (ev->button == Button5) {
+      int i;
+      if (dpy && kb_layout_count > 1) {
+        XkbStateRec state;
+        if (XkbGetState(dpy, XkbUseCoreKbd, &state) == Success) {
+          i = (state.group - 1 + kb_layout_count) % kb_layout_count;
+          widget_select_kblayout(i);
+        }
+      }
+    }
+    return 1;
+  }
+
+  {
+    size_t i;
+    for (i = 0; i < lua_widgets_len; i++) {
+      if (ev->x >= lua_widgets[i].x &&
+          ev->x < lua_widgets[i].x + lua_widgets[i].w) {
+        widget_lua_click(i, ev->button);
+        return 1;
+      }
+    }
+  }
+
+  return 1;
+}
+
+/* Interning this on every save/restore call cost a server round trip per
+ * client -- with several clients open, GC'ing an empty workspace on switch
+ * (which re-saves every client's tags, see workspace_remove_index) turned
+ * into a burst of blocking round trips and made switching feel laggy. */
+Atom WM::workspace_tags_atom(void) {
+  static Atom atom = None;
+  if (atom == None) {
+    atom = XInternAtom(dpy, "_MWM_WORKSPACE_TAGS", False);
+  }
+  return atom;
+}
+
+void WM::client_save_workspace_tags(const Client *c) {
+  Atom property;
+  unsigned long data[2];
+
+  if (!c) {
+    return;
+  }
+  property = workspace_tags_atom();
+  data[0] = (unsigned long)(c->tags & 0xFFFFFFFFULL);
+  data[1] = (unsigned long)((c->tags >> 32) & 0xFFFFFFFFULL);
+  XChangeProperty(dpy, c->win, property, XA_CARDINAL, 32, PropModeReplace,
+                  reinterpret_cast<unsigned char *>(data), 2);
+}
+
+int WM::client_restore_workspace_tags(Window w, WorkspaceMask *tags) {
+  Atom property;
+  Atom actual_type;
+  int actual_format;
+  unsigned long nitems;
+  unsigned long bytes_after;
+  unsigned char *data = NULL;
+  WorkspaceMask restored = 0;
+  int ok = 0;
+
+  if (!tags) {
+    return 0;
+  }
+
+  property = workspace_tags_atom();
+  if (XGetWindowProperty(dpy, w, property, 0, 2, False, XA_CARDINAL,
+                         &actual_type, &actual_format, &nitems, &bytes_after,
+                         &data) != Success) {
+    return 0;
+  }
+
+  if (actual_type == XA_CARDINAL && actual_format == 32 && data) {
+    unsigned long *values = reinterpret_cast<unsigned long *>(data);
+    if (nitems >= 1) {
+      restored = (WorkspaceMask)values[0];
+      if (nitems >= 2) {
+        restored |= ((WorkspaceMask)values[1]) << 32;
+      }
+      restored &= get_full_workspace_mask();
+      if (restored) {
+        *tags = restored;
+        ok = 1;
+      }
+    }
+  }
+
+  if (data) {
+    XFree(data);
+  }
+  return ok;
+}
+
+// }}} Variables
+
+// {{{ config
+
+/* configuration, allows nested code to access above variables */
+
+/* See LICENSE file for copyright and license details. */
+
+/* appearance */
+/* Second entry is a fallback used only for glyphs missing from the primary
+ * font -- widget icons live in the Nerd Font Private Use Area ranges, so a
+ * Nerd Font must be installed for them to render instead of tofu boxes. */
+
+
+/* layout(s) -- overridable via mwm.set_mfact()/mwm.set_nmaster() */
+
+
+/* helper for spawning shell commands in the pre dwm-5.0 fashion */
+#define SHCMD(cmd)                                                             \
+  {                                                                            \
+    .v = (const char *[]) { "/bin/sh", "-c", cmd, NULL }                       \
+  }
+
+/* commands */
+/* termcmd[0] points at the mutable terminal_cmd buffer (declared with the
+ * other Lua-config globals above) so mwm.set_terminal() takes effect here
+ * too, without needing to rebuild this array. */
+/* Left dock's app buttons (see drawleftbar()). */
+
+
+/* button definitions */
+/* click can be ClkTagBar, ClkLtSymbol, ClkStatusText, ClkWinTitle,
+ * ClkClientWin, or ClkRootWin */
+
+// }}} config
+
+char *WM::xstrdup_local(const char *src) {
+  size_t len;
+  char *dst;
+  if (!src) {
+    src = "";
+  }
+  len = strlen(src);
+  dst = ecalloc_type<char>(len + 1);
+  memcpy(dst, src, len);
+  return dst;
+}
+
+void WM::write_all(int fd, const char *buf, size_t len) {
+  while (len > 0) {
+    ssize_t written = write(fd, buf, len);
+    if (written <= 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      return;
+    }
+    buf += (size_t)written;
+    len -= (size_t)written;
+  }
+}
+
+void WM::wm_output_append(const char *buf, size_t len) {
+  if (wm_command_reply_fd >= 0) {
+    write_all(wm_command_reply_fd, buf, len);
+  }
+  if (wm_capture_buffer && wm_capture_buffer_size > 0) {
+    size_t available = wm_capture_buffer_size - 1;
+    if (wm_capture_buffer_len < available) {
+      size_t to_copy = MIN(len, available - wm_capture_buffer_len);
+      memcpy(wm_capture_buffer + wm_capture_buffer_len, buf, to_copy);
+      wm_capture_buffer_len += to_copy;
+      wm_capture_buffer[wm_capture_buffer_len] = '\0';
+    }
+  }
+}
+
+WorkspaceMask WM::get_full_workspace_mask(void) {
+  if (workspaces.empty()) {
+    return 0;
+  }
+  if (workspaces.size() >= 64) {
+    return ~0ULL;
+  }
+  return (1ULL << workspaces.size()) - 1ULL;
+}
+
+Workspace *WM::workspace_by_index(size_t index) {
+  if (index >= workspaces.size()) {
+    return NULL;
+  }
+  return &workspaces[index];
+}
+
+WorkspaceMask WM::workspace_mask_from_index(size_t index) {
+  if (index >= 64) {
+    return 0;
+  }
+  return 1ULL << index;
+}
+
+const char *WM::workspace_name_from_mask(WorkspaceMask mask) {
+  for (size_t i = 0; i < workspaces.size(); i++) {
+    if (mask & workspace_mask_from_index(i)) {
+      return workspaces[i].name.c_str();
+    }
+  }
+  return "";
+}
+
+size_t WM::workspace_find(const char *name) {
+  if (!name || name[0] == '\0') {
+    return SIZE_MAX;
+  }
+  for (size_t i = 0; i < workspaces.size(); i++) {
+    if (workspaces[i].name == name) {
+      return i;
+    }
+  }
+  return SIZE_MAX;
+}
+
+size_t WM::workspace_index_from_mask(WorkspaceMask mask) {
+  if (!mask || (mask & (mask - 1ULL))) {
+    return SIZE_MAX;
+  }
+  for (size_t i = 0; i < workspaces.size(); i++) {
+    if (mask == workspace_mask_from_index(i)) {
+      return i;
+    }
+  }
+  return SIZE_MAX;
+}
+
+int WM::workspace_has_clients(size_t index) {
+  Monitor *m;
+  WorkspaceMask mask;
+  Client *c;
+
+  if (index >= workspaces.size()) {
+    return 0;
+  }
+  mask = workspace_mask_from_index(index);
+  for (m = mons.get(); m; m = m->next.get()) {
+    for (c = m->clients.get(); c; c = c->next.get()) {
+      if (c->tags & mask) {
+        return 1;
+      }
+    }
+  }
+  return 0;
+}
+
+int WM::workspace_is_visible_on_any_monitor(size_t index) {
+  Monitor *m;
+  WorkspaceMask mask;
+
+  if (index >= workspaces.size()) {
+    return 0;
+  }
+  mask = workspace_mask_from_index(index);
+  for (m = mons.get(); m; m = m->next.get()) {
+    if (m->tagset[m->seltags] & mask) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+WorkspaceMask WM::workspace_reindex_mask_after_remove(WorkspaceMask mask,
+                                                         size_t removed_index) {
+  WorkspaceMask result = 0;
+  size_t i;
+
+  for (i = 0; i < 64; i++) {
+    WorkspaceMask bit = 1ULL << i;
+    if (!(mask & bit)) {
+      continue;
+    }
+    if (i == removed_index) {
+      continue;
+    }
+    if (i > removed_index) {
+      result |= 1ULL << (i - 1);
+    } else {
+      result |= bit;
+    }
+  }
+  return result;
+}
+
+void WM::workspace_sync_after_registry_change(void) {
+  Monitor *m;
+  WorkspaceMask full = get_full_workspace_mask();
+  WorkspaceMask fallback = !workspaces.empty() ? workspace_mask_from_index(0) : 0;
+
+  for (m = mons.get(); m; m = m->next.get()) {
+    m->tagset[0] &= full;
+    m->tagset[1] &= full;
+    if (!m->tagset[0]) {
+      m->tagset[0] = fallback;
+    }
+    if (!m->tagset[1]) {
+      m->tagset[1] = fallback;
+    }
+  }
+}
+
+size_t WM::workspace_ensure(const char *name) {
+  size_t found;
+
+  if (!name || name[0] == '\0') {
+    return SIZE_MAX;
+  }
+  found = workspace_find(name);
+  if (found != SIZE_MAX) {
+    return found;
+  }
+  if (workspaces.size() >= 64) {
+    return SIZE_MAX;
+  }
+  workspaces.push_back(
+      Workspace{workspace_mask_from_index(workspaces.size()), name});
+  workspace_sync_after_registry_change();
+  return workspaces.size() - 1;
+}
+
+int WM::workspace_remove_index(size_t index) {
+  Monitor *m;
+
+  if (index >= workspaces.size()) {
+    return 0;
+  }
+
+  workspaces.erase(workspaces.begin() + (ptrdiff_t)index);
+  for (size_t i = index; i < workspaces.size(); i++) {
+    workspaces[i].mask = workspace_mask_from_index(i);
+  }
+
+  for (m = mons.get(); m; m = m->next.get()) {
+    Client *c;
+    m->tagset[0] = workspace_reindex_mask_after_remove(m->tagset[0], index);
+    m->tagset[1] = workspace_reindex_mask_after_remove(m->tagset[1], index);
+    for (c = m->clients.get(); c; c = c->next.get()) {
+      c->tags = workspace_reindex_mask_after_remove(c->tags, index);
+      client_save_workspace_tags(c);
+    }
+  }
+
+  workspace_sync_after_registry_change();
+  return 1;
+}
+
+int WM::workspace_rename(size_t index, const char *name) {
+  size_t found;
+  if (index >= workspaces.size() || !name || name[0] == '\0') {
+    return 0;
+  }
+  found = workspace_find(name);
+  if (found != SIZE_MAX && found != index) {
+    return 0;
+  }
+  workspaces[index].name = name;
+  return 1;
+}
+
+void WM::workspace_set_defaults(void) {
+  char name[16];
+  if (!workspaces.empty()) {
+    return;
+  }
+  for (size_t i = 0; i < 9; i++) {
+    snprintf(name, sizeof(name), "%zu", i + 1);
+    if (workspace_ensure(name) == SIZE_MAX) {
+      die("failed to create default workspace");
+    }
+  }
+}
+
+int WM::workspace_set_list_from_lua(lua_State *L, int index) {
+  size_t len;
+  std::vector<Workspace> old_workspaces = std::move(workspaces);
+
+  luaL_checktype(L, index, LUA_TTABLE);
+  workspaces.clear();
+  len = (size_t)lua_rawlen(L, index);
+  for (size_t i = 1; i <= len; i++) {
+    lua_rawgeti(L, index, (int)i);
+    if (!lua_isstring(L, -1) ||
+        workspace_ensure(lua_tostring(L, -1)) == SIZE_MAX) {
+      lua_pop(L, 1);
+      workspaces = std::move(old_workspaces);
+      return 0;
+    }
+    lua_pop(L, 1);
+  }
+  if (workspaces.empty()) {
+    workspace_set_defaults();
+  }
+  workspace_sync_after_registry_change();
+  return 1;
+}
+
+void WM::workspace_view_mask(Monitor *m, WorkspaceMask mask) {
+  if (!m) {
+    return;
+  }
+  if ((mask & get_full_workspace_mask()) == m->tagset[m->seltags]) {
+    return;
+  }
+  m->seltags ^= 1;
+  if (mask & get_full_workspace_mask()) {
+    m->tagset[m->seltags] = mask & get_full_workspace_mask();
+  }
+  if (!m->tagset[m->seltags] && !workspaces.empty()) {
+    m->tagset[m->seltags] = workspace_mask_from_index(0);
+  }
+  focus(NULL);
+  arrange(m);
+}
+
+void WM::get_workspace_socket_path(char *buf, size_t size) {
+  const char *runtime = getenv("XDG_RUNTIME_DIR");
+  const char *display_name = getenv("DISPLAY");
+  if (runtime && runtime[0] != '\0') {
+    snprintf(buf, size, "%s/mwm-%s.sock", runtime,
+             display_name && display_name[0] ? display_name : "display");
+    return;
+  }
+  snprintf(buf, size, "/tmp/mwm-%s.sock",
+           display_name && display_name[0] ? display_name : "display");
+}
+
+// {{{ void applyrules(Client *c)
+void WM::applyrules(Client *c) {
+  const char *class_name, *instance;
+  unsigned int i;
+  size_t li;
+  const Rule *r;
+  Monitor *m;
+  XClassHint ch = {NULL, NULL};
+
+  /* rule matching */
+  c->isfloating = 0;
+  c->tags = 0;
+  XGetClassHint(dpy, c->win, &ch);
+  class_name = ch.res_class ? ch.res_class : broken;
+  instance = ch.res_name ? ch.res_name : broken;
+
+  for (i = 0; i < LENGTH(rules); i++) {
+    r = &rules[i];
+    if ((!r->title || strstr(c->name, r->title)) &&
+        (!r->class_name || strstr(class_name, r->class_name)) &&
+        (!r->instance || strstr(instance, r->instance))) {
+      c->isfloating = r->isfloating;
+      c->tags |= r->tags;
+      for (m = mons.get(); m && m->num != r->monitor; m = m->next.get()) {
+        ;
+      }
+      if (m) {
+        c->mon = m;
+      }
+    }
+  }
+
+  /* mwm.rule() from Lua -- applied after the compiled-in rules[] above, so
+   * a user's Lua config always has the final say for windows it matches. */
+  for (li = 0; li < lua_rules_len; li++) {
+    LuaRule *lr = &lua_rules[li];
+    if ((!lr->class_name[0] || strstr(class_name, lr->class_name)) &&
+        (!lr->instance[0] || strstr(instance, lr->instance)) &&
+        (!lr->title[0] || strstr(c->name, lr->title))) {
+      if (lr->has_isfloating) {
+        c->isfloating = lr->isfloating;
+      }
+      if (lr->workspace[0]) {
+        size_t widx = workspace_ensure(lr->workspace);
+        if (widx != SIZE_MAX) {
+          c->tags = workspace_mask_from_index(widx);
+        }
+      }
+    }
+  }
+
+  if (ch.res_class) {
+    XFree(ch.res_class);
+  }
+  if (ch.res_name) {
+    XFree(ch.res_name);
+  }
+  c->tags = c->tags & get_full_workspace_mask()
+                ? c->tags & get_full_workspace_mask()
+                : c->mon->tagset[c->mon->seltags];
+}
+// }}} void applyrules(Client *c)
+
+// {{{ int applysizehints(Client *c, int *x, int
+//                        *y, int *w, int *h, int interact)
+int WM::applysizehints(Client *c, int *x, int *y, int *w, int *h, int interact) {
+  int baseismin;
+  Monitor *m = c->mon;
+
+  /* set minimum possible */
+  *w = MAX(1, *w);
+  *h = MAX(1, *h);
+  if (interact) {
+    if (*x > sw) {
+      *x = sw - WIDTH(c);
+    }
+    if (*y > sh) {
+      *y = sh - HEIGHT(c);
+    }
+    if (*x + *w + 2 * c->bw < 0) {
+      *x = 0;
+    }
+    if (*y + *h + 2 * c->bw < 0) {
+      *y = 0;
+    }
+  } else {
+    if (*x >= m->wx + m->ww) {
+      *x = m->wx + m->ww - WIDTH(c);
+    }
+    if (*y >= m->wy + m->wh) {
+      *y = m->wy + m->wh - HEIGHT(c);
+    }
+    if (*x + *w + 2 * c->bw <= m->wx) {
+      *x = m->wx;
+    }
+    if (*y + *h + 2 * c->bw <= m->wy) {
+      *y = m->wy;
+    }
+  }
+  if (*h < bh) {
+    *h = bh;
+  }
+  if (*w < bh) {
+    *w = bh;
+  }
+  if (resizehints || c->isfloating || !c->mon->lt[c->mon->sellt]->arrange) {
+    if (!c->hintsvalid) {
+      updatesizehints(c);
+    }
+    /* see last two sentences in ICCCM 4.1.2.3 */
+    baseismin = c->basew == c->minw && c->baseh == c->minh;
+    if (!baseismin) { /* temporarily remove base dimensions */
+      *w -= c->basew;
+      *h -= c->baseh;
+    }
+    /* adjust for aspect limits */
+    if (c->mina > 0 && c->maxa > 0) {
+      if (c->maxa < (float)*w / *h) {
+        *w = *h * c->maxa + 0.5;
+      } else if (c->mina < (float)*h / *w) {
+        *h = *w * c->mina + 0.5;
+      }
+    }
+    if (baseismin) { /* increment calculation requires this */
+      *w -= c->basew;
+      *h -= c->baseh;
+    }
+    /* adjust for increment value */
+    if (c->incw) {
+      *w -= *w % c->incw;
+    }
+    if (c->inch) {
+      *h -= *h % c->inch;
+    }
+    /* restore base dimensions */
+    *w = MAX(*w + c->basew, c->minw);
+    *h = MAX(*h + c->baseh, c->minh);
+    if (c->maxw) {
+      *w = MIN(*w, c->maxw);
+    }
+    if (c->maxh) {
+      *h = MIN(*h, c->maxh);
+    }
+  }
+  return *x != c->x || *y != c->y || *w != c->w || *h != c->h;
+}
+// }}} int applysizehints()
+
+// {{{ void arrange(Monitor *m)
+void WM::arrange(Monitor *m) {
+  if (m) {
+    showhide(m->stack.get());
+  } else {
+    for (m = mons.get(); m; m = m->next.get()) {
+      showhide(m->stack.get());
+    }
+  }
+  if (m) {
+    arrangemon(m);
+    restack(m);
+  } else {
+    for (m = mons.get(); m; m = m->next.get()) {
+      arrangemon(m);
+    }
+  }
+}
+// }}} void arrange(Monitor *m)
+
+// {{{ void arrangemon(Monitor *m)
+void WM::arrangemon(Monitor *m) {
+  strncpy(m->ltsymbol, m->lt[m->sellt]->symbol, sizeof m->ltsymbol);
+  if (m->lt[m->sellt]->arrange) {
+    (this->*m->lt[m->sellt]->arrange)(m);
+  }
+}
+// }}} void arrangemon(Monitor *m)
+
+// {{{ void attach(Client *c)
+void WM::attach(Client *c) {
+  c->next = c->mon->clients;
+  c->mon->clients = c->shared_from_this();
+}
+// }}} void attach(Client *c)
+
+// {{{ void attachstack(Client *c)
+void WM::attachstack(Client *c) {
+  c->snext = c->mon->stack;
+  c->mon->stack = c->shared_from_this();
+}
+// }}} void attachstack(Client *c)
+
+// {{{ void buttonpress(XEvent *e)
+void WM::buttonpress(XEvent *e) {
+  unsigned int x, click;
+  size_t i;
+  Arg arg = {0};
+  Client *c;
+  Monitor *m;
+  XButtonPressedEvent *ev = &e->xbutton;
+  unsigned int statusw, trayw, clockw;
+
+  click = ClkRootWin;
+  if (keybind_help_handle_button(ev)) {
+    return;
+  }
+  if (calendar_handle_button(ev)) {
+    return;
+  }
+  if (wifi_handle_button(ev)) {
+    return;
+  }
+  if (project_handle_button(ev)) {
+    return;
+  }
+  if (desktop_handle_button(ev)) {
+    return;
+  }
+  if (slider_popup_handle_button(ev)) {
+    return;
+  }
+  if (info_popup_handle_button(ev)) {
+    return;
+  }
+  if (bt_handle_button(ev)) {
+    return;
+  }
+  if (notif_sidebar_handle_button(ev)) {
+    return;
+  }
+  if (todo_sidebar_handle_button(ev)) {
+    return;
+  }
+  if (agent_sidebar_handle_button(ev)) {
+    return;
+  }
+  /* focus the monitor if necessary */
+  if ((m = wintomon(ev->window)) && m != selmon) {
+    unfocus(selmon->sel, 1);
+    selmon = m;
+    focus(NULL);
+  }
+  if (widget_handle_button(m, ev)) {
+    return;
+  }
+  if (leftbar_handle_button(m, ev)) {
+    return;
+  }
+  if (rightbar_handle_button(m, ev)) {
+    return;
+  }
+  // If the window is equal to the selected monitor's bar window
+  if (ev->window == selmon->barwin) {
+    char project_label[288];
+    char base[256];
+
+    /* Must match drawbar()'s layout exactly: project label, then the
+     * active project's 9 fixed slots ("1".."9", always all of them,
+     * whether or not each has actually been created yet), starting past
+     * the label rather than at the left edge. */
+    project_basename(active_project_path, base, sizeof(base));
+    snprintf(project_label, sizeof(project_label), "%s %s", icon_projects, base);
+    x = (int)TEXTW(project_label);
+    statusw = TEXTW(stext);
+    trayw = (showsystray && systray && selmon == m) ? getsystraywidth() : 0;
+    clockw = (unsigned int)clock_reserved_w;
+    i = 10; /* sentinel: no slot matched */
+    for (size_t n = 1; n <= 9; n++) {
+      char label[4];
+      snprintf(label, sizeof(label), "%zu", n);
+      x += TEXTW(label);
+      if (ev->x < x) {
+        i = n - 1; /* 0-8, same convention as WORKSPACEKEYS' arg.i */
+        break;
+      }
+    }
+    if (i < 9) {
+      char name[300];
+      size_t idx;
+
+      click = ClkTagBar;
+      arg.i = (int)i;
+      /* Materialize the slot now, mainly so the lua_buttons[] path below
+       * has a real mask to turn back into a name -- the *nth function
+       * this ultimately dispatches to (see the buttons[] table) will just
+       * find it already there via its own workspace_ensure() call. */
+      project_workspace_name((int)i + 1, name, sizeof(name));
+      idx = workspace_ensure(name);
+      arg.ull = idx == SIZE_MAX ? 0 : workspace_mask_from_index(idx);
+    } else if (ev->x < x + TEXTW(selmon->ltsymbol)) {
+      click = ClkLtSymbol;
+    } else if (ev->x > selmon->ww - (int)clockw) {
+      click = ClkClock;
+    } else if (ev->x > selmon->ww - (int)statusw - (int)trayw - (int)clockw) {
+      click = ClkStatusText;
+    } else {
+      /* Must match drawtasklist()'s layout exactly: same left-to-right walk
+       * over selmon->clients, starting past the layout symbol. arg.v is
+       * left NULL if the click landed past the last client (in the blank
+       * fill drawtasklist() leaves for unused space) -- tasklist_focus()
+       * just no-ops on that. */
+      Client *tc;
+      int tx = (int)x + (int)TEXTW(selmon->ltsymbol);
+
+      click = ClkWinTitle;
+      arg.v = NULL;
+      for (tc = selmon->clients.get(); tc; tc = tc->next.get()) {
+        int cw;
+        if (!ISVISIBLE(tc)) {
+          continue;
+        }
+        cw = (int)TEXTW(tc->name);
+        if (ev->x < tx + cw) {
+          arg.v = tc;
+          break;
+        }
+        tx += cw;
+      }
+    }
+  } else if ((c = wintoclient(ev->window))) {
+    focus(c);
+    restack(selmon);
+    XAllowEvents(dpy, ReplayPointer, CurrentTime);
+    click = ClkClientWin;
+  }
+  // Iterate over all buttons in buttons list
+  for (i = 0; i < LENGTH(buttons); i++) {
+    // If click event matches
+    if (click == buttons[i].click && buttons[i].func &&
+        buttons[i].button == ev->button &&
+        CLEANMASK(buttons[i].mask) == CLEANMASK(ev->state)) {
+      (this->*buttons[i].func)((click == ClkTagBar || click == ClkWinTitle) && buttons[i].arg.i == 0
+                          ? &arg
+                          : &buttons[i].arg);
+    }
+  }
+  for (i = 0; i < lua_buttons_len; i++) {
+    if (click == (unsigned int)lua_buttons[i].click && lua_buttons[i].button == ev->button &&
+        CLEANMASK(lua_buttons[i].mod) == CLEANMASK(ev->state)) {
+      const char *wsname = click == ClkTagBar ? workspace_name_from_mask(arg.ull) : NULL;
+      lua_button_invoke(i, wsname);
+    }
+  }
+}
+// }}} void buttonpress(XEvent *e)
+
+// {{{ void buttonrelease(XEvent *e)
+void WM::buttonrelease(XEvent *e) {
+  XButtonReleasedEvent *ev = &e->xbutton;
+
+  (void)ev;
+  slider_popup_dragging = 0;
+}
+// }}} void buttonrelease(XEvent *e)
+
+// {{{ void checkargs(int argc, char *argv[])
+void WM::checkargs(int argc, char *argv[]) {
+  if (argc == 2 && !strcmp("-v", argv[1])) {
+    die(" ");
+  } else if (argc != 1) {
+    die("usage: mwm [-v]");
+  }
+}
+// }}} void checkargs(int argc, char *argv[])
+
+// {{{ void checklocale(void)
+void WM::checklocale(void) {
+  if (!setlocale(LC_CTYPE, "") || !XSupportsLocale()) {
+    fputs("warning: no locale support\n", stderr);
+  }
+}
+// }}} void checklocale(void)
+
+// {{{ void checkotherwm(void)
+void WM::checkotherwm(void) {
+  xerrorxlib = XSetErrorHandler(xerrorstart);
+  /* this causes an error if some other window manager is running */
+  XSelectInput(dpy, DefaultRootWindow(dpy), SubstructureRedirectMask);
+  XSync(dpy, False);
+  XSetErrorHandler(xerror);
+  XSync(dpy, False);
+}
+// }}} void checkotherwm(void)
+
+// {{{ void checkx11(void)
+void WM::checkx11(void) {
+  dpy_owner.reset(XOpenDisplay(NULL));
+  dpy = dpy_owner.get();
+  if (!dpy) {
+    die("mwm: cannot open display");
+  }
+}
+// }}} void checkx11(void)
+
+// {{{ theme config
+void WM::copy_color_value(char dest[32], const char *src) {
+  if (!dest || !src) {
+    return;
+  }
+  snprintf(dest, 32, "%s", src);
+}
+
+void WM::set_default_bar_theme(void) {
+  copy_color_value(bar_theme_dark.normal.fg, default_col_gray3);
+  copy_color_value(bar_theme_dark.normal.bg, default_col_gray1);
+  copy_color_value(bar_theme_dark.normal.border, default_col_gray2);
+  copy_color_value(bar_theme_dark.selected.fg, default_col_gray4);
+  copy_color_value(bar_theme_dark.selected.bg, default_col_cyan);
+  copy_color_value(bar_theme_dark.selected.border, default_col_cyan);
+
+  copy_color_value(bar_theme_light.normal.fg, default_col_light_fg);
+  copy_color_value(bar_theme_light.normal.bg, default_col_light_bg);
+  copy_color_value(bar_theme_light.normal.border, default_col_light_border);
+  copy_color_value(bar_theme_light.selected.fg, default_col_light_accent_fg);
+  copy_color_value(bar_theme_light.selected.bg, default_col_light_accent);
+  copy_color_value(bar_theme_light.selected.border, default_col_light_accent);
+}
+
+/* Picked from the Mod+Shift+t / theme-widget-middle-click picker (see
+ * PickerModeTheme in project_filter()/project_launch()) -- selecting one
+ * copies .colors into both bar_theme_dark and bar_theme_light via
+ * color_theme_apply(), since each entry here is one complete look rather
+ * than a dark/light pair. "Default Dark"/"Default Light" are the original
+ * hardcoded scheme from set_default_bar_theme(), kept as entries 0 and 1 so
+ * they're reachable from the same list. */
+
+int WM::color_theme_find_by_name(const char *name) {
   size_t i;
   if (!name || !name[0]) {
     return -1;
@@ -5093,7 +5435,7 @@ static int color_theme_find_by_name(const char *name) {
  * the ColorTheme comment above), persists the choice, and repaints. Safe to
  * call during setup() before selmon exists -- widget_apply_theme() already
  * guards that. */
-static void color_theme_apply(size_t idx) {
+void WM::color_theme_apply(size_t idx) {
   if (idx >= LENGTH(color_themes)) {
     return;
   }
@@ -5104,16 +5446,16 @@ static void color_theme_apply(size_t idx) {
   widget_apply_theme();
 }
 
-static const BarThemeConfig *active_bar_theme(void) {
+const BarThemeConfig *WM::active_bar_theme(void) {
   return theme_resolved_dark ? &bar_theme_dark : &bar_theme_light;
 }
 
-static void freecolorscheme(void) {
+void WM::freecolorscheme(void) {
   scheme_owner.reset();
   scheme = nullptr;
 }
 
-static void setcolorscheme(void) {
+void WM::setcolorscheme(void) {
   const BarThemeConfig *active = active_bar_theme();
   const char *colors[SchemeSel + 1][3] = {
       {active->normal.fg, active->normal.bg, active->normal.border},
@@ -5129,25 +5471,23 @@ static void setcolorscheme(void) {
   scheme = scheme_owner.get();
 }
 
-static int system_prefers_dark(void) {
-  FILE *fp;
+int WM::system_prefers_dark(void) {
+  char *const argv_busctl[] = {
+      (char *)"busctl",       (char *)"--user",
+      (char *)"call",         (char *)"org.freedesktop.portal.Desktop",
+      (char *)"/org/freedesktop/portal/desktop",
+      (char *)"org.freedesktop.portal.Settings",
+      (char *)"Read",         (char *)"ss",
+      (char *)"org.freedesktop.appearance", (char *)"color-scheme",
+      NULL};
   char buf[128];
   char *tok;
   char *last_tok = NULL;
   int val;
 
-  fp = popen("busctl --user call org.freedesktop.portal.Desktop "
-             "/org/freedesktop/portal/desktop org.freedesktop.portal.Settings "
-             "Read ss org.freedesktop.appearance color-scheme 2>/dev/null",
-             "r");
-  if (!fp) {
+  if (!run_capture_argv(NULL, argv_busctl, buf, sizeof(buf), 300)) {
     return 1;
   }
-  if (!fgets(buf, sizeof(buf), fp)) {
-    pclose(fp);
-    return 1;
-  }
-  pclose(fp);
 
   tok = strtok(buf, " \t\n");
   while (tok) {
@@ -5162,7 +5502,7 @@ static int system_prefers_dark(void) {
   return val != 2;
 }
 
-static int theme_resolve_prefers_dark(void) {
+int WM::theme_resolve_prefers_dark(void) {
   switch (theme_mode) {
   case ThemeModeDark:
     return 1;
@@ -5174,7 +5514,7 @@ static int theme_resolve_prefers_dark(void) {
   }
 }
 
-static void widget_refresh_client_borders(void) {
+void WM::widget_refresh_client_borders(void) {
   Monitor *m;
   Client *c;
 
@@ -5187,7 +5527,7 @@ static void widget_refresh_client_borders(void) {
   }
 }
 
-static void widget_apply_theme(void) {
+void WM::widget_apply_theme(void) {
   setcolorscheme();
   /* Called from updatewidgets(), which setup() also runs once before
    * updategeom() creates the first monitor -- selmon is NULL at that
@@ -5200,7 +5540,7 @@ static void widget_apply_theme(void) {
   drawbars();
 }
 
-static void widget_update_theme(void) {
+void WM::widget_update_theme(void) {
   int resolved = theme_resolve_prefers_dark();
 
   if (resolved != theme_resolved_dark) {
@@ -5209,7 +5549,7 @@ static void widget_update_theme(void) {
   }
 }
 
-static void widget_format_theme(char *buf, size_t size) {
+void WM::widget_format_theme(char *buf, size_t size) {
   const char *icon;
 
   if (active_color_theme >= 0) {
@@ -5233,7 +5573,7 @@ static void widget_format_theme(char *buf, size_t size) {
   snprintf(buf, size, "%s", icon);
 }
 
-static void get_theme_state_path(char *buf, size_t size) {
+void WM::get_theme_state_path(char *buf, size_t size) {
   const char *xdg_cache_home;
   const char *home;
 
@@ -5256,7 +5596,7 @@ static void get_theme_state_path(char *buf, size_t size) {
 /* Second line, if present, is the last color_themes[] entry picked from the
  * theme picker -- see color_theme_apply(). Absent/unrecognized just means
  * "none", not an error; older state files predate this line entirely. */
-static void load_theme_mode_state(void) {
+void WM::load_theme_mode_state(void) {
   char path[PATH_MAX];
   char line[64];
   FILE *fp;
@@ -5289,7 +5629,7 @@ static void load_theme_mode_state(void) {
   fclose(fp);
 }
 
-static void save_theme_mode_state(void) {
+void WM::save_theme_mode_state(void) {
   char path[PATH_MAX];
   char dir[PATH_MAX];
   char *slash;
@@ -5334,7 +5674,7 @@ static void save_theme_mode_state(void) {
  * clicking/scrolling it while a named theme from the picker is active
  * clears that override back to the original hardcoded look rather than
  * leaving stale picked colors that this toggle can no longer see. */
-static void widget_cycle_theme_mode(int direction) {
+void WM::widget_cycle_theme_mode(int direction) {
   int next = (((int)theme_mode + direction) % ThemeModeCount + ThemeModeCount) %
              ThemeModeCount;
 
@@ -5348,7 +5688,7 @@ static void widget_cycle_theme_mode(int direction) {
   widget_apply_theme();
 }
 
-static void get_theme_config_path(char *buf, size_t size) {
+void WM::get_theme_config_path(char *buf, size_t size) {
   const char *xdg_config_home;
   const char *home;
 
@@ -5368,7 +5708,7 @@ static void get_theme_config_path(char *buf, size_t size) {
   buf[0] = '\0';
 }
 
-static void lua_read_colorset(lua_State *L, int index, ColorSetConfig *config) {
+void WM::lua_read_colorset(lua_State *L, int index, ColorSetConfig *config) {
   if (!lua_istable(L, index) || !config) {
     return;
   }
@@ -5390,19 +5730,20 @@ static void lua_read_colorset(lua_State *L, int index, ColorSetConfig *config) {
 }
 
 static int lua_mwm_theme(lua_State *L) {
+  WM *wm = lua_wm(L);
   luaL_checktype(L, 1, LUA_TTABLE);
 
   lua_getfield(L, 1, "topbar");
   if (lua_istable(L, -1)) {
     lua_getfield(L, -1, "normal");
     if (lua_istable(L, -1)) {
-      lua_read_colorset(L, lua_gettop(L), &bar_theme_dark.normal);
+      wm->lua_read_colorset(L, lua_gettop(L), &wm->bar_theme_dark.normal);
     }
     lua_pop(L, 1);
 
     lua_getfield(L, -1, "selected");
     if (lua_istable(L, -1)) {
-      lua_read_colorset(L, lua_gettop(L), &bar_theme_dark.selected);
+      wm->lua_read_colorset(L, lua_gettop(L), &wm->bar_theme_dark.selected);
     }
     lua_pop(L, 1);
   }
@@ -5412,13 +5753,13 @@ static int lua_mwm_theme(lua_State *L) {
   if (lua_istable(L, -1)) {
     lua_getfield(L, -1, "normal");
     if (lua_istable(L, -1)) {
-      lua_read_colorset(L, lua_gettop(L), &bar_theme_light.normal);
+      wm->lua_read_colorset(L, lua_gettop(L), &wm->bar_theme_light.normal);
     }
     lua_pop(L, 1);
 
     lua_getfield(L, -1, "selected");
     if (lua_istable(L, -1)) {
-      lua_read_colorset(L, lua_gettop(L), &bar_theme_light.selected);
+      wm->lua_read_colorset(L, lua_gettop(L), &wm->bar_theme_light.selected);
     }
     lua_pop(L, 1);
   }
@@ -5428,23 +5769,24 @@ static int lua_mwm_theme(lua_State *L) {
 }
 
 static int lua_print_to_client(lua_State *L) {
+  WM *wm = lua_wm(L);
   int n = lua_gettop(L);
   int i;
   for (i = 1; i <= n; i++) {
     size_t len;
     const char *text;
     text = luaL_tolstring(L, i, &len);
-    wm_output_append(text, len);
+    wm->wm_output_append(text, len);
     if (i < n) {
-      wm_output_append("\t", 1);
+      wm->wm_output_append("\t", 1);
     }
     lua_pop(L, 1);
   }
-  wm_output_append("\n", 1);
+  wm->wm_output_append("\n", 1);
   return 0;
 }
 
-static size_t lua_workspace_index_arg(lua_State *L, int arg_index) {
+size_t WM::lua_workspace_index_arg(lua_State *L, int arg_index) {
   lua_Integer idx;
   size_t named;
   if (lua_type(L, arg_index) == LUA_TNUMBER) {
@@ -5462,19 +5804,21 @@ static size_t lua_workspace_index_arg(lua_State *L, int arg_index) {
 }
 
 static int lua_mwm_workspaces(lua_State *L) {
-  if (!workspace_set_list_from_lua(L, 1)) {
+  WM *wm = lua_wm(L);
+  if (!wm->workspace_set_list_from_lua(L, 1)) {
     return luaL_error(L, "invalid workspace list");
   }
   return 0;
 }
 
 static int lua_mwm_create_workspace(lua_State *L) {
+  WM *wm = lua_wm(L);
   const char *name = luaL_checkstring(L, 1);
-  size_t index = workspace_ensure(name);
+  size_t index = wm->workspace_ensure(name);
   if (index == SIZE_MAX) {
     return luaL_error(L, "unable to create workspace");
   }
-  drawbars();
+  wm->drawbars();
   lua_pushinteger(L, (lua_Integer)index + 1);
   return 1;
 }
@@ -5483,7 +5827,7 @@ static int lua_mwm_create_workspace(lua_State *L) {
  * workspace being left is now empty and not visible elsewhere, removes it --
  * this is what keeps ad-hoc workspaces (including per-project ones) from
  * piling up. Shared by the Lua API and the project picker. */
-static size_t focus_workspace_by_name(Monitor *m, const char *name) {
+size_t WM::focus_workspace_by_name(Monitor *m, const char *name) {
   size_t old_index = SIZE_MAX;
   size_t index;
   Monitor *mm;
@@ -5516,21 +5860,22 @@ static size_t focus_workspace_by_name(Monitor *m, const char *name) {
 }
 
 static int lua_mwm_focus_workspace(lua_State *L) {
+  WM *wm = lua_wm(L);
   const char *name = NULL;
   size_t index;
 
   if (lua_type(L, 1) == LUA_TNUMBER) {
-    index = lua_workspace_index_arg(L, 1);
+    index = wm->lua_workspace_index_arg(L, 1);
     if (index == SIZE_MAX) {
       return luaL_error(L, "unknown workspace");
     }
-    workspace_view_mask(selmon, workspace_mask_from_index(index));
+    wm->workspace_view_mask(wm->selmon, wm->workspace_mask_from_index(index));
     lua_pushinteger(L, (lua_Integer)index + 1);
     return 1;
   }
 
   name = luaL_checkstring(L, 1);
-  index = focus_workspace_by_name(selmon, name);
+  index = wm->focus_workspace_by_name(wm->selmon, name);
   if (index == SIZE_MAX) {
     return luaL_error(L, "unable to focus workspace");
   }
@@ -5539,24 +5884,26 @@ static int lua_mwm_focus_workspace(lua_State *L) {
 }
 
 static int lua_mwm_rename_workspace(lua_State *L) {
-  size_t index = lua_workspace_index_arg(L, 1);
+  WM *wm = lua_wm(L);
+  size_t index = wm->lua_workspace_index_arg(L, 1);
   const char *name = luaL_checkstring(L, 2);
   if (index == SIZE_MAX) {
     return luaL_error(L, "unknown workspace");
   }
-  if (!workspace_rename(index, name)) {
+  if (!wm->workspace_rename(index, name)) {
     return luaL_error(L, "unable to rename workspace");
   }
-  drawbars();
-  lua_pushstring(L, workspaces[index].name.c_str());
+  wm->drawbars();
+  lua_pushstring(L, wm->workspaces[index].name.c_str());
   return 1;
 }
 
 static int lua_mwm_list_workspaces(lua_State *L) {
+  WM *wm = lua_wm(L);
   size_t i;
-  lua_createtable(L, (int)workspaces.size(), 0);
-  for (i = 0; i < workspaces.size(); i++) {
-    lua_pushstring(L, workspaces[i].name.c_str());
+  lua_createtable(L, (int)wm->workspaces.size(), 0);
+  for (i = 0; i < wm->workspaces.size(); i++) {
+    lua_pushstring(L, wm->workspaces[i].name.c_str());
     lua_rawseti(L, -2, (int)i + 1);
   }
   return 1;
@@ -5566,24 +5913,26 @@ static int lua_mwm_list_workspaces(lua_State *L) {
  * current workspace isn't a known project. Lets an agent-status hook (or an
  * agent itself, via mwm-cli) ask "what project am I in". */
 static int lua_mwm_current_project(lua_State *L) {
-  /* active_project_path is the authoritative "which project am I in" now
+  WM *wm = lua_wm(L);
+  /* wm->active_project_path is the authoritative "which project am I in" now
    * -- decoupled from whatever workspace/tag happens to be in view (see
-   * project_set_active()), and always set (defaults to $HOME), so this
+   * wm->project_set_active()), and always set (defaults to $HOME), so this
    * never actually returns nil in practice anymore. */
-  if (active_project_path[0] == '\0') {
+  if (wm->active_project_path[0] == '\0') {
     lua_pushnil(L);
     return 1;
   }
-  lua_pushstring(L, active_project_path);
+  lua_pushstring(L, wm->active_project_path);
   return 1;
 }
 
 static int lua_mwm_list_projects(lua_State *L) {
+  WM *wm = lua_wm(L);
   size_t i;
-  projects_ensure_loaded();
-  lua_createtable(L, (int)projects.size(), 0);
-  for (i = 0; i < projects.size(); i++) {
-    lua_pushstring(L, projects[i].c_str());
+  wm->projects_ensure_loaded();
+  lua_createtable(L, (int)wm->projects.size(), 0);
+  for (i = 0; i < wm->projects.size(); i++) {
+    lua_pushstring(L, wm->projects[i].c_str());
     lua_rawseti(L, -2, (int)i + 1);
   }
   return 1;
@@ -5595,36 +5944,37 @@ static int lua_mwm_list_projects(lua_State *L) {
  * project switch over the control socket, e.g.
  * `mwm-cli -m 'mwm.switch_project("~/code/foo")'`. */
 static int lua_mwm_switch_project(lua_State *L) {
+  WM *wm = lua_wm(L);
   const char *arg = luaL_checkstring(L, 1);
   char path_buf[PATH_MAX];
   char wsname[256];
   int idx;
   size_t index;
 
-  if (!selmon) {
+  if (!wm->selmon) {
     return luaL_error(L, "no monitor");
   }
 
-  projects_ensure_loaded();
-  idx = project_find_for_path(arg);
+  wm->projects_ensure_loaded();
+  idx = wm->project_find_for_path(arg);
   if (idx < 0) {
-    idx = project_index_for_workspace_name(arg);
+    idx = wm->project_index_for_workspace_name(arg);
   }
   if (idx >= 0) {
-    snprintf(path_buf, sizeof(path_buf), "%s", projects[idx].c_str());
+    snprintf(path_buf, sizeof(path_buf), "%s", wm->projects[idx].c_str());
   } else {
-    project_expand_path(arg, path_buf, sizeof(path_buf));
-    if (!projects_add(arg)) {
+    wm->project_expand_path(arg, path_buf, sizeof(path_buf));
+    if (!wm->projects_add(arg)) {
       return luaL_error(L, "not a directory: %s", arg);
     }
   }
 
-  project_basename(path_buf, wsname, sizeof(wsname));
-  index = focus_workspace_by_name(selmon, wsname);
+  wm->project_basename(path_buf, wsname, sizeof(wsname));
+  index = wm->focus_workspace_by_name(wm->selmon, wsname);
   if (index == SIZE_MAX) {
     return luaL_error(L, "unable to switch project");
   }
-  project_set_active(path_buf);
+  wm->project_set_active(path_buf);
   lua_pushinteger(L, (lua_Integer)index + 1);
   return 1;
 }
@@ -5632,26 +5982,38 @@ static int lua_mwm_switch_project(lua_State *L) {
 /* Overrides the command the project picker launches with Ctrl+Enter
  * (default "claude"); see mwm.agent_command() in the config. */
 static int lua_mwm_agent_command(lua_State *L) {
+  WM *wm = lua_wm(L);
   const char *cmd = luaL_checkstring(L, 1);
-  snprintf(agent_launch_command, sizeof(agent_launch_command), "%s", cmd);
+  snprintf(wm->agent_launch_command, sizeof(wm->agent_launch_command), "%s", cmd);
   return 0;
 }
 
+/* Shells out via run_capture_argv rather than raw popen() -- mwm.exec() is
+ * documented (config.lua.example) to be called from a custom widget's
+ * `update`, which runs on the same ~2s tick as every built-in widget. A
+ * user command that hangs (network call, unresponsive tool) would freeze
+ * the whole window manager exactly like the popen()-based widget calls
+ * fixed elsewhere, except triggered from config rather than mwm itself.
+ * Still goes through /bin/sh -c, not execvp directly, since pipes/
+ * redirects/globbing in a user's command are the actual point of this
+ * API -- unlike the internal fixed-argv calls, there's no fixed argv to
+ * build here. 3s is generous for a one-shot shell command (network calls,
+ * etc.) while still bounding the worst case to "a few seconds", not
+ * "forever". */
 static int lua_mwm_exec(lua_State *L) {
-  const char *cmd;
-  FILE *fp;
+  WM *wm = lua_wm(L);
+  const char *cmd = luaL_checkstring(L, 1);
+  char *const argv[] = {(char *)"/bin/sh", (char *)"-c", (char *)cmd, NULL};
   char buf[4096];
   size_t len;
 
-  cmd = luaL_checkstring(L, 1);
-  fp = popen(cmd, "r");
-  if (!fp) {
-    lua_pushstring(L, "");
-    return 1;
-  }
-  len = fread(buf, 1, sizeof(buf) - 1, fp);
-  pclose(fp);
-  buf[len] = '\0';
+  /* Ignoring the return value is deliberate, matching the old popen()
+   * code's behavior: buf is populated with whatever was captured
+   * (possibly empty) regardless of exit status, same as a command like
+   * `grep` that exits non-zero but may still have written output the
+   * caller wants. Only the timeout bound is new. */
+  wm->run_capture_argv(NULL, argv, buf, sizeof(buf), 3000);
+  len = strlen(buf);
   while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r')) {
     buf[--len] = '\0';
   }
@@ -5660,16 +6022,17 @@ static int lua_mwm_exec(lua_State *L) {
 }
 
 static int lua_mwm_widget(lua_State *L) {
+  WM *wm = lua_wm(L);
   LuaWidget *widget;
   char display_name[sizeof(widget->name)];
 
   luaL_checktype(L, 1, LUA_TTABLE);
 
-  if (lua_widgets_len >= MAX_LUA_WIDGETS) {
+  if (wm->lua_widgets_len >= MAX_LUA_WIDGETS) {
     return luaL_error(L, "too many widgets (max %d)", MAX_LUA_WIDGETS);
   }
 
-  widget = &lua_widgets[lua_widgets_len];
+  widget = &wm->lua_widgets[wm->lua_widgets_len];
   memset(widget, 0, sizeof(*widget));
   widget->update_ref = LUA_NOREF;
   widget->click_ref = LUA_NOREF;
@@ -5678,7 +6041,7 @@ static int lua_mwm_widget(lua_State *L) {
   if (lua_isstring(L, -1)) {
     snprintf(display_name, sizeof(display_name), "%s", lua_tostring(L, -1));
   } else {
-    snprintf(display_name, sizeof(display_name), "widget%zu", lua_widgets_len + 1);
+    snprintf(display_name, sizeof(display_name), "widget%zu", wm->lua_widgets_len + 1);
   }
   lua_pop(L, 1);
   /* Routed through a local rather than snprintf'd straight from
@@ -5707,18 +6070,18 @@ static int lua_mwm_widget(lua_State *L) {
     lua_pop(L, 1);
   }
 
-  lua_widgets_len++;
+  wm->lua_widgets_len++;
   return 0;
 }
 
-static void reset_lua_widgets(void) {
+void WM::reset_lua_widgets(void) {
   /* The Lua state that owns update_ref/click_ref is about to be closed and
    * recreated by the caller, which invalidates every registry ref -- there
    * is nothing to individually unref. */
   lua_widgets_len = 0;
 }
 
-static void widget_update_lua_widgets(void) {
+void WM::widget_update_lua_widgets(void) {
   size_t i;
   int status;
   const char *result;
@@ -5751,7 +6114,7 @@ static void widget_update_lua_widgets(void) {
   }
 }
 
-static void widget_lua_click(size_t index, int button) {
+void WM::widget_lua_click(size_t index, int button) {
   int status;
   LuaWidget *widget;
 
@@ -5777,7 +6140,7 @@ static void widget_lua_click(size_t index, int button) {
 /* Shared by keybind/mousebind spec parsing: turns the modifier tokens
  * preceding the final key/button token into a mask. Recognizes
  * mod4/super/mod, shift, ctrl/control, alt/mod1. */
-static int lua_parse_mods(char **tokens, int count, unsigned int *mod_out) {
+int WM::lua_parse_mods(char **tokens, int count, unsigned int *mod_out) {
   int i;
   unsigned int mod = 0;
 
@@ -5804,7 +6167,7 @@ static int lua_parse_mods(char **tokens, int count, unsigned int *mod_out) {
 
 /* Splits "a+b+c" on '+' into up to `max` tokens, returning the count.
  * Shared by the keybind and mousebind spec parsers. */
-static int lua_split_spec(char *buf, char **tokens, int max) {
+int WM::lua_split_spec(char *buf, char **tokens, int max) {
   char *tok;
   char *saveptr = NULL;
   int ntok = 0;
@@ -5821,7 +6184,7 @@ static int lua_split_spec(char *buf, char **tokens, int max) {
  * names, then a key name resolved via XStringToKeysym -- so any key X
  * already knows a name for ("Return", "q", "F1", "XF86AudioMute", ...)
  * works without mwm needing its own keysym table. */
-static int lua_parse_keybind(const char *spec, unsigned int *mod_out, KeySym *keysym_out) {
+int WM::lua_parse_keybind(const char *spec, unsigned int *mod_out, KeySym *keysym_out) {
   char buf[128];
   char *tokens[8];
   int ntok;
@@ -5855,7 +6218,7 @@ static int lua_parse_keybind(const char *spec, unsigned int *mod_out, KeySym *ke
  * ClkWidgetBar is deliberately not offered here -- widget-bar clicks are
  * fully handled (and consumed) before buttonpress() ever computes a click
  * type, so a binding on it could never fire. */
-static int lua_parse_click_context(const char *name) {
+int WM::lua_parse_click_context(const char *name) {
   if (!strcasecmp(name, "tagbar")) {
     return ClkTagBar;
   }
@@ -5879,7 +6242,7 @@ static int lua_parse_click_context(const char *name) {
 
 /* Parses "mod4+button1" style specs: the same modifier tokens as
  * lua_parse_keybind, then a "button1".."button5" token. */
-static int lua_parse_mousebind(const char *spec, unsigned int *mod_out, unsigned int *button_out) {
+int WM::lua_parse_mousebind(const char *spec, unsigned int *mod_out, unsigned int *button_out) {
   char buf[128];
   char *tokens[8];
   int ntok;
@@ -5910,7 +6273,7 @@ static int lua_parse_mousebind(const char *spec, unsigned int *mod_out, unsigned
   return 1;
 }
 
-static void lua_key_invoke(size_t index) {
+void WM::lua_key_invoke(size_t index) {
   int status;
 
   if (!command_lua || index >= lua_keys_len) {
@@ -5931,6 +6294,7 @@ static void lua_key_invoke(size_t index) {
  * immediately so it (and any removal via a config reload) takes effect
  * right away, including when called live over the control socket. */
 static int lua_mwm_keybind(lua_State *L) {
+  WM *wm = lua_wm(L);
   const char *spec = luaL_checkstring(L, 1);
   const char *desc = lua_isstring(L, 3) ? lua_tostring(L, 3) : "";
   unsigned int mod;
@@ -5938,25 +6302,25 @@ static int lua_mwm_keybind(lua_State *L) {
 
   luaL_checktype(L, 2, LUA_TFUNCTION);
 
-  if (lua_keys_len >= MAX_LUA_KEYS) {
+  if (wm->lua_keys_len >= MAX_LUA_KEYS) {
     return luaL_error(L, "too many keybindings (max %d)", MAX_LUA_KEYS);
   }
-  if (!lua_parse_keybind(spec, &mod, &keysym)) {
+  if (!wm->lua_parse_keybind(spec, &mod, &keysym)) {
     return luaL_error(L, "invalid keybind spec '%s'", spec);
   }
 
   lua_pushvalue(L, 2);
-  lua_keys[lua_keys_len].mod = mod;
-  lua_keys[lua_keys_len].keysym = keysym;
-  lua_keys[lua_keys_len].callback_ref = luaL_ref(L, LUA_REGISTRYINDEX);
-  snprintf(lua_keys[lua_keys_len].desc, sizeof(lua_keys[lua_keys_len].desc), "%s", desc);
-  lua_keys_len++;
+  wm->lua_keys[wm->lua_keys_len].mod = mod;
+  wm->lua_keys[wm->lua_keys_len].keysym = keysym;
+  wm->lua_keys[wm->lua_keys_len].callback_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+  snprintf(wm->lua_keys[wm->lua_keys_len].desc, sizeof(wm->lua_keys[wm->lua_keys_len].desc), "%s", desc);
+  wm->lua_keys_len++;
 
-  grabkeys();
+  wm->grabkeys();
   return 0;
 }
 
-static void reset_lua_keys(void) {
+void WM::reset_lua_keys(void) {
   /* Same reasoning as reset_lua_widgets(): the owning Lua state is about to
    * be closed and recreated, invalidating every callback_ref already. */
   lua_keys_len = 0;
@@ -5968,14 +6332,15 @@ static void reset_lua_keys(void) {
  * xprop's WM_CLASS/WM_NAME (case-sensitive, same as the compiled rules);
  * at least one of them must be given. */
 static int lua_mwm_rule(lua_State *L) {
+  WM *wm = lua_wm(L);
   LuaRule *rule;
 
   luaL_checktype(L, 1, LUA_TTABLE);
-  if (lua_rules_len >= MAX_LUA_RULES) {
+  if (wm->lua_rules_len >= MAX_LUA_RULES) {
     return luaL_error(L, "too many rules (max %d)", MAX_LUA_RULES);
   }
 
-  rule = &lua_rules[lua_rules_len];
+  rule = &wm->lua_rules[wm->lua_rules_len];
   memset(rule, 0, sizeof(*rule));
 
   lua_getfield(L, 1, "class");
@@ -6013,19 +6378,21 @@ static int lua_mwm_rule(lua_State *L) {
     return luaL_error(L, "rule needs at least one of class/instance/title to match on");
   }
 
-  lua_rules_len++;
+  wm->lua_rules_len++;
   return 0;
 }
 
-static void reset_lua_rules(void) { lua_rules_len = 0; }
+void WM::reset_lua_rules(void) { lua_rules_len = 0; }
 
 static int lua_mwm_set_terminal(lua_State *L) {
+  WM *wm = lua_wm(L);
   const char *cmd = luaL_checkstring(L, 1);
-  snprintf(terminal_cmd, sizeof(terminal_cmd), "%s", cmd);
+  snprintf(wm->terminal_cmd, sizeof(wm->terminal_cmd), "%s", cmd);
   return 0;
 }
 
 static int lua_mwm_set_mfact(lua_State *L) {
+  WM *wm = lua_wm(L);
   double f = luaL_checknumber(L, 1);
   Monitor *m;
 
@@ -6035,41 +6402,43 @@ static int lua_mwm_set_mfact(lua_State *L) {
   if (f > 0.95) {
     f = 0.95;
   }
-  mfact = (float)f;
-  for (m = mons.get(); m; m = m->next.get()) {
-    m->mfact = mfact;
+  wm->mfact = (float)f;
+  for (m = wm->mons.get(); m; m = m->next.get()) {
+    m->mfact = wm->mfact;
   }
-  if (selmon) {
-    arrange(selmon);
+  if (wm->selmon) {
+    wm->arrange(wm->selmon);
   }
-  drawbars();
+  wm->drawbars();
   return 0;
 }
 
 static int lua_mwm_set_nmaster(lua_State *L) {
+  WM *wm = lua_wm(L);
   int n = (int)luaL_checkinteger(L, 1);
   Monitor *m;
 
   if (n < 0) {
     n = 0;
   }
-  nmaster = n;
-  for (m = mons.get(); m; m = m->next.get()) {
-    m->nmaster = nmaster;
+  wm->nmaster = n;
+  for (m = wm->mons.get(); m; m = m->next.get()) {
+    m->nmaster = wm->nmaster;
   }
-  if (selmon) {
-    arrange(selmon);
+  if (wm->selmon) {
+    wm->arrange(wm->selmon);
   }
-  drawbars();
+  wm->drawbars();
   return 0;
 }
 
 static int lua_mwm_set_snap(lua_State *L) {
+  WM *wm = lua_wm(L);
   int px = (int)luaL_checkinteger(L, 1);
   if (px < 0) {
     px = 0;
   }
-  snap = (unsigned int)px;
+  wm->snap = (unsigned int)px;
   return 0;
 }
 
@@ -6080,6 +6449,7 @@ static int lua_mwm_set_snap(lua_State *L) {
  * next leave fullscreen instead of the width that was current when they
  * entered it. */
 static int lua_mwm_set_border_width(lua_State *L) {
+  WM *wm = lua_wm(L);
   int px = (int)luaL_checkinteger(L, 1);
   Monitor *m;
   Client *c;
@@ -6087,20 +6457,20 @@ static int lua_mwm_set_border_width(lua_State *L) {
   if (px < 0) {
     px = 0;
   }
-  borderpx = (unsigned int)px;
+  wm->borderpx = (unsigned int)px;
 
-  for (m = mons.get(); m; m = m->next.get()) {
+  for (m = wm->mons.get(); m; m = m->next.get()) {
     for (c = m->clients.get(); c; c = c->next.get()) {
       if (c->isfullscreen) {
-        c->oldbw = (int)borderpx;
+        c->oldbw = (int)wm->borderpx;
         continue;
       }
-      c->bw = (int)borderpx;
-      resizeclient(c, c->x, c->y, c->w, c->h);
+      c->bw = (int)wm->borderpx;
+      wm->resizeclient(c, c->x, c->y, c->w, c->h);
     }
-    arrange(m);
+    wm->arrange(m);
   }
-  drawbars();
+  wm->drawbars();
   return 0;
 }
 
@@ -6108,31 +6478,34 @@ static int lua_mwm_set_border_width(lua_State *L) {
  * the global at arrange time via resize_cell(), so this just needs to
  * trigger a re-arrange. */
 static int lua_mwm_set_gaps(lua_State *L) {
+  WM *wm = lua_wm(L);
   int px = (int)luaL_checkinteger(L, 1);
   Monitor *m;
 
   if (px < 0) {
     px = 0;
   }
-  gappx = px;
-  for (m = mons.get(); m; m = m->next.get()) {
-    arrange(m);
+  wm->gappx = px;
+  for (m = wm->mons.get(); m; m = m->next.get()) {
+    wm->arrange(m);
   }
-  drawbars();
+  wm->drawbars();
   return 0;
 }
 
 /* Same toggle Mod4+minus runs -- exposed so a custom keybind (or another
  * script driving mwm-cli) can trigger it too. */
 static int lua_mwm_scratchpad_toggle(lua_State *L) {
+  WM *wm = lua_wm(L);
   (void)L;
-  scratchpad_toggle(NULL);
+  wm->scratchpad_toggle(NULL);
   return 0;
 }
 
 static int lua_mwm_scratchpad_set(lua_State *L) {
+  WM *wm = lua_wm(L);
   (void)L;
-  scratchpad_set(NULL);
+  wm->scratchpad_set(NULL);
   return 0;
 }
 
@@ -6142,38 +6515,42 @@ static int lua_mwm_scratchpad_set(lua_State *L) {
  * on selmon existing since, unlike a keybind, these can be reached over the
  * control socket before any monitor is up. */
 static int lua_mwm_zoom(lua_State *L) {
+  WM *wm = lua_wm(L);
   (void)L;
-  if (selmon) {
-    zoom(NULL);
+  if (wm->selmon) {
+    wm->zoom(NULL);
   }
   return 0;
 }
 
 static int lua_mwm_toggle_floating(lua_State *L) {
+  WM *wm = lua_wm(L);
   (void)L;
-  if (selmon) {
-    togglefloating(NULL);
+  if (wm->selmon) {
+    wm->togglefloating(NULL);
   }
   return 0;
 }
 
 static int lua_mwm_kill_client(lua_State *L) {
+  WM *wm = lua_wm(L);
   (void)L;
-  if (selmon) {
-    killclient(NULL);
+  if (wm->selmon) {
+    wm->killclient(NULL);
   }
   return 0;
 }
 
 static int lua_mwm_toggle_bar(lua_State *L) {
+  WM *wm = lua_wm(L);
   (void)L;
-  if (selmon) {
-    togglebar(NULL);
+  if (wm->selmon) {
+    wm->togglebar(NULL);
   }
   return 0;
 }
 
-static void lua_button_invoke(size_t index, const char *wsname) {
+void WM::lua_button_invoke(size_t index, const char *wsname) {
   int status;
   int nargs = 0;
 
@@ -6196,7 +6573,7 @@ static void lua_button_invoke(size_t index, const char *wsname) {
  * whenever the set of "client"-context Lua mouse bindings changes -- those
  * only actually intercept clicks on windows mwm has explicitly grabbed the
  * relevant button+modifier combo on (see grabbuttons()). */
-static void regrab_all_client_buttons(void) {
+void WM::regrab_all_client_buttons(void) {
   Monitor *m;
   Client *c;
 
@@ -6213,6 +6590,7 @@ static void regrab_all_client_buttons(void) {
  * "tagbar" receive the clicked workspace's name as their one argument when
  * a workspace was actually clicked. */
 static int lua_mwm_mousebind(lua_State *L) {
+  WM *wm = lua_wm(L);
   const char *ctx_name = luaL_checkstring(L, 1);
   const char *spec = luaL_checkstring(L, 2);
   int click;
@@ -6220,36 +6598,36 @@ static int lua_mwm_mousebind(lua_State *L) {
 
   luaL_checktype(L, 3, LUA_TFUNCTION);
 
-  click = lua_parse_click_context(ctx_name);
+  click = wm->lua_parse_click_context(ctx_name);
   if (click < 0) {
     return luaL_error(L, "unknown mouse context '%s'", ctx_name);
   }
-  if (!lua_parse_mousebind(spec, &mod, &button)) {
+  if (!wm->lua_parse_mousebind(spec, &mod, &button)) {
     return luaL_error(L, "invalid mousebind spec '%s'", spec);
   }
-  if (lua_buttons_len >= MAX_LUA_BUTTONS) {
+  if (wm->lua_buttons_len >= MAX_LUA_BUTTONS) {
     return luaL_error(L, "too many mouse bindings (max %d)", MAX_LUA_BUTTONS);
   }
 
   lua_pushvalue(L, 3);
-  lua_buttons[lua_buttons_len].click = click;
-  lua_buttons[lua_buttons_len].mod = mod;
-  lua_buttons[lua_buttons_len].button = button;
-  lua_buttons[lua_buttons_len].callback_ref = luaL_ref(L, LUA_REGISTRYINDEX);
-  lua_buttons_len++;
+  wm->lua_buttons[wm->lua_buttons_len].click = click;
+  wm->lua_buttons[wm->lua_buttons_len].mod = mod;
+  wm->lua_buttons[wm->lua_buttons_len].button = button;
+  wm->lua_buttons[wm->lua_buttons_len].callback_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+  wm->lua_buttons_len++;
 
   if (click == ClkClientWin) {
-    regrab_all_client_buttons();
+    wm->regrab_all_client_buttons();
   }
   return 0;
 }
 
-static void reset_lua_buttons(void) { lua_buttons_len = 0; }
+void WM::reset_lua_buttons(void) { lua_buttons_len = 0; }
 
 /* Matches a layout symbol exactly (as compiled into layouts[]), or one of a
  * few friendly aliases for the three default layouts. Custom Lua layouts
  * (mwm.layout()) are looked up separately, by name, in lua_mwm_set_layout. */
-static int lua_layout_index_by_symbol(const char *symbol) {
+int WM::lua_layout_index_by_symbol(const char *symbol) {
   static const struct {
     const char *alias;
     const char *symbol;
@@ -6283,30 +6661,31 @@ static int lua_layout_index_by_symbol(const char *symbol) {
  * Needs a monitor to exist, so call this from a keybind or other runtime
  * hook rather than unconditionally at the top of config.lua. */
 static int lua_mwm_set_layout(lua_State *L) {
+  WM *wm = lua_wm(L);
   const Layout *target = NULL;
   Arg a = {0};
 
-  if (!selmon) {
+  if (!wm->selmon) {
     return luaL_error(L, "no monitor yet");
   }
 
   if (lua_type(L, 1) == LUA_TNUMBER) {
     int idx = (int)luaL_checkinteger(L, 1);
-    if (idx < 0 || idx >= (int)LENGTH(layouts)) {
+    if (idx < 0 || idx >= (int)LENGTH(wm->layouts)) {
       return luaL_error(L, "unknown layout");
     }
-    target = &layouts[idx];
+    target = &wm->layouts[idx];
   } else {
     const char *name = luaL_checkstring(L, 1);
-    int idx = lua_layout_index_by_symbol(name);
+    int idx = wm->lua_layout_index_by_symbol(name);
     size_t i;
 
     if (idx >= 0) {
-      target = &layouts[idx];
+      target = &wm->layouts[idx];
     } else {
-      for (i = 0; i < lua_layouts_len; i++) {
-        if (!strcmp(lua_layouts[i].name, name)) {
-          target = &lua_layout_entries[i];
+      for (i = 0; i < wm->lua_layouts_len; i++) {
+        if (!strcmp(wm->lua_layouts[i].name, name)) {
+          target = &wm->lua_layout_entries[i];
           break;
         }
       }
@@ -6317,7 +6696,7 @@ static int lua_mwm_set_layout(lua_State *L) {
   }
 
   a.v = target;
-  setlayout(&a);
+  wm->setlayout(&a);
   return 0;
 }
 
@@ -6325,7 +6704,7 @@ static int lua_mwm_set_layout(lua_State *L) {
  * falling back to `fallback` if it's missing or not a number -- so a
  * layout function that only sets a couple of fields per client doesn't
  * have to fill in the rest. */
-static int lua_geom_field(lua_State *L, const char *field, int fallback) {
+int WM::lua_geom_field(lua_State *L, const char *field, int fallback) {
   int val;
   lua_getfield(L, -1, field);
   val = lua_isnumber(L, -1) ? (int)lua_tointeger(L, -1) : fallback;
@@ -6343,7 +6722,7 @@ static int lua_geom_field(lua_State *L, const char *field, int fallback) {
  * the border gets subtracted back out before resize() (which wants content
  * dimensions) is called. A client left out of the returned table, or given
  * a non-table entry, simply keeps its current geometry. */
-static void lua_layout_arrange(Monitor *m, size_t layout_idx) {
+void WM::lua_layout_arrange(Monitor *m, size_t layout_idx) {
   LuaLayout *lay;
   Client *tiled[MAX_LUA_ARRANGE_CLIENTS];
   Client *c;
@@ -6430,7 +6809,7 @@ static void lua_layout_arrange(Monitor *m, size_t layout_idx) {
 /* The single arrange() entry point for every Lua layout -- Layout.arrange
  * can't carry the "which one" info itself, so it's recovered from
  * m->lt[m->sellt]->lua_index (see lua_layout_entries[]). */
-static void lua_layout_dispatch(Monitor *m) {
+void WM::lua_layout_dispatch(Monitor *m) {
   const Layout *lt = m->lt[m->sellt];
   if (lt->lua_index < 0 || (size_t)lt->lua_index >= lua_layouts_len) {
     return;
@@ -6445,15 +6824,16 @@ static void lua_layout_dispatch(Monitor *m) {
  * with mwm.set_layout("spiral"); it doesn't replace mwm's compiled layouts,
  * it's added alongside them. */
 static int lua_mwm_layout(lua_State *L) {
+  WM *wm = lua_wm(L);
   LuaLayout *lay;
   size_t idx;
 
   luaL_checktype(L, 1, LUA_TTABLE);
-  if (lua_layouts_len >= MAX_LUA_LAYOUTS) {
-    return luaL_error(L, "too many layouts (max %d)", MAX_LUA_LAYOUTS);
+  if (wm->lua_layouts_len >= MAX_LUA_LAYOUTS) {
+    return luaL_error(L, "too many wm->layouts (max %d)", MAX_LUA_LAYOUTS);
   }
-  idx = lua_layouts_len;
-  lay = &lua_layouts[idx];
+  idx = wm->lua_layouts_len;
+  lay = &wm->lua_layouts[idx];
   memset(lay, 0, sizeof(*lay));
   lay->arrange_ref = LUA_NOREF;
 
@@ -6473,24 +6853,24 @@ static int lua_mwm_layout(lua_State *L) {
   }
   lua_pop(L, 1);
 
-  lua_getfield(L, 1, "arrange");
+  lua_getfield(L, 1, "wm->arrange");
   if (!lua_isfunction(L, -1)) {
     lua_pop(L, 1);
-    return luaL_error(L, "layout '%s' needs an arrange function", lay->name);
+    return luaL_error(L, "layout '%s' needs an wm->arrange function", lay->name);
   }
   lay->arrange_ref = luaL_ref(L, LUA_REGISTRYINDEX);
 
-  lua_layout_entries[idx].symbol = lay->symbol;
-  lua_layout_entries[idx].arrange = lua_layout_dispatch;
-  lua_layout_entries[idx].lua_index = (int)idx;
+  wm->lua_layout_entries[idx].symbol = lay->symbol;
+  wm->lua_layout_entries[idx].arrange = &WM::lua_layout_dispatch;
+  wm->lua_layout_entries[idx].lua_index = (int)idx;
 
-  lua_layouts_len++;
+  wm->lua_layouts_len++;
   return 0;
 }
 
-static void reset_lua_layouts(void) { lua_layouts_len = 0; }
+void WM::reset_lua_layouts(void) { lua_layouts_len = 0; }
 
-static int layout_is_lua(const Layout *lt) { return lt && lt->arrange == lua_layout_dispatch; }
+int WM::layout_is_lua(const Layout *lt) { return lt && lt->arrange == &WM::lua_layout_dispatch; }
 
 /* Captures which of each monitor's two layout slots currently hold a Lua
  * layout, by name. Needed before a config reload: reset_lua_layouts() +
@@ -6499,7 +6879,7 @@ static int layout_is_lua(const Layout *lt) { return lt && lt->arrange == lua_lay
  * end up silently running a different layout (or a no-op) than the one the
  * user actually selected. Returns NULL (with *count_out left at 0) if
  * there are no monitors yet. */
-static MonLayoutSnapshot *snapshot_lua_layouts(size_t *count_out) {
+MonLayoutSnapshot *WM::snapshot_lua_layouts(size_t *count_out) {
   Monitor *m;
   size_t n = 0;
   MonLayoutSnapshot *snap;
@@ -6536,7 +6916,7 @@ static MonLayoutSnapshot *snapshot_lua_layouts(size_t *count_out) {
  * re-registered. Slots that held a compiled layout are left completely
  * alone: those Layout* point into the static const layouts[] array, whose
  * addresses never move. Frees `snap`. */
-static void restore_lua_layouts(MonLayoutSnapshot *snap, size_t count) {
+void WM::restore_lua_layouts(MonLayoutSnapshot *snap, size_t count) {
   Monitor *m;
   size_t i;
 
@@ -6567,12 +6947,12 @@ static void restore_lua_layouts(MonLayoutSnapshot *snap, size_t count) {
 
 /* Number of switchable layouts: mwm's compiled-in ones plus whatever's been
  * registered with mwm.layout(). */
-static size_t layout_total_count(void) { return LENGTH(layouts) + lua_layouts_len; }
+size_t WM::layout_total_count(void) { return LENGTH(layouts) + lua_layouts_len; }
 
 /* Indexes into the same unified list layout_total_count() measures:
  * compiled layouts[] first (in their declared order), then Lua layouts (in
  * registration order). Returns NULL if idx is out of range. */
-static const Layout *layout_at(size_t idx) {
+const Layout *WM::layout_at(size_t idx) {
   if (idx < LENGTH(layouts)) {
     return &layouts[idx];
   }
@@ -6588,7 +6968,7 @@ static const Layout *layout_at(size_t idx) {
  * list, wrapping around either end -- the AwesomeWM-style "just keep
  * pressing the key" way to explore every available layout, as opposed to
  * setlayout()'s dwm-style toggle-between-the-last-two. */
-static void cycle_layout(int direction) {
+void WM::cycle_layout(int direction) {
   size_t total;
   size_t i;
   int cur = -1;
@@ -6617,17 +6997,18 @@ static void cycle_layout(int direction) {
   setlayout(&a);
 }
 
-static void cyclelayout(const Arg *arg) { cycle_layout(arg->i >= 0 ? 1 : -1); }
+void WM::cyclelayout(const Arg *arg) { cycle_layout(arg->i >= 0 ? 1 : -1); }
 
 static int lua_mwm_cycle_layout(lua_State *L) {
+  WM *wm = lua_wm(L);
   lua_Integer delta = luaL_optinteger(L, 1, 1);
-  cycle_layout(delta >= 0 ? 1 : -1);
+  wm->cycle_layout(delta >= 0 ? 1 : -1);
   return 0;
 }
 
 /* {{{ notification sidebar */
 
-static unsigned int notification_add(const char *app_name, const char *summary,
+unsigned int WM::notification_add(const char *app_name, const char *summary,
                                      const char *body, unsigned int replaces_id,
                                      int expire_timeout_ms) {
   Notification *n = NULL;
@@ -6677,7 +7058,7 @@ static unsigned int notification_add(const char *app_name, const char *summary,
   return n->id;
 }
 
-static void notification_remove(unsigned int id, unsigned int reason) {
+void WM::notification_remove(unsigned int id, unsigned int reason) {
   std::unique_ptr<Notification> *slot = &notifications;
 
   while (*slot) {
@@ -6693,7 +7074,7 @@ static void notification_remove(unsigned int id, unsigned int reason) {
   }
 }
 
-static void notification_clear_all(void) {
+void WM::notification_clear_all(void) {
   for (Notification *cur = notifications.get(); cur; cur = cur->next.get()) {
     notif_dbus_emit_notification_closed(cur->id, 2);
   }
@@ -6702,7 +7083,7 @@ static void notification_clear_all(void) {
   notification_unread = 0;
 }
 
-static void notification_expire_check(void) {
+void WM::notification_expire_check(void) {
   std::unique_ptr<Notification> *slot = &notifications;
   time_t now = time(NULL);
   int changed = 0;
@@ -6726,7 +7107,7 @@ static void notification_expire_check(void) {
   }
 }
 
-static void notif_dbus_try_acquire(void) {
+void WM::notif_dbus_try_acquire(void) {
   DBusError err;
   int ret;
 
@@ -6745,7 +7126,7 @@ static void notif_dbus_try_acquire(void) {
   }
 }
 
-static void notif_dbus_init(void) {
+void WM::notif_dbus_init(void) {
   DBusError err;
 
   dbus_error_init(&err);
@@ -6771,7 +7152,7 @@ static void notif_dbus_init(void) {
   }
 }
 
-static void notif_dbus_shutdown(void) {
+void WM::notif_dbus_shutdown(void) {
   if (!notif_dbus_conn) {
     return;
   }
@@ -6783,7 +7164,7 @@ static void notif_dbus_shutdown(void) {
   notif_dbus_owned = 0;
 }
 
-static void notif_dbus_emit_notification_closed(unsigned int id, unsigned int reason) {
+void WM::notif_dbus_emit_notification_closed(unsigned int id, unsigned int reason) {
   DBusMessage *signal;
 
   if (!notif_dbus_conn || !notif_dbus_owned) {
@@ -6801,7 +7182,7 @@ static void notif_dbus_emit_notification_closed(unsigned int id, unsigned int re
   dbus_message_unref(signal);
 }
 
-static void notif_dbus_handle_notify(DBusMessage *msg) {
+void WM::notif_dbus_handle_notify(DBusMessage *msg) {
   DBusMessageIter iter;
   DBusMessageIter reply_iter;
   const char *app_name = "";
@@ -6855,7 +7236,7 @@ static void notif_dbus_handle_notify(DBusMessage *msg) {
   }
 }
 
-static void notif_dbus_handle_close_notification(DBusMessage *msg) {
+void WM::notif_dbus_handle_close_notification(DBusMessage *msg) {
   DBusMessageIter iter;
   dbus_uint32_t id = 0;
   DBusMessage *reply;
@@ -6878,7 +7259,7 @@ static void notif_dbus_handle_close_notification(DBusMessage *msg) {
   }
 }
 
-static void notif_dbus_handle_get_capabilities(DBusMessage *msg) {
+void WM::notif_dbus_handle_get_capabilities(DBusMessage *msg) {
   DBusMessage *reply;
   DBusMessageIter iter, arr;
   const char *cap = "body";
@@ -6895,7 +7276,7 @@ static void notif_dbus_handle_get_capabilities(DBusMessage *msg) {
   dbus_message_unref(reply);
 }
 
-static void notif_dbus_handle_get_server_information(DBusMessage *msg) {
+void WM::notif_dbus_handle_get_server_information(DBusMessage *msg) {
   DBusMessage *reply;
   const char *name = "mwm";
   const char *vendor = "mwm";
@@ -6913,7 +7294,7 @@ static void notif_dbus_handle_get_server_information(DBusMessage *msg) {
   dbus_message_unref(reply);
 }
 
-static void notif_dbus_handle_introspect(DBusMessage *msg) {
+void WM::notif_dbus_handle_introspect(DBusMessage *msg) {
   DBusMessage *reply;
   const char *xml =
       "<!DOCTYPE node PUBLIC \"-//freedesktop//DTD D-BUS Object Introspection "
@@ -6964,7 +7345,7 @@ static void notif_dbus_handle_introspect(DBusMessage *msg) {
   dbus_message_unref(reply);
 }
 
-static void notif_dbus_handle_message(DBusMessage *msg) {
+void WM::notif_dbus_handle_message(DBusMessage *msg) {
   if (dbus_message_is_method_call(msg, "org.freedesktop.Notifications", "Notify")) {
     notif_dbus_handle_notify(msg);
   } else if (dbus_message_is_method_call(msg, "org.freedesktop.Notifications",
@@ -6989,7 +7370,7 @@ static void notif_dbus_handle_message(DBusMessage *msg) {
   }
 }
 
-static void notif_dbus_process(void) {
+void WM::notif_dbus_process(void) {
   DBusMessage *msg;
 
   if (!notif_dbus_conn) {
@@ -7002,7 +7383,7 @@ static void notif_dbus_process(void) {
   }
 }
 
-static void widget_format_notifications(char *buf, size_t size) {
+void WM::widget_format_notifications(char *buf, size_t size) {
   if (notification_unread > 0) {
     snprintf(buf, size, "%s %zu", icon_bell, notification_unread);
   } else {
@@ -7010,7 +7391,7 @@ static void widget_format_notifications(char *buf, size_t size) {
   }
 }
 
-static size_t notif_wrap_body(const char *text, int max_width, char out[][256],
+size_t WM::notif_wrap_body(const char *text, int max_width, char out[][256],
                               size_t max_lines) {
   size_t line_count = 0;
   char word[256];
@@ -7065,7 +7446,7 @@ static size_t notif_wrap_body(const char *text, int max_width, char out[][256],
   return line_count;
 }
 
-static void notif_format_relative_time(time_t t, char *buf, size_t size) {
+void WM::notif_format_relative_time(time_t t, char *buf, size_t size) {
   time_t now = time(NULL);
   long diff = (long)(now - t);
 
@@ -7080,7 +7461,7 @@ static void notif_format_relative_time(time_t t, char *buf, size_t size) {
   }
 }
 
-static int notif_sidebar_content_height(void) {
+int WM::notif_sidebar_content_height(void) {
   Notification *n;
   int total = 0;
   char lines[3][256];
@@ -7093,7 +7474,7 @@ static int notif_sidebar_content_height(void) {
   return total;
 }
 
-static void notif_sidebar_position(Monitor *m) {
+void WM::notif_sidebar_position(Monitor *m) {
   if (!m || notif_sidebar_win == None) {
     return;
   }
@@ -7101,7 +7482,7 @@ static void notif_sidebar_position(Monitor *m) {
                     notif_sidebar_w, m->wh);
 }
 
-static void draw_notif_sidebar(void) {
+void WM::draw_notif_sidebar(void) {
   Notification *n;
   int header_h;
   int content_h;
@@ -7213,7 +7594,7 @@ static void draw_notif_sidebar(void) {
   drw_map(drw, notif_sidebar_win, 0, 0, notif_sidebar_w, panel_h);
 }
 
-static void notif_sidebar_open(Monitor *m) {
+void WM::notif_sidebar_open(Monitor *m) {
   XSetWindowAttributes wa = {};
 
   if (!m) {
@@ -7249,7 +7630,7 @@ static void notif_sidebar_open(Monitor *m) {
   drawbars();
 }
 
-static void notif_sidebar_close(void) {
+void WM::notif_sidebar_close(void) {
   if (notif_sidebar_win == None || !notif_sidebar_visible) {
     return;
   }
@@ -7260,7 +7641,7 @@ static void notif_sidebar_close(void) {
   gettimeofday(&notif_anim_start, NULL);
 }
 
-static void notif_sidebar_toggle(Monitor *m) {
+void WM::notif_sidebar_toggle(Monitor *m) {
   if (notif_sidebar_visible) {
     notif_sidebar_close();
   } else {
@@ -7268,7 +7649,7 @@ static void notif_sidebar_toggle(Monitor *m) {
   }
 }
 
-static void notif_sidebar_advance_animation(void) {
+void WM::notif_sidebar_advance_animation(void) {
   struct timeval now;
   long elapsed_ms;
   double t;
@@ -7300,7 +7681,7 @@ static void notif_sidebar_advance_animation(void) {
   XMoveWindow(dpy, notif_sidebar_win, notif_sidebar_cur_x, mon_y);
 }
 
-static int notif_sidebar_handle_button(XButtonPressedEvent *ev) {
+int WM::notif_sidebar_handle_button(XButtonPressedEvent *ev) {
   size_t i;
 
   if (notif_sidebar_win == None ||
@@ -7356,7 +7737,7 @@ static int notif_sidebar_handle_button(XButtonPressedEvent *ev) {
 
 /* {{{ todo sidebar */
 
-static unsigned int todo_add(const char *text) {
+unsigned int WM::todo_add(const char *text) {
   auto created = std::make_unique<Todo>();
   Todo *t = created.get();
 
@@ -7391,7 +7772,7 @@ static unsigned int todo_add(const char *text) {
   return t->id;
 }
 
-static void todo_remove(unsigned int id) {
+void WM::todo_remove(unsigned int id) {
   std::unique_ptr<Todo> *slot = &todos;
 
   while (*slot) {
@@ -7409,7 +7790,7 @@ static void todo_remove(unsigned int id) {
   }
 }
 
-static void todo_toggle(unsigned int id) {
+void WM::todo_toggle(unsigned int id) {
   Todo *t;
 
   for (t = todos.get(); t; t = t->next.get()) {
@@ -7427,7 +7808,7 @@ static void todo_toggle(unsigned int id) {
   }
 }
 
-static void todo_clear_completed(void) {
+void WM::todo_clear_completed(void) {
   std::unique_ptr<Todo> *slot = &todos;
 
   while (*slot) {
@@ -7442,7 +7823,7 @@ static void todo_clear_completed(void) {
   }
 }
 
-static void todo_seed_fake(void) {
+void WM::todo_seed_fake(void) {
   unsigned int id;
 
   todo_add("Reply to the mwm sidebar feedback thread");
@@ -7451,7 +7832,7 @@ static void todo_seed_fake(void) {
   todo_toggle(id);
 }
 
-static void widget_format_todos(char *buf, size_t size) {
+void WM::widget_format_todos(char *buf, size_t size) {
   if (todo_incomplete > 0) {
     snprintf(buf, size, "%s %zu", icon_todo, todo_incomplete);
   } else {
@@ -7459,7 +7840,7 @@ static void widget_format_todos(char *buf, size_t size) {
   }
 }
 
-static int todo_sidebar_content_height(void) {
+int WM::todo_sidebar_content_height(void) {
   Todo *t;
   int total = 0;
   char lines[3][256];
@@ -7475,7 +7856,7 @@ static int todo_sidebar_content_height(void) {
   return total;
 }
 
-static void todo_sidebar_position(Monitor *m) {
+void WM::todo_sidebar_position(Monitor *m) {
   if (!m || todo_sidebar_win == None) {
     return;
   }
@@ -7483,7 +7864,7 @@ static void todo_sidebar_position(Monitor *m) {
                     todo_sidebar_w, m->wh);
 }
 
-static void draw_todo_sidebar(void) {
+void WM::draw_todo_sidebar(void) {
   Todo *t;
   int header_h;
   int content_h;
@@ -7607,7 +7988,7 @@ static void draw_todo_sidebar(void) {
   drw_map(drw, todo_sidebar_win, 0, 0, todo_sidebar_w, panel_h);
 }
 
-static void todo_sidebar_open(Monitor *m) {
+void WM::todo_sidebar_open(Monitor *m) {
   XSetWindowAttributes wa = {};
 
   if (!m) {
@@ -7642,7 +8023,7 @@ static void todo_sidebar_open(Monitor *m) {
   drawbars();
 }
 
-static void todo_sidebar_close(void) {
+void WM::todo_sidebar_close(void) {
   if (todo_sidebar_win == None || !todo_sidebar_visible) {
     return;
   }
@@ -7653,7 +8034,7 @@ static void todo_sidebar_close(void) {
   gettimeofday(&todo_anim_start, NULL);
 }
 
-static void todo_sidebar_toggle(Monitor *m) {
+void WM::todo_sidebar_toggle(Monitor *m) {
   if (todo_sidebar_visible) {
     todo_sidebar_close();
   } else {
@@ -7661,7 +8042,7 @@ static void todo_sidebar_toggle(Monitor *m) {
   }
 }
 
-static void todo_sidebar_advance_animation(void) {
+void WM::todo_sidebar_advance_animation(void) {
   struct timeval now;
   long elapsed_ms;
   double t;
@@ -7693,7 +8074,7 @@ static void todo_sidebar_advance_animation(void) {
   XMoveWindow(dpy, todo_sidebar_win, todo_sidebar_cur_x, mon_y);
 }
 
-static int todo_sidebar_handle_button(XButtonPressedEvent *ev) {
+int WM::todo_sidebar_handle_button(XButtonPressedEvent *ev) {
   size_t i;
 
   if (todo_sidebar_win == None ||
@@ -7758,7 +8139,7 @@ static int todo_sidebar_handle_button(XButtonPressedEvent *ev) {
 /* Pulls "field":"value" out of the small flat JSON status files written by
  * agent-status-hook.sh. Not a general JSON parser -- only handles the
  * single-level, string/number-valued shape that script emits. */
-static int agent_json_field(const char *json, const char *field, char *out,
+int WM::agent_json_field(const char *json, const char *field, char *out,
                             size_t out_size) {
   char needle[64];
   const char *p;
@@ -7789,7 +8170,7 @@ static int agent_json_field(const char *json, const char *field, char *out,
   return 1;
 }
 
-static long agent_json_number(const char *json, const char *field) {
+long WM::agent_json_number(const char *json, const char *field) {
   char needle[64];
   const char *p;
 
@@ -7805,7 +8186,7 @@ static long agent_json_number(const char *json, const char *field) {
   return atol(p);
 }
 
-static unsigned int agent_hash_id(const char *s) {
+unsigned int WM::agent_hash_id(const char *s) {
   unsigned int h = 2166136261u;
 
   while (*s) {
@@ -7817,13 +8198,13 @@ static unsigned int agent_hash_id(const char *s) {
 
 /* Identifies an agent card across redraws by kind+cwd (agents don't have a
  * stable pid available for file-backed status entries). */
-static unsigned int agent_row_id(const char *kind, const char *cwd) {
+unsigned int WM::agent_row_id(const char *kind, const char *cwd) {
   char buf[16 + 384 + 2];
   snprintf(buf, sizeof(buf), "%s|%s", kind, cwd);
   return agent_hash_id(buf);
 }
 
-static void get_agent_status_dir(char *buf, size_t size) {
+void WM::get_agent_status_dir(char *buf, size_t size) {
   const char *runtime = getenv("XDG_RUNTIME_DIR");
   const char *user = getenv("USER");
 
@@ -7834,9 +8215,9 @@ static void get_agent_status_dir(char *buf, size_t size) {
   snprintf(buf, size, "/tmp/mwm-agents-%s", user && user[0] ? user : "mwm");
 }
 
-static void agents_free_list(void) { agents.reset(); }
+void WM::agents_free_list(void) { agents.reset(); }
 
-static AgentStatus *agent_list_find(AgentStatus *head, const char *kind,
+AgentStatus *WM::agent_list_find(AgentStatus *head, const char *kind,
                                     const char *cwd) {
   AgentStatus *a;
 
@@ -7848,7 +8229,7 @@ static AgentStatus *agent_list_find(AgentStatus *head, const char *kind,
   return NULL;
 }
 
-static void agents_refresh(void) {
+void WM::agents_refresh(void) {
   std::unique_ptr<AgentStatus> new_list;
   size_t count = 0;
   size_t needs_input = 0;
@@ -7982,7 +8363,7 @@ static void agents_refresh(void) {
 /* Parent pid of `pid` via /proc/<pid>/stat, or 0 if unavailable. The comm
  * field can itself contain spaces or parens, so skip to the last ')' before
  * reading the state char and ppid that follow it. */
-static pid_t proc_ppid(pid_t pid) {
+pid_t WM::proc_ppid(pid_t pid) {
   char path[64];
   char buf[512];
   FILE *fp;
@@ -8014,7 +8395,7 @@ static pid_t proc_ppid(pid_t pid) {
 }
 
 /* Reads _NET_WM_PID off a client window, or 0 if unset. */
-static pid_t client_get_pid(Window w) {
+pid_t WM::client_get_pid(Window w) {
   Atom actual_type;
   int actual_format;
   unsigned long nitems, bytes_after;
@@ -8036,7 +8417,7 @@ static pid_t client_get_pid(Window w) {
 /* Finds the client window that owns `target`, walking up its process
  * ancestry (agent -> shell -> terminal emulator) since a terminal's WM_PID
  * is never the agent process's own pid. Bounded in case /proc is odd. */
-static Client *client_for_pid(pid_t target) {
+Client *WM::client_for_pid(pid_t target) {
   Monitor *m;
   Client *c;
   int hops;
@@ -8058,7 +8439,7 @@ static Client *client_for_pid(pid_t target) {
 }
 
 /* Switches to whichever of c's workspaces sorts lowest and focuses it. */
-static void client_reveal(Client *c) {
+void WM::client_reveal(Client *c) {
   Monitor *m;
   WorkspaceMask mask;
 
@@ -8081,7 +8462,7 @@ static void client_reveal(Client *c) {
  * it falls under a saved project, otherwise the workspace matching its own
  * basename -- when no window is found (agent exited, or a stale/pid-less
  * status-file entry). Never creates a workspace from a click. */
-static void agent_jump_to(const AgentStatus *a) {
+void WM::agent_jump_to(const AgentStatus *a) {
   Client *c;
   int idx;
   char wsname[256];
@@ -8116,7 +8497,7 @@ static void agent_jump_to(const AgentStatus *a) {
 /* Cycles to the next agent that needs input, wrapping around. Lets you clear
  * a queue of blocked agents with one repeated keypress instead of hunting
  * through the sidebar. */
-static void agent_jump_next_needs_input(const Arg *arg) {
+void WM::agent_jump_next_needs_input(const Arg *arg) {
   AgentStatus *a;
   AgentStatus *first_needs = NULL;
   AgentStatus *after_last = NULL;
@@ -8148,7 +8529,7 @@ static void agent_jump_next_needs_input(const Arg *arg) {
   agent_jump_to(a);
 }
 
-static void widget_format_agents(char *buf, size_t size) {
+void WM::widget_format_agents(char *buf, size_t size) {
   if (agent_needs_input > 0) {
     snprintf(buf, size, "%s %zu", icon_agents, agent_needs_input);
   } else if (agent_count > 0) {
@@ -8158,7 +8539,7 @@ static void widget_format_agents(char *buf, size_t size) {
   }
 }
 
-static int agent_sidebar_content_height(void) {
+int WM::agent_sidebar_content_height(void) {
   AgentStatus *a;
   int total = 0;
   char lines[3][256];
@@ -8174,7 +8555,7 @@ static int agent_sidebar_content_height(void) {
   return total;
 }
 
-static void agent_sidebar_position(Monitor *m) {
+void WM::agent_sidebar_position(Monitor *m) {
   if (!m || agent_sidebar_win == None) {
     return;
   }
@@ -8182,7 +8563,7 @@ static void agent_sidebar_position(Monitor *m) {
                     agent_sidebar_w, m->wh);
 }
 
-static void draw_agent_sidebar(void) {
+void WM::draw_agent_sidebar(void) {
   AgentStatus *a;
   int header_h;
   int content_h;
@@ -8321,7 +8702,7 @@ static void draw_agent_sidebar(void) {
   drw_map(drw, agent_sidebar_win, 0, 0, agent_sidebar_w, panel_h);
 }
 
-static void agent_sidebar_open(Monitor *m) {
+void WM::agent_sidebar_open(Monitor *m) {
   XSetWindowAttributes wa = {};
 
   if (!m) {
@@ -8357,7 +8738,7 @@ static void agent_sidebar_open(Monitor *m) {
   drawbars();
 }
 
-static void agent_sidebar_close(void) {
+void WM::agent_sidebar_close(void) {
   if (agent_sidebar_win == None || !agent_sidebar_visible) {
     return;
   }
@@ -8369,7 +8750,7 @@ static void agent_sidebar_close(void) {
   gettimeofday(&agent_anim_start, NULL);
 }
 
-static void agent_sidebar_toggle(Monitor *m) {
+void WM::agent_sidebar_toggle(Monitor *m) {
   if (agent_sidebar_visible) {
     agent_sidebar_close();
   } else {
@@ -8377,7 +8758,7 @@ static void agent_sidebar_toggle(Monitor *m) {
   }
 }
 
-static void agent_sidebar_advance_animation(void) {
+void WM::agent_sidebar_advance_animation(void) {
   struct timeval now;
   long elapsed_ms;
   double t;
@@ -8409,7 +8790,7 @@ static void agent_sidebar_advance_animation(void) {
   XMoveWindow(dpy, agent_sidebar_win, agent_sidebar_cur_x, mon_y);
 }
 
-static int agent_sidebar_handle_button(XButtonPressedEvent *ev) {
+int WM::agent_sidebar_handle_button(XButtonPressedEvent *ev) {
   size_t i;
 
   if (agent_sidebar_win == None ||
@@ -8494,7 +8875,7 @@ static int agent_sidebar_handle_button(XButtonPressedEvent *ev) {
 /* {{{ launcher (app index -- searched from within the project picker,
  * see the "project picker" section below for the actual UI) */
 
-static bool launcher_app_less(const std::string &sa, const std::string &sb) {
+bool WM::launcher_app_less(const std::string &sa, const std::string &sb) {
   size_t i;
   for (i = 0; i < sa.size() && i < sb.size(); i++) {
     int ca = tolower((unsigned char)sa[i]);
@@ -8506,7 +8887,7 @@ static bool launcher_app_less(const std::string &sa, const std::string &sb) {
   return sa.size() < sb.size();
 }
 
-static int launcher_app_exists(const char *name) {
+int WM::launcher_app_exists(const char *name) {
   for (size_t i = 0; i < launcher_apps.size(); i++) {
     if (launcher_apps[i] == name) {
       return 1;
@@ -8515,7 +8896,7 @@ static int launcher_app_exists(const char *name) {
   return 0;
 }
 
-static void launcher_app_add(const char *name) {
+void WM::launcher_app_add(const char *name) {
   if (launcher_app_exists(name)) {
     return;
   }
@@ -8524,7 +8905,7 @@ static void launcher_app_add(const char *name) {
 
 /* Scans every directory on $PATH for executables, the same set dmenu_run
  * would offer, so the launcher works without any external dmenu/rofi. */
-static void launcher_scan_apps(void) {
+void WM::launcher_scan_apps(void) {
   const char *path_env = getenv("PATH");
   char *path_copy;
   char *saveptr = NULL;
@@ -8568,7 +8949,7 @@ static void launcher_scan_apps(void) {
 
 /* {{{ project picker */
 
-static void get_projects_state_path(char *buf, size_t size) {
+void WM::get_projects_state_path(char *buf, size_t size) {
   const char *xdg_data_home;
   const char *home;
 
@@ -8588,7 +8969,7 @@ static void get_projects_state_path(char *buf, size_t size) {
   buf[0] = '\0';
 }
 
-static void projects_load(void) {
+void WM::projects_load(void) {
   char path[PATH_MAX];
   char line[PATH_MAX];
   FILE *fp;
@@ -8611,7 +8992,7 @@ static void projects_load(void) {
   fclose(fp);
 }
 
-static void projects_save(void) {
+void WM::projects_save(void) {
   char path[PATH_MAX];
   char dir[PATH_MAX];
   char *slash;
@@ -8639,7 +9020,7 @@ static void projects_save(void) {
 }
 
 /* Expands a leading "~" the way a shell would, so users can type "~/code/foo". */
-static void project_expand_path(const char *raw, char *out, size_t outsz) {
+void WM::project_expand_path(const char *raw, char *out, size_t outsz) {
   const char *home;
 
   if (raw[0] == '~' && (raw[1] == '/' || raw[1] == '\0')) {
@@ -8652,7 +9033,7 @@ static void project_expand_path(const char *raw, char *out, size_t outsz) {
   snprintf(out, outsz, "%s", raw);
 }
 
-static int projects_add(const char *raw_path) {
+int WM::projects_add(const char *raw_path) {
   char expanded[PATH_MAX];
   struct stat st;
   size_t i;
@@ -8679,7 +9060,7 @@ static int projects_add(const char *raw_path) {
   return 1;
 }
 
-static void projects_remove_index(size_t idx) {
+void WM::projects_remove_index(size_t idx) {
   if (idx >= projects.size()) {
     return;
   }
@@ -8691,7 +9072,7 @@ static void projects_remove_index(size_t idx) {
  * every successful switch, so an empty-query picker naturally lists
  * most-recently-used first (project_filter()'s no-query branch just walks
  * projects[] in array order already). */
-static void projects_move_to_front(size_t idx) {
+void WM::projects_move_to_front(size_t idx) {
   if (idx == 0 || idx >= projects.size()) {
     return;
   }
@@ -8705,7 +9086,7 @@ static void projects_move_to_front(size_t idx) {
 
 /* Collapses a leading $HOME into "~" for display -- the inverse of
  * project_expand_path(). */
-static void project_collapse_home(const char *path, char *out, size_t outsz) {
+void WM::project_collapse_home(const char *path, char *out, size_t outsz) {
   const char *home = getenv("HOME");
   size_t homelen;
 
@@ -8723,7 +9104,7 @@ static void project_collapse_home(const char *path, char *out, size_t outsz) {
  * `path` or a subdirectory of it? Purely an in-memory scan of the agents
  * list already maintained on the normal widget refresh cadence -- no
  * subprocess, safe to call on every picker redraw. */
-static int project_has_running_agent(const char *path) {
+int WM::project_has_running_agent(const char *path) {
   AgentStatus *a;
   size_t plen = strlen(path);
 
@@ -8735,7 +9116,7 @@ static int project_has_running_agent(const char *path) {
   return 0;
 }
 
-static void projects_ensure_loaded(void) {
+void WM::projects_ensure_loaded(void) {
   if (!projects_loaded) {
     projects_load();
     projects_loaded = 1;
@@ -8747,7 +9128,7 @@ static void projects_ensure_loaded(void) {
  * itself is special-cased to "default" -- its basename would otherwise just
  * be the username, and the whole point of the default project is that it's
  * called "default". */
-static void project_basename(const char *path, char *out, size_t outsz) {
+void WM::project_basename(const char *path, char *out, size_t outsz) {
   char tmp[PATH_MAX];
   size_t len;
   const char *base;
@@ -8775,7 +9156,7 @@ static void project_basename(const char *path, char *out, size_t outsz) {
  * different real workspace depending on which project you're in. Only the
  * "n" part is ever shown in the bar (see the tag-rendering loop in
  * drawbar()) -- this qualified name is purely the internal handle. */
-static void project_workspace_name(int n, char *out, size_t outsz) {
+void WM::project_workspace_name(int n, char *out, size_t outsz) {
   char base[256];
   project_basename(active_project_path, base, sizeof(base));
   snprintf(out, outsz, "%s/%d", base, n);
@@ -8786,7 +9167,7 @@ static void project_workspace_name(int n, char *out, size_t outsz) {
  * switching away) -- see project_workspace_name(). A 0 mask is safe to AND
  * against occ/urg/tagset elsewhere: it just never matches, same as "empty
  * and not selected", which is exactly right for a slot that doesn't exist. */
-static WorkspaceMask project_workspace_slot_mask(int n) {
+WorkspaceMask WM::project_workspace_slot_mask(int n) {
   char name[300];
   size_t idx;
   project_workspace_name(n, name, sizeof(name));
@@ -8797,7 +9178,7 @@ static WorkspaceMask project_workspace_slot_mask(int n) {
 /* Longest-prefix match of `path` against the saved project list, e.g. an
  * agent cwd of ~/code/foo/sub matches project ~/code/foo. Returns -1 if no
  * project contains this path. */
-static int project_find_for_path(const char *path) {
+int WM::project_find_for_path(const char *path) {
   size_t i;
   size_t path_len;
   size_t best_len = 0;
@@ -8829,7 +9210,7 @@ static int project_find_for_path(const char *path) {
 
 /* Human-friendly label for a path: "myproject" or "myproject/sub/dir" when
  * it belongs to a known project, otherwise the path unchanged. */
-static void project_label_for_path(const char *path, char *out, size_t outsz) {
+void WM::project_label_for_path(const char *path, char *out, size_t outsz) {
   int idx = project_find_for_path(path);
   char base[256];
   const char *rel;
@@ -8854,7 +9235,7 @@ static void project_label_for_path(const char *path, char *out, size_t outsz) {
 
 /* Is `wsname` the workspace of one of the saved projects? Returns its index
  * into projects[], or -1. */
-static int project_index_for_workspace_name(const char *wsname) {
+int WM::project_index_for_workspace_name(const char *wsname) {
   size_t i;
   char base[256];
 
@@ -8879,7 +9260,7 @@ static int project_index_for_workspace_name(const char *wsname) {
  * `path` rather than via project_workspace_name() (which reads the
  * active_project_path global) since this runs as part of *becoming* the
  * active project, before that global necessarily reflects it yet. */
-static void project_switch_workspace(Monitor *m, const char *path) {
+void WM::project_switch_workspace(Monitor *m, const char *path) {
   char base[256];
   char wsname[300];
   project_basename(path, base, sizeof(base));
@@ -8892,7 +9273,7 @@ static void project_switch_workspace(Monitor *m, const char *path) {
  * project_switch_workspace() -- the two usually happen together on a real
  * project switch, but the label tracks "which project am I working in"
  * independent of whatever workspace/tag is currently in view. */
-static void project_set_active(const char *path) {
+void WM::project_set_active(const char *path) {
   if (!path) {
     return;
   }
@@ -8906,7 +9287,7 @@ static void project_set_active(const char *path) {
  * unlike a real project switch, there's no workspace to jump to yet, and no
  * "default" workspace is pre-created either (only a later, explicit switch
  * to it creates one, same as any other project). */
-static void project_init_default(void) {
+void WM::project_init_default(void) {
   const char *home = getenv("HOME");
   if (!home || !home[0]) {
     return;
@@ -8922,7 +9303,7 @@ static void project_init_default(void) {
  * selected row (if it's a project -- app rows are handled separately by the
  * caller before this is ever reached), or the typed query added as a new
  * project if it's a valid directory. */
-static int project_resolve_selected_path(char *out, size_t outsz) {
+int WM::project_resolve_selected_path(char *out, size_t outsz) {
   if (project_filtered_len > 0 && project_filtered[project_sel].kind == PickResultProject) {
     snprintf(out, outsz, "%s", projects[project_filtered[project_sel].index].c_str());
     return 1;
@@ -8946,7 +9327,7 @@ static int project_resolve_selected_path(char *out, size_t outsz) {
  * just switches. Otherwise -- nothing matched and it's not a directory
  * either -- run the typed query as a shell command, the same fallback
  * dmenu/rofi's "run" mode offers. */
-static void project_launch(int with_agent) {
+void WM::project_launch(int with_agent) {
   Arg a = {0};
   const char *argv_term[5];
   char path_buf[PATH_MAX];
@@ -9006,20 +9387,9 @@ static void project_launch(int with_agent) {
   project_close();
 }
 
-static void widget_format_projects(char *buf, size_t size) {
-  char base[256];
-
-  if (active_project_path[0] == '\0') {
-    snprintf(buf, size, "%s", icon_projects);
-    return;
-  }
-  project_basename(active_project_path, base, sizeof(base));
-  snprintf(buf, size, "%s %s", icon_projects, base);
-}
-
 /* Subsequence fuzzy match a la fzf: -1 if needle isn't a subsequence of hay,
  * otherwise a score that rewards consecutive runs and word-boundary starts. */
-static int project_fuzzy_score(const char *needle, size_t needle_len, const char *hay) {
+int WM::project_fuzzy_score(const char *needle, size_t needle_len, const char *hay) {
   size_t hay_len = strlen(hay);
   size_t hi = 0, ni;
   int score = 0;
@@ -9084,7 +9454,7 @@ static int project_match_cmp(const void *a, const void *b) {
  * saved/MRU app list to fall back to); Theme is exclusive of both and only
  * ever matches color_themes[]. Combined is the only mode that runs both the
  * project and app loops together. */
-static void project_filter(void) {
+void WM::project_filter(void) {
   static ProjectMatch all[MAX_PICK_CANDIDATES];
   size_t all_len = 0;
   size_t i;
@@ -9168,7 +9538,7 @@ static void project_filter(void) {
  * PROJECT_MAX_RESULTS-row window -- called after every selection change.
  * Also re-clamps scroll on its own (a shrinking list, e.g. after Ctrl+D
  * removes a project, can leave it past the new end). */
-static void project_ensure_sel_visible(void) {
+void WM::project_ensure_sel_visible(void) {
   if (project_filtered_len == 0) {
     project_scroll = 0;
     return;
@@ -9189,7 +9559,7 @@ static void project_ensure_sel_visible(void) {
  * wrapping around the *entire* filtered list rather than just the visible
  * window -- that's what lets Ctrl+N walk past the first screenful instead
  * of cycling the same 8 rows forever. */
-static void project_move_sel(int delta) {
+void WM::project_move_sel(int delta) {
   int len;
 
   if (project_filtered_len == 0) {
@@ -9204,7 +9574,7 @@ static void project_move_sel(int delta) {
  * text when there are none) rather than always reserving the full
  * PROJECT_MAX_RESULTS -- a one-match query shouldn't leave a tall empty
  * popup hanging below it. */
-static int project_total_h(void) {
+int WM::project_total_h(void) {
   size_t rows = project_filtered_len > 0 ? project_filtered_len : 1;
   if (rows > PROJECT_MAX_RESULTS) {
     rows = PROJECT_MAX_RESULTS;
@@ -9212,7 +9582,7 @@ static int project_total_h(void) {
   return bh + 1 + (int)rows * bh;
 }
 
-static void project_position(Monitor *m) {
+void WM::project_position(Monitor *m) {
   int w = project_w;
   int h = project_total_h();
   int x, y;
@@ -9231,7 +9601,7 @@ static void project_position(Monitor *m) {
   XMoveResizeWindow(dpy, project_win, x, y, w, h);
 }
 
-static void project_draw(void) {
+void WM::project_draw(void) {
   int total_h = project_total_h();
   int y;
   size_t i;
@@ -9352,7 +9722,7 @@ static void project_draw(void) {
   drw_map(drw, project_win, 0, 0, project_w, total_h);
 }
 
-static void project_open(Monitor *m, enum PickerMode mode) {
+void WM::project_open(Monitor *m, enum PickerMode mode) {
   XSetWindowAttributes wa = {};
 
   if (!m) {
@@ -9389,7 +9759,7 @@ static void project_open(Monitor *m, enum PickerMode mode) {
   drawbars();
 }
 
-static void project_close(void) {
+void WM::project_close(void) {
   if (!project_visible) {
     return;
   }
@@ -9405,7 +9775,7 @@ static void project_close(void) {
  * already open switches the picker to that mode instead of stacking or
  * requiring a close first -- e.g. Mod+p while the project picker is up
  * jumps straight to the app launcher. */
-static void project_toggle(Monitor *m, enum PickerMode mode) {
+void WM::project_toggle(Monitor *m, enum PickerMode mode) {
   if (project_visible && project_mode == mode) {
     project_close();
   } else {
@@ -9413,15 +9783,15 @@ static void project_toggle(Monitor *m, enum PickerMode mode) {
   }
 }
 
-static void project_toggle_key(const Arg *arg) {
+void WM::project_toggle_key(const Arg *arg) {
   project_toggle(selmon, (enum PickerMode)arg->i);
 }
 
-static void project_submit(void) { project_launch(0); }
+void WM::project_submit(void) { project_launch(0); }
 
-static void project_submit_agent(void) { project_launch(1); }
+void WM::project_submit_agent(void) { project_launch(1); }
 
-static void project_remove_selected(void) {
+void WM::project_remove_selected(void) {
   if (project_filtered_len == 0 || project_filtered[project_sel].kind != PickResultProject) {
     return; /* apps aren't a saved list -- nothing to remove */
   }
@@ -9430,7 +9800,7 @@ static void project_remove_selected(void) {
   project_draw();
 }
 
-static int project_handle_keypress(XKeyEvent *ev) {
+int WM::project_handle_keypress(XKeyEvent *ev) {
   char buf[64];
   KeySym keysym = NoSymbol;
   int len = XLookupString(ev, buf, sizeof(buf), &keysym, NULL);
@@ -9509,7 +9879,7 @@ static int project_handle_keypress(XKeyEvent *ev) {
   return 0;
 }
 
-static int project_handle_button(XButtonPressedEvent *ev) {
+int WM::project_handle_button(XButtonPressedEvent *ev) {
   size_t i;
 
   if (!project_visible) {
@@ -9568,7 +9938,7 @@ static int project_handle_button(XButtonPressedEvent *ev) {
 /* "Super+Shift+" style prefix for a modifier mask -- mirrors the modifier
  * names lua_parse_mods() accepts, so a binding's on-screen label matches
  * what you'd type in mwm.keybind(). */
-static void keybind_help_mod_string(unsigned int mod, char *out, size_t outsz) {
+void WM::keybind_help_mod_string(unsigned int mod, char *out, size_t outsz) {
   size_t len = 0;
 
   out[0] = '\0';
@@ -9589,7 +9959,7 @@ static void keybind_help_mod_string(unsigned int mod, char *out, size_t outsz) {
 /* XKeysymToString() gives X's internal names ("space", "Return", "minus")
  * -- translate the common ones to what a person would actually call the
  * key, and capitalize bare lowercase letters ("p" -> "P"). */
-static void keybind_help_key_string(KeySym keysym, char *out, size_t outsz) {
+void WM::keybind_help_key_string(KeySym keysym, char *out, size_t outsz) {
   const char *raw = XKeysymToString(keysym);
 
   if (!raw) {
@@ -9622,7 +9992,7 @@ static void keybind_help_key_string(KeySym keysym, char *out, size_t outsz) {
  * registrations -- a blank description there gets a placeholder rather
  * than being hidden, since an undocumented binding is still worth knowing
  * exists. Returns the count written to `out`. */
-static size_t keybind_help_collect(KeybindHelpEntry *out, size_t cap) {
+size_t WM::keybind_help_collect(KeybindHelpEntry *out, size_t cap) {
   size_t n = 0;
   size_t i;
 
@@ -9649,7 +10019,7 @@ static size_t keybind_help_collect(KeybindHelpEntry *out, size_t cap) {
  * table so every description lines up, but each column gets its own
  * description width so a handful of long entries in one column don't
  * stretch every other column too. */
-static void keybind_help_draw(void) {
+void WM::keybind_help_draw(void) {
   static KeybindHelpEntry entries[MAX_KEYBIND_HELP_ENTRIES];
   size_t total;
   size_t idx;
@@ -9786,7 +10156,7 @@ static void keybind_help_draw(void) {
   drw_map(drw, keybind_help_win, 0, 0, win_w, win_h);
 }
 
-static void keybind_help_open(Monitor *m) {
+void WM::keybind_help_open(Monitor *m) {
   XSetWindowAttributes wa = {};
 
   if (!m) {
@@ -9813,7 +10183,7 @@ static void keybind_help_open(Monitor *m) {
   XMapRaised(dpy, keybind_help_win);
 }
 
-static void keybind_help_close(void) {
+void WM::keybind_help_close(void) {
   if (!keybind_help_visible) {
     return;
   }
@@ -9824,7 +10194,7 @@ static void keybind_help_close(void) {
   }
 }
 
-static void keybind_help_toggle(Monitor *m) {
+void WM::keybind_help_toggle(Monitor *m) {
   if (keybind_help_visible) {
     keybind_help_close();
   } else {
@@ -9832,14 +10202,14 @@ static void keybind_help_toggle(Monitor *m) {
   }
 }
 
-static void keybind_help_toggle_key(const Arg *arg) {
+void WM::keybind_help_toggle_key(const Arg *arg) {
   (void)arg;
   keybind_help_toggle(selmon);
 }
 
 /* Read-only overlay -- any key or click just dismisses it rather than
  * needing Escape or Mod+s specifically. */
-static int keybind_help_handle_keypress(XKeyEvent *ev) {
+int WM::keybind_help_handle_keypress(XKeyEvent *ev) {
   (void)ev;
   if (!keybind_help_visible) {
     return 0;
@@ -9848,7 +10218,7 @@ static int keybind_help_handle_keypress(XKeyEvent *ev) {
   return 1;
 }
 
-static int keybind_help_handle_button(XButtonPressedEvent *ev) {
+int WM::keybind_help_handle_button(XButtonPressedEvent *ev) {
   (void)ev;
   if (!keybind_help_visible) {
     return 0;
@@ -9864,7 +10234,7 @@ static int keybind_help_handle_button(XButtonPressedEvent *ev) {
 /* Splits one nmcli -t (terse, colon-separated) line into up to `max`
  * fields in place, undoing nmcli's own escaping of literal ':' and '\\'
  * within a field value ("\:" / "\\\\"). Returns the field count found. */
-static int nmcli_split_line(char *line, char *fields[], int max) {
+int WM::nmcli_split_line(char *line, char *fields[], int max) {
   int n = 0;
   char *out = line;
   char *read = line;
@@ -9909,7 +10279,7 @@ static int wifi_network_cmp(const void *a, const void *b) {
  * nmcli lists one row per BSSID, so the same SSID can appear more than once
  * (dual-band APs, mesh nodes) -- collapsed here into one entry per SSID,
  * keeping the strongest signal seen and OR-ing "active" across its rows. */
-static void wifi_parse_scan_output(char *buf) {
+void WM::wifi_parse_scan_output(char *buf) {
   char *saveptr = NULL;
   char *line;
 
@@ -9953,7 +10323,7 @@ static void wifi_parse_scan_output(char *buf) {
   }
 }
 
-static void wifi_job_reset(void) {
+void WM::wifi_job_reset(void) {
   if (wifi_job_fd >= 0) {
     close(wifi_job_fd);
     wifi_job_fd = -1;
@@ -9972,7 +10342,7 @@ static void wifi_job_reset(void) {
  * connect attempt from freezing the whole window manager the way a plain
  * system()/popen() call would (see the volume slider's own history of
  * exactly this bug). */
-static int wifi_job_start(enum WifiJobKind kind, char *const argv[], int capture_stderr) {
+int WM::wifi_job_start(enum WifiJobKind kind, char *const argv[], int capture_stderr) {
   int pipefd[2];
   pid_t pid;
 
@@ -10016,7 +10386,7 @@ static int wifi_job_start(enum WifiJobKind kind, char *const argv[], int capture
   return 1;
 }
 
-static void wifi_start_scan(void) {
+void WM::wifi_start_scan(void) {
   char *argv[] = {(char *)"nmcli",  (char *)"-t",     (char *)"-f", (char *)"SSID,SIGNAL,SECURITY,ACTIVE",
                   (char *)"device", (char *)"wifi",   (char *)"list", NULL};
   if (wifi_job_start(WifiJobScan, argv, 0)) {
@@ -10024,7 +10394,7 @@ static void wifi_start_scan(void) {
   }
 }
 
-static void wifi_start_connect(const char *ssid, const char *password) {
+void WM::wifi_start_connect(const char *ssid, const char *password) {
   char *argv[8];
   int i = 0;
 
@@ -10056,7 +10426,7 @@ static void wifi_start_connect(const char *ssid, const char *password) {
  * value elsewhere in this file: nmcli connect failures print "Error: ..."
  * to stderr, which wifi_start_connect() captures into the same buffer as
  * stdout specifically so this string check works. */
-static void wifi_job_poll(void) {
+void WM::wifi_job_poll(void) {
   enum WifiJobKind finished_kind;
 
   if (wifi_job_kind == WifiJobNone) {
@@ -10112,7 +10482,7 @@ static void wifi_job_poll(void) {
   }
 }
 
-static int wifi_popup_total_h(void) {
+int WM::wifi_popup_total_h(void) {
   int rows;
 
   if (wifi_blocked) {
@@ -10131,7 +10501,7 @@ static int wifi_popup_total_h(void) {
   return bh + 1 + rows * bh + (wifi_status_msg[0] != '\0' ? bh : 0);
 }
 
-static void wifi_popup_position(Monitor *m) {
+void WM::wifi_popup_position(Monitor *m) {
   int h = wifi_popup_total_h();
   int anchor_x, anchor_w;
   int popup_x, popup_y;
@@ -10156,7 +10526,7 @@ static void wifi_popup_position(Monitor *m) {
   XMoveResizeWindow(dpy, wifi_win, popup_x, popup_y, wifi_popup_w, h);
 }
 
-static void wifi_popup_draw(void) {
+void WM::wifi_popup_draw(void) {
   int total_h = wifi_popup_total_h();
   int y;
   char toggle_text[64];
@@ -10233,7 +10603,7 @@ static void wifi_popup_draw(void) {
   drw_map(drw, wifi_win, 0, 0, wifi_popup_w, total_h);
 }
 
-static void wifi_popup_open(Monitor *m) {
+void WM::wifi_popup_open(Monitor *m) {
   XSetWindowAttributes wa = {};
 
   if (!m) {
@@ -10269,7 +10639,7 @@ static void wifi_popup_open(Monitor *m) {
   drawbars();
 }
 
-static void wifi_popup_close(void) {
+void WM::wifi_popup_close(void) {
   if (!wifi_visible) {
     return;
   }
@@ -10282,7 +10652,7 @@ static void wifi_popup_close(void) {
   drawbars();
 }
 
-static void wifi_popup_toggle(Monitor *m) {
+void WM::wifi_popup_toggle(Monitor *m) {
   if (wifi_visible) {
     wifi_popup_close();
   } else {
@@ -10290,7 +10660,7 @@ static void wifi_popup_toggle(Monitor *m) {
   }
 }
 
-static int wifi_handle_keypress(XKeyEvent *ev) {
+int WM::wifi_handle_keypress(XKeyEvent *ev) {
   char buf[64];
   KeySym keysym = NoSymbol;
   int len;
@@ -10372,7 +10742,7 @@ static int wifi_handle_keypress(XKeyEvent *ev) {
   return 1; /* swallow everything else while the popup is up */
 }
 
-static int wifi_handle_button(XButtonPressedEvent *ev) {
+int WM::wifi_handle_button(XButtonPressedEvent *ev) {
   int row_y;
 
   if (!wifi_visible) {
@@ -10431,12 +10801,877 @@ static int wifi_handle_button(XButtonPressedEvent *ev) {
 
 /* }}} wifi popup */
 
+/* {{{ info popup */
+/* Shared by every widget that's just "show me more detail, no controls
+ * beyond maybe one action" -- battery, load, cpu, mem, disk, net, git,
+ * keyboard layout, media. One popup window and one content switch keyed
+ * on InfoPopupKind, the same way slider_popup already covers three
+ * widgets (backlight/volume/mic) instead of three separate windows. */
+
+enum WidgetId WM::info_popup_widget_id(enum InfoPopupKind kind) {
+  switch (kind) {
+  case InfoBattery:
+    return WidgetBattery;
+  case InfoLoad:
+    return WidgetLoad;
+  case InfoCpu:
+    return WidgetCpu;
+  case InfoMem:
+    return WidgetMem;
+  case InfoDisk:
+    return WidgetDisk;
+  case InfoNet:
+    return WidgetNet;
+  case InfoGit:
+    return WidgetGit;
+  case InfoKbLayout:
+    return WidgetKbLayout;
+  case InfoMedia:
+  default:
+    return WidgetMedia;
+  }
+}
+
+/* Filesystem types worth showing in the disk popup -- everything else
+ * (tmpfs, proc, sysfs, overlay, squashfs, cgroup2, ...) is pseudo- or
+ * container-related noise that isn't "a disk" from a user's perspective. */
+int WM::info_disk_fstype_real(const char *fstype) {
+  static const char *const real_types[] = {
+      "ext2",  "ext3", "ext4",     "btrfs", "xfs", "f2fs",     "vfat",
+      "exfat", "ntfs", "ntfs3",    "zfs",   "bcachefs", "reiserfs", "jfs",
+  };
+  size_t i;
+  for (i = 0; i < LENGTH(real_types); i++) {
+    if (!strcmp(fstype, real_types[i])) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+/* Cheap enough (one /proc/mounts read plus a handful of local statvfs
+ * calls, no forking) to just redo on every open/draw rather than caching
+ * -- mirrors how widget_update_disk() itself only ever looks at "/". */
+void WM::info_disk_refresh(void) {
+  FILE *fp;
+  char line[512];
+
+  info_disk_mounts_len = 0;
+  fp = fopen("/proc/mounts", "r");
+  if (!fp) {
+    return;
+  }
+  while (fgets(line, sizeof(line), fp) && info_disk_mounts_len < INFO_DISK_MAX_MOUNTS) {
+    char device[128], target[160], fstype[64];
+    struct statvfs vfs;
+    unsigned long long used, avail_for_calc;
+
+    if (sscanf(line, "%127s %159s %63s", device, target, fstype) != 3) {
+      continue;
+    }
+    if (!info_disk_fstype_real(fstype)) {
+      continue;
+    }
+    if (statvfs(target, &vfs) != 0 || vfs.f_blocks == 0) {
+      continue;
+    }
+    used = (unsigned long long)(vfs.f_blocks - vfs.f_bfree);
+    avail_for_calc = used + vfs.f_bavail;
+    if (avail_for_calc == 0) {
+      continue;
+    }
+    {
+      InfoDiskMount *dm = &info_disk_mounts[info_disk_mounts_len++];
+      snprintf(dm->target, sizeof(dm->target), "%s", target);
+      dm->percent = (int)(used * 100 / avail_for_calc);
+      dm->used_gb = (double)(used * vfs.f_frsize) / (1024.0 * 1024.0 * 1024.0);
+      dm->total_gb = (double)(vfs.f_blocks * vfs.f_frsize) / (1024.0 * 1024.0 * 1024.0);
+    }
+  }
+  fclose(fp);
+}
+
+void WM::info_mem_refresh(void) {
+  FILE *fp;
+  char line[256];
+
+  info_mem_total_kb = info_mem_avail_kb = -1;
+  info_mem_swap_total_kb = info_mem_swap_free_kb = -1;
+  fp = fopen("/proc/meminfo", "r");
+  if (!fp) {
+    return;
+  }
+  while (fgets(line, sizeof(line), fp)) {
+    sscanf(line, "MemTotal: %ld", &info_mem_total_kb);
+    sscanf(line, "MemAvailable: %ld", &info_mem_avail_kb);
+    sscanf(line, "SwapTotal: %ld", &info_mem_swap_total_kb);
+    sscanf(line, "SwapFree: %ld", &info_mem_swap_free_kb);
+  }
+  fclose(fp);
+}
+
+void WM::info_net_ip(char *buf, size_t size) {
+  struct ifaddrs *ifap, *ifa;
+
+  buf[0] = '\0';
+  if (net_iface[0] == '\0' || getifaddrs(&ifap) != 0) {
+    return;
+  }
+  for (ifa = ifap; ifa; ifa = ifa->ifa_next) {
+    if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_INET) {
+      continue;
+    }
+    if (strcmp(ifa->ifa_name, net_iface) != 0) {
+      continue;
+    }
+    inet_ntop(AF_INET, &((struct sockaddr_in *)ifa->ifa_addr)->sin_addr, buf, (socklen_t)size);
+    break;
+  }
+  freeifaddrs(ifap);
+}
+
+/* Best-effort hours-remaining estimate from whichever pair of sysfs
+ * attributes this battery's driver exposes -- power_supply drivers vary
+ * between the energy_now/energy_full/power_now trio (uWh/uW) and the
+ * charge_now/charge_full/current_now trio (uAh/uA).
+ * Returns -1 if neither pair is available, or the rate is 0 (idle at a
+ * plateau, or the driver just doesn't report one). */
+double WM::info_battery_hours_remaining(void) {
+  char path[PATH_MAX];
+  long now = 0, full = 0, rate = 0;
+
+  if (battery_dir[0] == '\0') {
+    return -1;
+  }
+  snprintf(path, sizeof(path), "%s/energy_now", battery_dir);
+  if (read_long_from_file(path, &now)) {
+    snprintf(path, sizeof(path), "%s/energy_full", battery_dir);
+    read_long_from_file(path, &full);
+    snprintf(path, sizeof(path), "%s/power_now", battery_dir);
+    read_long_from_file(path, &rate);
+  } else {
+    snprintf(path, sizeof(path), "%s/charge_now", battery_dir);
+    if (!read_long_from_file(path, &now)) {
+      return -1;
+    }
+    snprintf(path, sizeof(path), "%s/charge_full", battery_dir);
+    read_long_from_file(path, &full);
+    snprintf(path, sizeof(path), "%s/current_now", battery_dir);
+    read_long_from_file(path, &rate);
+  }
+  if (rate <= 0) {
+    return -1;
+  }
+  if (battery_charging) {
+    if (full <= now) {
+      return -1;
+    }
+    return (double)(full - now) / (double)rate;
+  }
+  return (double)now / (double)rate;
+}
+
+/* Plain (non-draggable) progress bar, inset within a bh-tall row -- same
+ * track/fill visual language as draw_slider_popup()'s slider, just without
+ * a knob since nothing here is interactive. */
+void WM::draw_info_bar(int x, int y, int w, int percent) {
+  int bar_h = bh / 2;
+  int bar_y = y + (bh - bar_h) / 2;
+  int fill_w;
+
+  drw_setscheme(drw, scheme[SchemeNorm]);
+  drw_rect(drw, x, bar_y, w, bar_h, 1, 0);
+  if (percent < 0) {
+    return;
+  }
+  percent = MAX(0, MIN(100, percent));
+  fill_w = (w * percent) / 100;
+  if (fill_w > 0) {
+    drw_setscheme(drw, scheme[SchemeSel]);
+    drw_rect(drw, x, bar_y, fill_w, bar_h, 1, 1);
+  }
+}
+
+int WM::info_popup_center_lpad(const char *s, int cellw) {
+  int glyphw = (int)drw_fontset_getwidth(drw, s);
+  int lpad = (cellw - glyphw) / 2;
+  return lpad > 0 ? lpad : 0;
+}
+
+int WM::info_popup_total_h(void) {
+  switch (info_popup_kind) {
+  case InfoBattery:
+    return bh * (3 + (info_battery_hours_remaining() >= 0 ? 1 : 0));
+  case InfoLoad:
+    return bh * 4;
+  case InfoCpu:
+    return bh * 3;
+  case InfoMem:
+    info_mem_refresh();
+    return bh * (3 + (info_mem_swap_total_kb > 0 ? 1 : 0));
+  case InfoDisk:
+    info_disk_refresh();
+    return bh * (1 + (int)(info_disk_mounts_len > 0 ? info_disk_mounts_len : 1));
+  case InfoNet:
+    return bh * (net_iface[0] != '\0' ? 3 : 1);
+  case InfoGit:
+    return bh * 3;
+  case InfoKbLayout:
+    return bh * (kb_layout_count > 0 ? kb_layout_count : 1);
+  case InfoMedia:
+  default:
+    return bh * 2;
+  }
+}
+
+void WM::info_popup_position(Monitor *m) {
+  enum WidgetId id = info_popup_widget_id(info_popup_kind);
+  int h = info_popup_total_h();
+  int anchor_x, anchor_w;
+  int popup_x, popup_y;
+
+  if (!m || info_popup_win == None) {
+    return;
+  }
+  anchor_x = widget_layout[id].x;
+  anchor_w = widget_layout[id].w;
+
+  popup_x = m->wx + anchor_x + (anchor_w / 2) - (info_popup_w / 2);
+  if (popup_x < m->wx) {
+    popup_x = m->wx;
+  }
+  if (popup_x + info_popup_w > m->wx + m->ww) {
+    popup_x = m->wx + m->ww - info_popup_w;
+  }
+  popup_y = m->bby - h - 8;
+  if (popup_y < m->my) {
+    popup_y = m->my;
+  }
+  XMoveResizeWindow(dpy, info_popup_win, popup_x, popup_y, info_popup_w, h);
+}
+
+void WM::draw_info_popup(void) {
+  int total_h;
+  int y = 0;
+
+  if (!info_popup_visible || info_popup_win == None) {
+    return;
+  }
+  total_h = info_popup_total_h();
+
+  drw_setscheme(drw, scheme[SchemeNorm]);
+  drw_rect(drw, 0, 0, info_popup_w, total_h, 1, 1);
+
+  switch (info_popup_kind) {
+  case InfoBattery: {
+    char header[96];
+    char state[32] = "Unknown";
+    double hours;
+    FILE *fp;
+
+    widget_format_battery(header, sizeof(header));
+    if (battery_status_path[0] != '\0' && (fp = fopen(battery_status_path, "r"))) {
+      if (fgets(state, sizeof(state), fp)) {
+        state[strcspn(state, "\n")] = '\0';
+      }
+      fclose(fp);
+    }
+    drw_setscheme(drw, scheme[SchemeSel]);
+    drw_text(drw, 0, y, info_popup_w, bh, lrpad / 2, header, 0);
+    y += bh;
+
+    drw_setscheme(drw, scheme[SchemeNorm]);
+    drw_text(drw, 0, y, info_popup_w, bh, lrpad / 2, state, 0);
+    y += bh;
+
+    draw_info_bar(lrpad, y, info_popup_w - 2 * lrpad, battery_percent);
+    y += bh;
+
+    hours = info_battery_hours_remaining();
+    if (hours >= 0) {
+      char line[64];
+      int h_part = (int)hours;
+      int m_part = (int)((hours - h_part) * 60 + 0.5);
+      snprintf(line, sizeof(line), "%s: ~%dh %dm", battery_charging ? "Full in" : "Remaining",
+               h_part, m_part);
+      drw_setscheme(drw, scheme[SchemeNorm]);
+      drw_text(drw, 0, y, info_popup_w, bh, lrpad / 2, line, 0);
+      y += bh;
+    }
+    break;
+  }
+
+  case InfoLoad: {
+    char line[64];
+
+    snprintf(line, sizeof(line), "%s Load average (%ld cores)", icon_load, widget_ncpu());
+    drw_setscheme(drw, scheme[SchemeSel]);
+    drw_text(drw, 0, y, info_popup_w, bh, lrpad / 2, line, 0);
+    y += bh;
+
+    drw_setscheme(drw, scheme[SchemeNorm]);
+    snprintf(line, sizeof(line), "1 min:  %.2f", load_avg1);
+    drw_text(drw, 0, y, info_popup_w, bh, lrpad / 2, line, 0);
+    y += bh;
+    snprintf(line, sizeof(line), "5 min:  %.2f", load_avg5);
+    drw_text(drw, 0, y, info_popup_w, bh, lrpad / 2, line, 0);
+    y += bh;
+    snprintf(line, sizeof(line), "15 min: %.2f", load_avg15);
+    drw_text(drw, 0, y, info_popup_w, bh, lrpad / 2, line, 0);
+    y += bh;
+    break;
+  }
+
+  case InfoCpu: {
+    char line[64];
+
+    snprintf(line, sizeof(line), "%s CPU: %d%%", icon_cpu, MAX(cpu_percent, 0));
+    drw_setscheme(drw, scheme[SchemeSel]);
+    drw_text(drw, 0, y, info_popup_w, bh, lrpad / 2, line, 0);
+    y += bh;
+
+    draw_info_bar(lrpad, y, info_popup_w - 2 * lrpad, cpu_percent);
+    y += bh;
+
+    snprintf(line, sizeof(line), "%ld cores", widget_ncpu());
+    drw_setscheme(drw, scheme[SchemeNorm]);
+    drw_text(drw, 0, y, info_popup_w, bh, lrpad / 2, line, 0);
+    y += bh;
+    break;
+  }
+
+  case InfoMem: {
+    char line[80];
+    double total_gb, avail_gb, used_gb;
+
+    info_mem_refresh();
+    total_gb = info_mem_total_kb > 0 ? info_mem_total_kb / (1024.0 * 1024.0) : 0;
+    avail_gb = info_mem_avail_kb > 0 ? info_mem_avail_kb / (1024.0 * 1024.0) : 0;
+    used_gb = total_gb - avail_gb;
+
+    snprintf(line, sizeof(line), "%s Memory: %d%%", icon_mem, MAX(mem_percent, 0));
+    drw_setscheme(drw, scheme[SchemeSel]);
+    drw_text(drw, 0, y, info_popup_w, bh, lrpad / 2, line, 0);
+    y += bh;
+
+    draw_info_bar(lrpad, y, info_popup_w - 2 * lrpad, mem_percent);
+    y += bh;
+
+    drw_setscheme(drw, scheme[SchemeNorm]);
+    snprintf(line, sizeof(line), "Used: %.1fG / %.1fG", used_gb, total_gb);
+    drw_text(drw, 0, y, info_popup_w, bh, lrpad / 2, line, 0);
+    y += bh;
+
+    if (info_mem_swap_total_kb > 0) {
+      double swap_total_gb = info_mem_swap_total_kb / (1024.0 * 1024.0);
+      double swap_free_gb = info_mem_swap_free_kb > 0 ? info_mem_swap_free_kb / (1024.0 * 1024.0) : 0;
+      snprintf(line, sizeof(line), "Swap: %.1fG / %.1fG", swap_total_gb - swap_free_gb,
+               swap_total_gb);
+      drw_text(drw, 0, y, info_popup_w, bh, lrpad / 2, line, 0);
+      y += bh;
+    }
+    break;
+  }
+
+  case InfoDisk: {
+    char line[160];
+    size_t i;
+
+    info_disk_refresh();
+    snprintf(line, sizeof(line), "%s Disk usage", icon_disk);
+    drw_setscheme(drw, scheme[SchemeSel]);
+    drw_text(drw, 0, y, info_popup_w, bh, lrpad / 2, line, 0);
+    y += bh;
+
+    drw_setscheme(drw, scheme[SchemeNorm]);
+    if (info_disk_mounts_len == 0) {
+      drw_text(drw, 0, y, info_popup_w, bh, lrpad / 2, "No mounted filesystems", 0);
+      y += bh;
+    } else {
+      for (i = 0; i < info_disk_mounts_len; i++) {
+        const InfoDiskMount *dm = &info_disk_mounts[i];
+        snprintf(line, sizeof(line), "%s: %d%% (%.0fG/%.0fG)", dm->target, dm->percent,
+                 dm->used_gb, dm->total_gb);
+        drw_text(drw, 0, y, info_popup_w, bh, lrpad / 2, line, 0);
+        y += bh;
+      }
+    }
+    break;
+  }
+
+  case InfoNet: {
+    char line[128];
+
+    if (net_iface[0] == '\0') {
+      drw_setscheme(drw, scheme[SchemeNorm]);
+      drw_text(drw, 0, y, info_popup_w, bh, lrpad / 2, "No active connection", 0);
+      y += bh;
+      break;
+    }
+
+    snprintf(line, sizeof(line), "%s %s (%s)", icon_net, net_iface, net_up ? "up" : "down");
+    drw_setscheme(drw, scheme[SchemeSel]);
+    drw_text(drw, 0, y, info_popup_w, bh, lrpad / 2, line, 0);
+    y += bh;
+
+    {
+      char ip[64];
+      info_net_ip(ip, sizeof(ip));
+      snprintf(line, sizeof(line), "IP: %s", ip[0] ? ip : "(none)");
+    }
+    drw_setscheme(drw, scheme[SchemeNorm]);
+    drw_text(drw, 0, y, info_popup_w, bh, lrpad / 2, line, 0);
+    y += bh;
+
+    {
+      char rx_buf[32], tx_buf[32];
+      widget_format_net_rate(net_rx_kbps, rx_buf, sizeof(rx_buf));
+      widget_format_net_rate(net_tx_kbps, tx_buf, sizeof(tx_buf));
+      snprintf(line, sizeof(line), "↓ %s   ↑ %s", rx_buf, tx_buf);
+    }
+    drw_text(drw, 0, y, info_popup_w, bh, lrpad / 2, line, 0);
+    y += bh;
+    break;
+  }
+
+  case InfoGit: {
+    char line[128];
+    char counts[32] = "";
+
+    if (!git_valid) {
+      drw_setscheme(drw, scheme[SchemeNorm]);
+      drw_text(drw, 0, y, info_popup_w, bh, lrpad / 2, "Not a git repository", 0);
+      y += bh;
+      break;
+    }
+    if (git_ahead > 0 && git_behind > 0) {
+      snprintf(counts, sizeof(counts), " %d↑%d↓", git_ahead, git_behind);
+    } else if (git_ahead > 0) {
+      snprintf(counts, sizeof(counts), " %d↑", git_ahead);
+    } else if (git_behind > 0) {
+      snprintf(counts, sizeof(counts), " %d↓", git_behind);
+    }
+    snprintf(line, sizeof(line), "%s %s%s", icon_git, git_branch, counts);
+    drw_setscheme(drw, scheme[SchemeSel]);
+    drw_text(drw, 0, y, info_popup_w, bh, lrpad / 2, line, 0);
+    y += bh;
+
+    drw_setscheme(drw, scheme[SchemeNorm]);
+    drw_text(drw, 0, y, info_popup_w, bh, lrpad / 2,
+             git_dirty ? "Working tree: dirty" : "Working tree: clean", 0);
+    y += bh;
+
+    drw_setscheme(drw, scheme[SchemeSel]);
+    drw_text(drw, 0, y, info_popup_w, bh, lrpad / 2, "Click to open terminal here", 0);
+    y += bh;
+    break;
+  }
+
+  case InfoKbLayout: {
+    XkbStateRec state;
+    int active = -1;
+    int i;
+
+    if (dpy && XkbGetState(dpy, XkbUseCoreKbd, &state) == Success) {
+      active = state.group;
+    }
+    if (kb_layout_count == 0) {
+      drw_setscheme(drw, scheme[SchemeNorm]);
+      drw_text(drw, 0, y, info_popup_w, bh, lrpad / 2, "No layouts configured", 0);
+      y += bh;
+      break;
+    }
+    for (i = 0; i < kb_layout_count; i++) {
+      drw_setscheme(drw, scheme[i == active ? SchemeSel : SchemeNorm]);
+      drw_text(drw, 0, y, info_popup_w, bh, lrpad / 2, kb_layout_names[i], 0);
+      y += bh;
+    }
+    break;
+  }
+
+  case InfoMedia:
+  default: {
+    char header[160];
+    int col_w = info_popup_w / 3;
+    const char *play_icon = strcmp(media_status, "Playing") == 0 ? icon_media_pause : icon_media_play;
+
+    if (media_status[0] == '\0') {
+      snprintf(header, sizeof(header), "%s Nothing playing", icon_media);
+      drw_setscheme(drw, scheme[SchemeNorm]);
+    } else {
+      snprintf(header, sizeof(header), "%s %s", icon_media,
+               media_title[0] ? media_title : media_status);
+      drw_setscheme(drw, scheme[SchemeSel]);
+    }
+    drw_text(drw, 0, y, info_popup_w, bh, lrpad / 2, header, 0);
+    y += bh;
+
+    drw_setscheme(drw, scheme[SchemeNorm]);
+    drw_rect(drw, 0, y, info_popup_w, bh, 1, 1);
+    drw_text(drw, 0, y, col_w, bh, info_popup_center_lpad(icon_media_prev, col_w),
+             icon_media_prev, 0);
+    drw_text(drw, col_w, y, col_w, bh, info_popup_center_lpad(play_icon, col_w), play_icon, 0);
+    drw_text(drw, col_w * 2, y, info_popup_w - col_w * 2, bh,
+             info_popup_center_lpad(icon_media_next, info_popup_w - col_w * 2), icon_media_next, 0);
+    y += bh;
+    break;
+  }
+  }
+
+  drw_map(drw, info_popup_win, 0, 0, info_popup_w, total_h);
+}
+
+void WM::info_popup_open(Monitor *m, enum InfoPopupKind kind) {
+  XSetWindowAttributes wa = {};
+
+  if (!m) {
+    return;
+  }
+  if (info_popup_win == None) {
+    wa.override_redirect = True;
+    wa.background_pixel = scheme[SchemeNorm][ColBg].pixel;
+    wa.border_pixel = scheme[SchemeSel][ColBorder].pixel;
+    wa.event_mask = ExposureMask | ButtonPressMask;
+    info_popup_win = XCreateWindow(
+        dpy, root, 0, 0, info_popup_w, bh, 1, DefaultDepth(dpy, screen), CopyFromParent,
+        DefaultVisual(dpy, screen), CWOverrideRedirect | CWBackPixel | CWBorderPixel | CWEventMask,
+        &wa);
+    XDefineCursor(dpy, info_popup_win, cursor[CurNormal]->cursor);
+  }
+  info_popup_kind = kind;
+  info_popup_mon = m;
+  info_popup_visible = 1;
+  info_popup_position(m);
+  draw_info_popup();
+  XMapRaised(dpy, info_popup_win);
+}
+
+void WM::info_popup_close(void) {
+  info_popup_visible = 0;
+  info_popup_mon = NULL;
+  if (info_popup_win != None) {
+    XUnmapWindow(dpy, info_popup_win);
+  }
+}
+
+void WM::info_popup_toggle(Monitor *m, enum InfoPopupKind kind) {
+  if (info_popup_visible && info_popup_kind == kind) {
+    info_popup_close();
+  } else {
+    info_popup_open(m ? m : selmon, kind);
+  }
+}
+
+void WM::widget_select_kblayout(int index) {
+  if (!dpy || index < 0 || index >= kb_layout_count) {
+    return;
+  }
+  XkbLockGroup(dpy, XkbUseCoreKbd, index);
+  widget_update_kblayout();
+  drawbars();
+}
+
+int WM::info_popup_handle_button(XButtonPressedEvent *ev) {
+  int row;
+
+  if (!info_popup_visible) {
+    return 0;
+  }
+  if (ev->window != info_popup_win) {
+    info_popup_close();
+    return 0;
+  }
+  if (ev->button != Button1) {
+    return 1;
+  }
+
+  row = ev->y / bh;
+
+  switch (info_popup_kind) {
+  case InfoGit:
+    widget_git_open_terminal();
+    info_popup_close();
+    return 1;
+  case InfoKbLayout:
+    if (row >= 0 && row < kb_layout_count) {
+      widget_select_kblayout(row);
+      draw_info_popup();
+    }
+    return 1;
+  case InfoMedia: {
+    int col_w = info_popup_w / 3;
+    if (row == 1) {
+      if (ev->x < col_w) {
+        widget_media_previous();
+      } else if (ev->x < col_w * 2) {
+        widget_media_play_pause();
+      } else {
+        widget_media_next();
+      }
+      draw_info_popup();
+    }
+    return 1;
+  }
+  default:
+    return 1;
+  }
+}
+/* }}} info popup */
+
+/* {{{ bluetooth popup */
+/* Paired devices only -- connect/disconnect toggling, mirroring wifi's
+ * on/off row, not a full scan-and-pair flow (that needs a PIN/confirmation
+ * exchange that varies enough by device to be its own project). Covers the
+ * actual day-to-day use case: reconnecting a headset or mouse that's
+ * already paired. */
+
+void WM::bt_popup_refresh(void) {
+  char paired_buf[4096];
+  char connected_buf[4096];
+  char *const argv_paired[] = {(char *)"bluetoothctl", (char *)"devices", (char *)"Paired", NULL};
+  char *const argv_connected[] = {(char *)"bluetoothctl", (char *)"devices", (char *)"Connected",
+                                   NULL};
+  char *line, *saveptr = NULL;
+
+  bt_devices_len = 0;
+  if (!run_capture_argv(NULL, argv_paired, paired_buf, sizeof(paired_buf), 1500)) {
+    return;
+  }
+  connected_buf[0] = '\0';
+  run_capture_argv(NULL, argv_connected, connected_buf, sizeof(connected_buf), 1500);
+
+  for (line = strtok_r(paired_buf, "\n", &saveptr); line && bt_devices_len < MAX_BT_DEVICES;
+       line = strtok_r(NULL, "\n", &saveptr)) {
+    /* "Device AA:BB:CC:DD:EE:FF Some Name" */
+    char mac[32];
+    const char *name;
+
+    if (strncmp(line, "Device ", 7) != 0) {
+      continue;
+    }
+    if (sscanf(line + 7, "%31s", mac) != 1) {
+      continue;
+    }
+    name = line + 7 + strlen(mac);
+    while (*name == ' ') {
+      name++;
+    }
+    {
+      BtDevice *d = &bt_devices[bt_devices_len++];
+      snprintf(d->mac, sizeof(d->mac), "%s", mac);
+      snprintf(d->name, sizeof(d->name), "%s", name[0] ? name : mac);
+      d->connected = strstr(connected_buf, mac) != NULL;
+    }
+  }
+}
+
+int WM::bt_popup_total_h(void) {
+  int rows = (int)bt_devices_len;
+  if (rows < 1) {
+    rows = 1; /* "No paired devices" / "Bluetooth is off" */
+  }
+  return bh + 1 + rows * bh + (bt_status_msg[0] != '\0' ? bh : 0);
+}
+
+void WM::bt_popup_position(Monitor *m) {
+  int h = bt_popup_total_h();
+  int anchor_x, anchor_w;
+  int popup_x, popup_y;
+
+  if (!m || bt_win == None) {
+    return;
+  }
+  anchor_x = widget_layout[WidgetBluetooth].x;
+  anchor_w = widget_layout[WidgetBluetooth].w;
+
+  popup_x = m->wx + anchor_x + (anchor_w / 2) - (bt_popup_w / 2);
+  if (popup_x < m->wx) {
+    popup_x = m->wx;
+  }
+  if (popup_x + bt_popup_w > m->wx + m->ww) {
+    popup_x = m->wx + m->ww - bt_popup_w;
+  }
+  popup_y = m->bby - h - 8;
+  if (popup_y < m->my) {
+    popup_y = m->my;
+  }
+  XMoveResizeWindow(dpy, bt_win, popup_x, popup_y, bt_popup_w, h);
+}
+
+void WM::bt_popup_draw(void) {
+  int total_h;
+  int y;
+  char toggle_text[64];
+
+  if (!bt_visible || bt_win == None) {
+    return;
+  }
+  total_h = bt_popup_total_h();
+
+  drw_setscheme(drw, scheme[SchemeNorm]);
+  drw_rect(drw, 0, 0, bt_popup_w, total_h, 1, 1);
+
+  snprintf(toggle_text, sizeof(toggle_text), "%s Bluetooth: %s", icon_bluetooth,
+           bt_blocked ? "Off (click to turn on)" : "On (click to turn off)");
+  drw_setscheme(drw, scheme[SchemeSel]);
+  drw_text(drw, 0, 0, bt_popup_w, bh, lrpad / 2, toggle_text, 0);
+
+  drw_setscheme(drw, scheme[SchemeNorm]);
+  draw_hdivider(0, bh, bt_popup_w);
+  y = bh + 1;
+
+  if (bt_blocked) {
+    drw_text(drw, 0, y, bt_popup_w, bh, lrpad / 2, "Bluetooth is off", 0);
+    y += bh;
+  } else if (bt_devices_len == 0) {
+    drw_text(drw, 0, y, bt_popup_w, bh, lrpad / 2, "No paired devices", 0);
+    y += bh;
+  } else {
+    size_t i;
+    for (i = 0; i < bt_devices_len; i++) {
+      const BtDevice *d = &bt_devices[i];
+      char row_text[160];
+      snprintf(row_text, sizeof(row_text), "%s%s", d->name, d->connected ? " (connected)" : "");
+      drw_setscheme(drw, scheme[d->connected ? SchemeSel : SchemeNorm]);
+      drw_text(drw, 0, y, bt_popup_w, bh, lrpad / 2, row_text, 0);
+      y += bh;
+    }
+  }
+
+  if (bt_status_msg[0] != '\0') {
+    drw_setscheme(drw, scheme[SchemeNorm]);
+    drw_text(drw, 0, y, bt_popup_w, bh, lrpad / 2, bt_status_msg, 0);
+  }
+
+  drw_map(drw, bt_win, 0, 0, bt_popup_w, total_h);
+}
+
+void WM::bt_popup_open(Monitor *m) {
+  XSetWindowAttributes wa = {};
+
+  if (!m) {
+    return;
+  }
+  if (bt_win == None) {
+    wa.override_redirect = True;
+    wa.background_pixel = scheme[SchemeNorm][ColBg].pixel;
+    wa.border_pixel = scheme[SchemeSel][ColBorder].pixel;
+    wa.event_mask = ExposureMask | ButtonPressMask;
+    bt_win = XCreateWindow(dpy, root, 0, 0, bt_popup_w, bh, 1, DefaultDepth(dpy, screen),
+                            CopyFromParent, DefaultVisual(dpy, screen),
+                            CWOverrideRedirect | CWBackPixel | CWBorderPixel | CWEventMask, &wa);
+    XDefineCursor(dpy, bt_win, cursor[CurNormal]->cursor);
+  }
+  bt_mon = m;
+  bt_visible = 1;
+  bt_status_msg[0] = '\0';
+  widget_update_bluetooth(); /* fresh blocked state before deciding whether to query devices */
+  if (!bt_blocked) {
+    bt_popup_refresh();
+  } else {
+    bt_devices_len = 0;
+  }
+  bt_popup_position(m);
+  bt_popup_draw();
+  XMapRaised(dpy, bt_win);
+  drawbars();
+}
+
+void WM::bt_popup_close(void) {
+  if (!bt_visible) {
+    return;
+  }
+  bt_visible = 0;
+  if (bt_win != None) {
+    XUnmapWindow(dpy, bt_win);
+  }
+  drawbars();
+}
+
+void WM::bt_popup_toggle(Monitor *m) {
+  if (bt_visible) {
+    bt_popup_close();
+  } else {
+    bt_popup_open(m ? m : selmon);
+  }
+}
+
+int WM::bt_handle_button(XButtonPressedEvent *ev) {
+  int row_y;
+
+  if (!bt_visible) {
+    return 0;
+  }
+  if (ev->window != bt_win) {
+    bt_popup_close();
+    return 0;
+  }
+  if (ev->button != Button1) {
+    return 1;
+  }
+
+  if (ev->y < bh) {
+    /* Optimistic, same reasoning as the wifi toggle row. */
+    run_detached_shell(bt_blocked ? "rfkill unblock bluetooth" : "rfkill block bluetooth");
+    bt_blocked = !bt_blocked;
+    bt_status_msg[0] = '\0';
+    if (!bt_blocked) {
+      bt_popup_refresh();
+    } else {
+      bt_devices_len = 0;
+    }
+    bt_popup_position(bt_mon);
+    bt_popup_draw();
+    drawbars();
+    return 1;
+  }
+
+  if (bt_blocked) {
+    return 1;
+  }
+
+  row_y = bh + 1;
+  {
+    size_t i;
+    for (i = 0; i < bt_devices_len; i++) {
+      if (ev->y >= row_y && ev->y < row_y + bh) {
+        BtDevice *d = &bt_devices[i];
+        char *const argv_action[] = {(char *)"bluetoothctl",
+                                      d->connected ? (char *)"disconnect" : (char *)"connect",
+                                      d->mac, NULL};
+        char out[256];
+
+        snprintf(bt_status_msg, sizeof(bt_status_msg), "%s %s...",
+                 d->connected ? "Disconnecting" : "Connecting", d->name);
+        bt_popup_position(bt_mon);
+        bt_popup_draw();
+        XSync(dpy, False);
+
+        /* A deliberate, infrequent click, not a periodic tick -- unlike
+         * the status-poll fix elsewhere, a few seconds of bounded
+         * blocking here is an acceptable tradeoff against building a
+         * whole second async job runner (see wifi_job_*) just for
+         * connect/disconnect. */
+        run_capture_argv(NULL, argv_action, out, sizeof(out), 6000);
+        bt_popup_refresh();
+        bt_status_msg[0] = '\0';
+        bt_popup_position(bt_mon);
+        bt_popup_draw();
+        return 1;
+      }
+      row_y += bh;
+    }
+  }
+  return 1;
+}
+/* }}} bluetooth popup */
+
 /* {{{ calendar popup */
 
 /* Number of days in `month` (0-11) of `year`, via the standard mktime
  * normalization trick: asking for day 0 of the *next* month rolls back to
  * the last day of *this* one. */
-static int calendar_days_in_month(int year, int month) {
+int WM::calendar_days_in_month(int year, int month) {
   struct tm tm_buf = {0};
   tm_buf.tm_year = year - 1900;
   tm_buf.tm_mon = month + 1;
@@ -10446,7 +11681,7 @@ static int calendar_days_in_month(int year, int month) {
 }
 
 /* 0 (Sunday) .. 6 (Saturday) for the 1st of `month`/`year`. */
-static int calendar_first_weekday(int year, int month) {
+int WM::calendar_first_weekday(int year, int month) {
   struct tm tm_buf = {0};
   tm_buf.tm_year = year - 1900;
   tm_buf.tm_mon = month;
@@ -10455,7 +11690,7 @@ static int calendar_first_weekday(int year, int month) {
   return tm_buf.tm_wday;
 }
 
-static int calendar_total_h(void) {
+int WM::calendar_total_h(void) {
   int first_wd = calendar_first_weekday(calendar_year, calendar_month);
   int days = calendar_days_in_month(calendar_year, calendar_month);
   int rows = (first_wd + days + 6) / 7;
@@ -10464,7 +11699,7 @@ static int calendar_total_h(void) {
          + rows * bh;
 }
 
-static void calendar_position(Monitor *m) {
+void WM::calendar_position(Monitor *m) {
   int h = calendar_total_h();
   int x, y;
 
@@ -10489,7 +11724,7 @@ static void calendar_position(Monitor *m) {
   XMoveResizeWindow(dpy, calendar_win, x, y, calendar_w, h);
 }
 
-static void calendar_draw(void) {
+void WM::calendar_draw(void) {
   int total_h = calendar_total_h();
   int first_wd, days, today_day;
   int today_year, today_month;
@@ -10562,7 +11797,7 @@ static void calendar_draw(void) {
   drw_map(drw, calendar_win, 0, 0, calendar_w, total_h);
 }
 
-static void calendar_shift_month(int delta) {
+void WM::calendar_shift_month(int delta) {
   calendar_month += delta;
   while (calendar_month < 0) {
     calendar_month += 12;
@@ -10576,7 +11811,7 @@ static void calendar_shift_month(int delta) {
   calendar_draw();
 }
 
-static void calendar_open(Monitor *m) {
+void WM::calendar_open(Monitor *m) {
   XSetWindowAttributes wa = {};
   time_t now;
   struct tm tm_now;
@@ -10613,7 +11848,7 @@ static void calendar_open(Monitor *m) {
   XMapRaised(dpy, calendar_win);
 }
 
-static void calendar_close(void) {
+void WM::calendar_close(void) {
   if (!calendar_visible) {
     return;
   }
@@ -10624,7 +11859,7 @@ static void calendar_close(void) {
   }
 }
 
-static void calendar_toggle(Monitor *m) {
+void WM::calendar_toggle(Monitor *m) {
   if (calendar_visible) {
     calendar_close();
   } else {
@@ -10632,12 +11867,12 @@ static void calendar_toggle(Monitor *m) {
   }
 }
 
-static void calendar_toggle_key(const Arg *arg) {
+void WM::calendar_toggle_key(const Arg *arg) {
   (void)arg;
   calendar_toggle(selmon);
 }
 
-static int calendar_handle_keypress(XKeyEvent *ev) {
+int WM::calendar_handle_keypress(XKeyEvent *ev) {
   KeySym keysym = NoSymbol;
   char buf[8];
 
@@ -10671,7 +11906,7 @@ static int calendar_handle_keypress(XKeyEvent *ev) {
   return 1; /* swallow everything else while it's up */
 }
 
-static int calendar_handle_button(XButtonPressedEvent *ev) {
+int WM::calendar_handle_button(XButtonPressedEvent *ev) {
   int col_w = calendar_w / 7;
 
   if (!calendar_visible) {
@@ -10714,7 +11949,7 @@ static int calendar_handle_button(XButtonPressedEvent *ev) {
 
 /* {{{ desktop icons */
 
-static void get_desktop_dir(char *buf, size_t size) {
+void WM::get_desktop_dir(char *buf, size_t size) {
   const char *home = getenv("HOME");
   if (!home || home[0] == '\0') {
     buf[0] = '\0';
@@ -10724,7 +11959,7 @@ static void get_desktop_dir(char *buf, size_t size) {
   mkdir(buf, 0755);
 }
 
-static void get_trash_base_dir(char *buf, size_t size) {
+void WM::get_trash_base_dir(char *buf, size_t size) {
   const char *xdg_data_home = getenv("XDG_DATA_HOME");
   const char *home;
 
@@ -10740,7 +11975,7 @@ static void get_trash_base_dir(char *buf, size_t size) {
   buf[0] = '\0';
 }
 
-static void get_trash_files_dir(char *buf, size_t size) {
+void WM::get_trash_files_dir(char *buf, size_t size) {
   char base[PATH_MAX];
   get_trash_base_dir(base, sizeof(base));
   if (base[0] == '\0') {
@@ -10752,7 +11987,7 @@ static void get_trash_files_dir(char *buf, size_t size) {
   mkdir(buf, 0700);
 }
 
-static void get_trash_info_dir(char *buf, size_t size) {
+void WM::get_trash_info_dir(char *buf, size_t size) {
   char base[PATH_MAX];
   get_trash_base_dir(base, sizeof(base));
   if (base[0] == '\0') {
@@ -10764,7 +11999,7 @@ static void get_trash_info_dir(char *buf, size_t size) {
   mkdir(buf, 0700);
 }
 
-static void get_desktop_layout_path(char *buf, size_t size) {
+void WM::get_desktop_layout_path(char *buf, size_t size) {
   const char *xdg_data_home = getenv("XDG_DATA_HOME");
   const char *home;
 
@@ -10780,7 +12015,7 @@ static void get_desktop_layout_path(char *buf, size_t size) {
   buf[0] = '\0';
 }
 
-static void desktop_layout_save(void) {
+void WM::desktop_layout_save(void) {
   char path[PATH_MAX];
   char dir[PATH_MAX];
   char *slash;
@@ -10812,7 +12047,7 @@ static void desktop_layout_save(void) {
   fclose(fp);
 }
 
-static int desktop_ext_matches(const char *ext, const char *want_lower) {
+int WM::desktop_ext_matches(const char *ext, const char *want_lower) {
   size_t i;
   for (i = 0; ext[i] && want_lower[i]; i++) {
     if (tolower((unsigned char)ext[i]) != want_lower[i]) {
@@ -10822,7 +12057,7 @@ static int desktop_ext_matches(const char *ext, const char *want_lower) {
   return ext[i] == '\0' && want_lower[i] == '\0';
 }
 
-static const char *desktop_icon_glyph(const DesktopIcon *icon) {
+const char *WM::desktop_icon_glyph(const DesktopIcon *icon) {
   static const struct {
     const char *ext;
     const char *glyph;
@@ -10879,7 +12114,7 @@ static const char *desktop_icon_glyph(const DesktopIcon *icon) {
   return icon_desktop_file;
 }
 
-static void desktop_next_free_cell(const DesktopIcon *icons, size_t icons_len, int *out_x,
+void WM::desktop_next_free_cell(const DesktopIcon *icons, size_t icons_len, int *out_x,
                                    int *out_y) {
   int top = bh + desktop_margin;
   int bottom = sh - bh - desktop_margin;
@@ -10924,7 +12159,7 @@ static void desktop_next_free_cell(const DesktopIcon *icons, size_t icons_len, i
   *out_y = top;
 }
 
-static void desktop_rescan(void) {
+void WM::desktop_rescan(void) {
   static DesktopIcon saved[MAX_DESKTOP_ICONS];
   static DesktopIcon new_icons[MAX_DESKTOP_ICONS];
   size_t saved_len = 0;
@@ -11020,7 +12255,7 @@ static void desktop_rescan(void) {
   desktop_layout_save();
 }
 
-static int desktop_copy_regular_file(const char *src, const char *dst, mode_t mode) {
+int WM::desktop_copy_regular_file(const char *src, const char *dst, mode_t mode) {
   int in_fd, out_fd;
   char buf[65536];
   ssize_t n;
@@ -11057,7 +12292,7 @@ static int desktop_copy_regular_file(const char *src, const char *dst, mode_t mo
   return ok;
 }
 
-static int desktop_copy_path_recursive(const char *src, const char *dst) {
+int WM::desktop_copy_path_recursive(const char *src, const char *dst) {
   struct stat st;
 
   if (lstat(src, &st) != 0) {
@@ -11103,7 +12338,7 @@ static int desktop_copy_path_recursive(const char *src, const char *dst) {
   return 0; /* skip devices, sockets, fifos */
 }
 
-static void desktop_trash_icon(size_t index) {
+void WM::desktop_trash_icon(size_t index) {
   DesktopIcon *icon;
   char desktop_dir[PATH_MAX];
   char files_dir[PATH_MAX];
@@ -11187,7 +12422,7 @@ static void desktop_trash_icon(size_t index) {
   desktop_layout_save();
 }
 
-static void desktop_draw(void) {
+void WM::desktop_draw(void) {
   size_t i;
 
   if (deskwin == None) {
@@ -11235,7 +12470,7 @@ static void desktop_draw(void) {
   drw_map(drw, deskwin, 0, 0, sw, sh);
 }
 
-static int desktop_hit_test(int x, int y) {
+int WM::desktop_hit_test(int x, int y) {
   size_t i;
   for (i = 0; i < desktop_icons_len; i++) {
     DesktopIcon *icon = &desktop_icons[i];
@@ -11249,7 +12484,7 @@ static int desktop_hit_test(int x, int y) {
   return -1;
 }
 
-static void desktop_open_icon(const DesktopIcon *icon) {
+void WM::desktop_open_icon(const DesktopIcon *icon) {
   Arg a = {0};
   const char *argv_term[4];
   const char *argv_open[3];
@@ -11277,7 +12512,7 @@ static void desktop_open_icon(const DesktopIcon *icon) {
   spawn(&a);
 }
 
-static void desktop_dragmouse(size_t index) {
+void WM::desktop_dragmouse(size_t index) {
   DesktopIcon *icon;
   int ox, oy;
   int start_x, start_y;
@@ -11312,7 +12547,7 @@ static void desktop_dragmouse(size_t index) {
     case ConfigureRequest:
     case Expose:
     case MapRequest:
-      handler[ev.type](&ev);
+      (this->*handler[ev.type])(&ev);
       break;
     case MotionNotify:
       if ((ev.xmotion.time - lasttime) <= (1000 / 60)) {
@@ -11347,7 +12582,7 @@ static void desktop_dragmouse(size_t index) {
   desktop_draw();
 }
 
-static int desktop_handle_button(XButtonPressedEvent *ev) {
+int WM::desktop_handle_button(XButtonPressedEvent *ev) {
   int idx;
   struct timeval now;
   long elapsed_ms;
@@ -11382,7 +12617,7 @@ static int desktop_handle_button(XButtonPressedEvent *ev) {
   return 1;
 }
 
-static void desktop_setup(void) {
+void WM::desktop_setup(void) {
   XSetWindowAttributes wa = {};
   Atom version_atom = 5;
   char tmp[PATH_MAX];
@@ -11411,7 +12646,7 @@ static void desktop_setup(void) {
 
 /* {{{ xdnd (drag files in from another application onto the desktop) */
 
-static void desktop_xdnd_enter(XClientMessageEvent *cme) {
+void WM::desktop_xdnd_enter(XClientMessageEvent *cme) {
   int more_than_3 = (int)(cme->data.l[1] & 1);
 
   xdnd_source = (Window)cme->data.l[0];
@@ -11451,7 +12686,7 @@ static void desktop_xdnd_enter(XClientMessageEvent *cme) {
   }
 }
 
-static void desktop_xdnd_position(XClientMessageEvent *cme) {
+void WM::desktop_xdnd_position(XClientMessageEvent *cme) {
   Window source = (Window)cme->data.l[0];
   XEvent reply;
 
@@ -11473,14 +12708,14 @@ static void desktop_xdnd_position(XClientMessageEvent *cme) {
   XSendEvent(dpy, source, False, NoEventMask, &reply);
 }
 
-static void desktop_xdnd_leave(XClientMessageEvent *cme) {
+void WM::desktop_xdnd_leave(XClientMessageEvent *cme) {
   (void)cme;
   xdnd_source = None;
   xdnd_desired_type = None;
   xdnd_version = 0;
 }
 
-static void desktop_xdnd_drop(XClientMessageEvent *cme) {
+void WM::desktop_xdnd_drop(XClientMessageEvent *cme) {
   Window source = (Window)cme->data.l[0];
   Time timestamp = xdnd_version >= 1 ? (Time)cme->data.l[2] : CurrentTime;
 
@@ -11504,7 +12739,7 @@ static void desktop_xdnd_drop(XClientMessageEvent *cme) {
                     xdndatom[XdndSelectionAtom], deskwin, timestamp);
 }
 
-static void desktop_url_decode(const char *in, char *out, size_t outsz) {
+void WM::desktop_url_decode(const char *in, char *out, size_t outsz) {
   size_t oi = 0;
   size_t i;
   for (i = 0; in[i] && oi + 1 < outsz; i++) {
@@ -11520,7 +12755,7 @@ static void desktop_url_decode(const char *in, char *out, size_t outsz) {
   out[oi] = '\0';
 }
 
-static int desktop_xdnd_import_uri_list(const char *data, int drop_x, int drop_y) {
+int WM::desktop_xdnd_import_uri_list(const char *data, int drop_x, int drop_y) {
   char desktop_dir[PATH_MAX];
   char *copy;
   char *line;
@@ -11621,7 +12856,7 @@ static int desktop_xdnd_import_uri_list(const char *data, int drop_x, int drop_y
   return imported;
 }
 
-static void desktop_xdnd_selection_notify(XSelectionEvent *sev) {
+void WM::desktop_xdnd_selection_notify(XSelectionEvent *sev) {
   Atom actual;
   int format;
   unsigned long nitems, after;
@@ -11655,7 +12890,7 @@ static void desktop_xdnd_selection_notify(XSelectionEvent *sev) {
   drawbars();
 }
 
-static void selectionnotify(XEvent *e) {
+void WM::selectionnotify(XEvent *e) {
   XSelectionEvent *sev = &e->xselection;
   if (sev->requestor == deskwin && sev->selection == xdndatom[XdndSelectionAtom]) {
     desktop_xdnd_selection_notify(sev);
@@ -11666,7 +12901,7 @@ static void selectionnotify(XEvent *e) {
 
 /* }}} desktop icons */
 
-static void lua_register_mwm_api(lua_State *L) {
+void WM::lua_register_mwm_api(lua_State *L) {
   lua_pushcfunction(L, lua_print_to_client);
   lua_setglobal(L, "print");
   lua_newtable(L);
@@ -11735,7 +12970,7 @@ static void lua_register_mwm_api(lua_State *L) {
   lua_setglobal(L, "focus_workspace");
 }
 
-static int load_config_from_lua(void) {
+int WM::load_config_from_lua(void) {
   char config_path[PATH_MAX];
 
   if (command_lua) {
@@ -11747,6 +12982,14 @@ static int load_config_from_lua(void) {
     fprintf(stderr, "mwm: failed to initialize Lua state\n");
     return -1;
   }
+
+  /* Lua 5.2 predates lua_getextraspace() (5.3+), so the registry is the
+   * portable way to stash the one WM instance where every lua_mwm_*
+   * C function -- which must keep the bare int(*)(lua_State*) signature
+   * the Lua C API requires, so it can't be a WM member -- can get it back
+   * via lua_wm(L). See lua_wm()'s own comment. */
+  lua_pushlightuserdata(command_lua, this);
+  lua_setfield(command_lua, LUA_REGISTRYINDEX, "mwm_wm_instance");
 
   luaL_openlibs(command_lua);
   lua_register_mwm_api(command_lua);
@@ -11763,14 +13006,14 @@ static int load_config_from_lua(void) {
   return 0;
 }
 
-static int load_theme_from_lua(void) {
+int WM::load_theme_from_lua(void) {
   if (command_lua) {
     return 0;
   }
   return load_config_from_lua();
 }
 
-static int wm_eval_lua_buffer(const char *chunk, size_t len, int fd) {
+int WM::wm_eval_lua_buffer(const char *chunk, size_t len, int fd) {
   int status;
   int top;
   int i;
@@ -11813,7 +13056,7 @@ static int wm_eval_lua_buffer(const char *chunk, size_t len, int fd) {
   return 0;
 }
 
-static int wm_command_handle_client(int fd) {
+int WM::wm_command_handle_client(int fd) {
   char *buffer = NULL;
   size_t len = 0;
   size_t cap = 0;
@@ -11848,14 +13091,21 @@ static int wm_command_handle_client(int fd) {
   return rc;
 }
 
-static int wm_command_server_init(void) {
+int WM::wm_command_server_init(void) {
   struct sockaddr_un addr;
 
   get_workspace_socket_path(wm_socket_path, sizeof(wm_socket_path));
   if (wm_socket_path[0] == '\0') {
     return -1;
   }
-  wm_command_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+  /* SOCK_CLOEXEC so every child mwm forks (spawn(), run_capture_argv(),
+   * run_detached_shell(), wifi_job_start(), ...) doesn't inherit the
+   * listening socket -- without it, e.g. a slow `mwm.exec()` shell command
+   * running via a grandchild process (a "sleep" a killed `sh -c` left
+   * behind) can hold a duplicate of the fd open indefinitely. Paired with
+   * the accept4() SOCK_CLOEXEC below for the same reason on the
+   * per-connection socket. */
+  wm_command_fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
   if (wm_command_fd < 0) {
     return -1;
   }
@@ -11872,7 +13122,7 @@ static int wm_command_server_init(void) {
   return 0;
 }
 
-static void wm_command_server_shutdown(void) {
+void WM::wm_command_server_shutdown(void) {
   if (wm_command_fd >= 0) {
     close(wm_command_fd);
     wm_command_fd = -1;
@@ -11889,7 +13139,7 @@ static void wm_command_server_shutdown(void) {
  * Cleanup function to free all allocated resources
  * and restore the state of the X server.
  */
-void cleanup(void) {
+void WM::cleanup(void) {
   Arg a = {.ull = ~0ULL};
   Layout foo = {"", NULL, -1};
   Monitor *m;
@@ -11922,6 +13172,14 @@ void cleanup(void) {
   if (slider_popup_win != None) {
     XDestroyWindow(dpy, slider_popup_win);
     slider_popup_win = None;
+  }
+  if (info_popup_win != None) {
+    XDestroyWindow(dpy, info_popup_win);
+    info_popup_win = None;
+  }
+  if (bt_win != None) {
+    XDestroyWindow(dpy, bt_win);
+    bt_win = None;
   }
   if (notif_sidebar_win != None) {
     XDestroyWindow(dpy, notif_sidebar_win);
@@ -11976,7 +13234,7 @@ void cleanup(void) {
 // }}} void cleanup(void)
 
 // {{{ void cleanupmon(Monitor *mon)
-void cleanupmon(Monitor *mon) {
+void WM::cleanupmon(Monitor *mon) {
   XUnmapWindow(dpy, mon->barwin);
   XDestroyWindow(dpy, mon->barwin);
   if (mon->widgetbarwin) {
@@ -12001,7 +13259,7 @@ void cleanupmon(Monitor *mon) {
 // }}} void cleanupmon(Monitor *mon)
 
 // {{{ void clientmessage(XEvent *e)
-void clientmessage(XEvent *e) {
+void WM::clientmessage(XEvent *e) {
   Client *i;
   XClientMessageEvent *cme = &e->xclient;
   Client *c = wintoclient(cme->window);
@@ -12074,7 +13332,7 @@ void clientmessage(XEvent *e) {
 // }}} void clientmessage(XEvent *e)
 
 // {{{ void configure(Client *c)
-void configure(Client *c) {
+void WM::configure(Client *c) {
   XConfigureEvent ce;
   ce.type = ConfigureNotify;
   ce.display = dpy;
@@ -12092,7 +13350,7 @@ void configure(Client *c) {
 // }}} void configure(Client *c)
 
 // {{{ void configurenotify(XEvent *e)
-void configurenotify(XEvent *e) {
+void WM::configurenotify(XEvent *e) {
   Monitor *m;
   Client *c;
   XConfigureEvent *ev = &e->xconfigure;
@@ -12154,7 +13412,7 @@ void configurenotify(XEvent *e) {
 // }}} void configurenotify(XEvent *e)
 
 // {{{ void configurerequest(XEvent *e)
-void configurerequest(XEvent *e) {
+void WM::configurerequest(XEvent *e) {
   Client *c;
   Client *i;
   Monitor *m;
@@ -12213,7 +13471,7 @@ void configurerequest(XEvent *e) {
 // }}} void configurerequest(XEvent *e)
 
 // {{{ Monitor *createmon(void)
-std::unique_ptr<Monitor> createmon(void) {
+std::unique_ptr<Monitor> WM::createmon(void) {
   auto m = std::make_unique<Monitor>();
   m->tagset[0] = m->tagset[1] =
       !workspaces.empty() ? workspace_mask_from_index(0) : 0;
@@ -12229,7 +13487,7 @@ std::unique_ptr<Monitor> createmon(void) {
 // }}} Monitor *createmon(void)
 
 // {{{ void destroynotify(XEvent *e)
-void destroynotify(XEvent *e) {
+void WM::destroynotify(XEvent *e) {
   Client *c;
   Client *i;
   XDestroyWindowEvent *ev = &e->xdestroywindow;
@@ -12243,7 +13501,7 @@ void destroynotify(XEvent *e) {
 // }}} void destroynotify(XEvent *e)
 
 // {{{ void detach(Client *c)
-void detach(Client *c) {
+void WM::detach(Client *c) {
   std::shared_ptr<Client> *tc;
   for (tc = &c->mon->clients; tc->get() && tc->get() != c; tc = &(*tc)->next) {
     ;
@@ -12253,7 +13511,7 @@ void detach(Client *c) {
 // }}} void detach(Client *c)
 
 // {{{ void detachstack(Client *c)
-void detachstack(Client *c) {
+void WM::detachstack(Client *c) {
   std::shared_ptr<Client> *tc;
   Client *t;
   for (tc = &c->mon->stack; tc->get() && tc->get() != c; tc = &(*tc)->snext) {
@@ -12270,7 +13528,7 @@ void detachstack(Client *c) {
 // }}} void detachstack(Client *c)
 
 // {{{ Monitor *dirtomon(int dir)
-Monitor *dirtomon(int dir) {
+Monitor *WM::dirtomon(int dir) {
   Monitor *m = NULL;
   if (dir > 0) {
     if (!(m = selmon->next.get())) {
@@ -12296,19 +13554,19 @@ Monitor *dirtomon(int dir) {
  * highlight state. Used to segment the widget bar's dense row of icons
  * (twenty-odd of them, by now) and to give both bars a defined edge against
  * the desktop instead of just ending in flat color. */
-void draw_vdivider(int x, int y, int h) {
+void WM::draw_vdivider(int x, int y, int h) {
   XSetForeground(dpy, drw->gc, scheme[SchemeNorm][ColBorder].pixel);
   XFillRectangle(dpy, drw->drawable, drw->gc, x, y, 1, h);
 }
 
-void draw_hdivider(int x, int y, int w) {
+void WM::draw_hdivider(int x, int y, int w) {
   XSetForeground(dpy, drw->gc, scheme[SchemeNorm][ColBorder].pixel);
   XFillRectangle(dpy, drw->drawable, drw->gc, x, y, w, 1);
 }
 // }}} bar dividers
 
 // {{{ void drawbar(Monitor *m)
-void drawbar(Monitor *m) {
+void WM::drawbar(Monitor *m) {
   int x, w, tw = 0;
   int boxs = drw->fonts->h / 9;
   int boxw = drw->fonts->h / 6 + 2;
@@ -12390,19 +13648,12 @@ void drawbar(Monitor *m) {
       center_text = prompt_display;
     } else if (m == selmon && command_prompt_feedback[0] != '\0') {
       center_text = command_prompt_feedback;
-    } else if (m->sel) {
-      center_text = m->sel->name;
     }
     if (center_text) {
       drw_setscheme(drw, scheme[m == selmon ? SchemeSel : SchemeNorm]);
       drw_text(drw, x, 0, w, bh, lrpad / 2, center_text, 0);
-      if (m->sel && !command_prompt_active && center_text == m->sel->name &&
-          m->sel->isfloating) {
-        drw_rect(drw, x + boxs, boxs, boxw, boxw, m->sel->isfixed, 0);
-      }
     } else {
-      drw_setscheme(drw, scheme[SchemeNorm]);
-      drw_rect(drw, x, 0, w, bh, 1, 1);
+      drawtasklist(m, x, w, boxs, boxw);
     }
   }
   /* Both edges, not just whichever touches the desktop -- m->topbar can
@@ -12416,8 +13667,55 @@ void drawbar(Monitor *m) {
 }
 // }}} void drawbar(Monitor *m)
 
+// {{{ void drawtasklist(Monitor *m, int x, int w, int boxs, int boxw)
+/* Center section of the top bar: every visible client on m's current
+ * workspace, client-list order, name only -- the active one (m->sel) drawn
+ * with SchemeSel, everything else SchemeNorm, so the bar doubles as a
+ * lightweight taskbar instead of only ever showing the one active title.
+ * Stops drawing once it runs out of the [x, x+w) span rather than
+ * overlapping the status/tray/clock section to its right; leftover space
+ * (including "no visible clients") is filled with plain background, same
+ * as the old single-title code's fallback.
+ *
+ * buttonpress() (ClkWinTitle) replays this exact same left-to-right walk
+ * over m->clients to figure out which client a click landed on, rather
+ * than this function recording a hit-test table -- matching how the tag
+ * slots just above it are already hit-tested by replay instead of a
+ * stored layout. */
+void WM::drawtasklist(Monitor *m, int x, int w, int boxs, int boxw) {
+  int limit = x + w;
+  int first = 1;
+  Client *c;
+
+  for (c = m->clients.get(); c && x < limit; c = c->next.get()) {
+    int cw;
+    if (!ISVISIBLE(c)) {
+      continue;
+    }
+    if (!first) {
+      draw_vdivider(x, bh / 4, bh - bh / 2);
+    }
+    first = 0;
+    cw = (int)TEXTW(c->name);
+    if (x + cw > limit) {
+      cw = limit - x;
+    }
+    drw_setscheme(drw, scheme[c == m->sel ? SchemeSel : SchemeNorm]);
+    drw_text(drw, x, 0, cw, bh, lrpad / 2, c->name, 0);
+    if (c == m->sel && c->isfloating) {
+      drw_rect(drw, x + boxs, boxs, boxw, boxw, c->isfixed, 0);
+    }
+    x += cw;
+  }
+  if (x < limit) {
+    drw_setscheme(drw, scheme[SchemeNorm]);
+    drw_rect(drw, x, 0, limit - x, bh, 1, 1);
+  }
+}
+// }}} void drawtasklist(Monitor *m, int x, int w, int boxs, int boxw)
+
 // {{{ void drawwidgetbar(Monitor *m)
-void drawwidgetbar(Monitor *m) {
+void WM::drawwidgetbar(Monitor *m) {
   char text[WidgetCount][64];
   size_t i;
   size_t n = sizeof(widget_draw_order) / sizeof(widget_draw_order[0]);
@@ -12430,12 +13728,6 @@ void drawwidgetbar(Monitor *m) {
   drw_setscheme(drw, scheme[SchemeNorm]);
   drw_rect(drw, 0, 0, m->ww, bh, 1, 1);
 
-  launcher_btn_x = 0;
-  launcher_btn_w = (int)TEXTW(icon_launcher);
-  drw_setscheme(drw, scheme[project_visible ? SchemeSel : SchemeNorm]);
-  drw_text(drw, launcher_btn_x, 0, launcher_btn_w, bh, lrpad / 2, icon_launcher, 0);
-  draw_vdivider(launcher_btn_w, bh / 4, bh - bh / 2);
-
   widget_format_battery(text[WidgetBattery], sizeof(text[WidgetBattery]));
   widget_format_backlight(text[WidgetBacklight], sizeof(text[WidgetBacklight]));
   widget_format_volume(text[WidgetVolume], sizeof(text[WidgetVolume]));
@@ -12443,7 +13735,6 @@ void drawwidgetbar(Monitor *m) {
   widget_format_media(text[WidgetMedia], sizeof(text[WidgetMedia]));
   widget_format_theme(text[WidgetTheme], sizeof(text[WidgetTheme]));
   widget_format_git(text[WidgetGit], sizeof(text[WidgetGit]));
-  widget_format_projects(text[WidgetProjects], sizeof(text[WidgetProjects]));
   widget_format_load(text[WidgetLoad], sizeof(text[WidgetLoad]));
   widget_format_cpu(text[WidgetCpu], sizeof(text[WidgetCpu]));
   widget_format_mem(text[WidgetMem], sizeof(text[WidgetMem]));
@@ -12476,7 +13767,6 @@ void drawwidgetbar(Monitor *m) {
                     (id == WidgetMic && mic_muted) ||
                     (id == WidgetMedia && strcmp(media_status, "Playing") == 0) ||
                     (id == WidgetGit && git_dirty) ||
-                    (id == WidgetProjects && project_visible) ||
                     (id == WidgetLoad && load_avg1 >= (double)widget_ncpu()) ||
                     (id == WidgetWifi && wifi_blocked) ||
                     (id == WidgetBluetooth && bt_blocked);
@@ -12526,17 +13816,17 @@ void drawwidgetbar(Monitor *m) {
 // }}} void drawwidgetbar(Monitor *m)
 
 // {{{ void drawleftbar(Monitor *m)
-/* App dock: Firefox, then a terminal, stacked top-down in vbarw-square
- * cells -- same fixed-cell/lpad-0 convention project_draw() and friends use
- * for their own bh-square icon buttons (e.g. the close "x" next to a saved
- * project), rather than the auto-sized-to-text width normal bar widgets
- * use. */
+/* App dock: Firefox, a terminal, then Inkscape/GIMP/LibreOffice/VS Code/
+ * Emacs, stacked top-down in vbarw-square cells -- same fixed-cell/lpad-0
+ * convention project_draw() and friends use for their own bh-square icon
+ * buttons (e.g. the close "x" next to a saved project), rather than the
+ * auto-sized-to-text width normal bar widgets use. */
 /* Centers a dock icon horizontally in its vbarw-wide cell. setup() already
  * makes sure vbarw is at least as wide as the widest dock icon plus margin
  * (see the dock_icon_widths pass there), so glyphw <= vbarw here in the
  * normal case; the clamp is just a defensive floor if some future icon
  * turns out wider than that margin anticipated. */
-static int dockbar_icon_lpad(const char *icon) {
+int WM::dockbar_icon_lpad(const char *icon) {
   int glyphw = (int)drw_fontset_getwidth(drw, icon);
   int lpad = (vbarw - glyphw) / 2;
   return lpad > 0 ? lpad : 0;
@@ -12546,8 +13836,10 @@ static int dockbar_icon_lpad(const char *icon) {
  * just the space between the two horizontal bars, so it can also draw the
  * top-left and bottom-left corner buttons that sit in the bh-tall strips
  * the top/bottom bars leave empty (they're inset by vbarw on each side). */
-void drawleftbar(Monitor *m) {
-  static const char *const icons[] = {icon_firefox, icon_terminal};
+void WM::drawleftbar(Monitor *m) {
+  static const char *const icons[] = {icon_firefox,     icon_terminal, icon_inkscape,
+                                       icon_gimp,        icon_libreoffice,
+                                       icon_vscode,      icon_emacs};
   const char *os_icon = os_logo_glyph();
   size_t i;
 
@@ -12591,7 +13883,7 @@ void drawleftbar(Monitor *m) {
  * narrow. */
 /* rightbarwin now spans the full monitor height (m->my..m->my+m->mh) for
  * the same reason leftbarwin does -- see the comment on drawleftbar(). */
-void drawrightbar(Monitor *m) {
+void WM::drawrightbar(Monitor *m) {
   struct {
     const char *icon;
     int highlighted;
@@ -12644,7 +13936,7 @@ void drawrightbar(Monitor *m) {
  * (vbarw-tall cells, top-down), so hit-testing is just ev->y / vbarw --
  * this is that shared lookup, returning -1 past the last row. Callers pass
  * ev->y already relative to the bottom of the top corner cell (y - bh). */
-static int dockbar_row_at(int y, size_t nrows) {
+int WM::dockbar_row_at(int y, size_t nrows) {
   int row = y / vbarw;
   if (row < 0 || (size_t)row >= nrows) {
     return -1;
@@ -12652,7 +13944,7 @@ static int dockbar_row_at(int y, size_t nrows) {
   return row;
 }
 
-int leftbar_handle_button(Monitor *m, XButtonPressedEvent *ev) {
+int WM::leftbar_handle_button(Monitor *m, XButtonPressedEvent *ev) {
   Arg a = {0};
   int row;
 
@@ -12673,18 +13965,21 @@ int leftbar_handle_button(Monitor *m, XButtonPressedEvent *ev) {
   if (ev->button != Button1) {
     return 1;
   }
-  row = dockbar_row_at(ev->y - bh, 2);
-  if (row == 0) {
-    a.v = firefoxcmd;
-    spawn(&a);
-  } else if (row == 1) {
-    a.v = termcmd;
-    spawn(&a);
+  /* Same top-down order as drawleftbar()'s icons[]. */
+  {
+    static const char *const *const dock_cmds[] = {firefoxcmd,     termcmd,     inkscapecmd,
+                                                     gimpcmd,        libreofficecmd,
+                                                     vscodecmd,      emacscmd};
+    row = dockbar_row_at(ev->y - bh, LENGTH(dock_cmds));
+    if (row >= 0) {
+      a.v = dock_cmds[row];
+      spawn(&a);
+    }
   }
   return 1;
 }
 
-int rightbar_handle_button(Monitor *m, XButtonPressedEvent *ev) {
+int WM::rightbar_handle_button(Monitor *m, XButtonPressedEvent *ev) {
   Arg a;
   int row;
 
@@ -12725,7 +14020,7 @@ int rightbar_handle_button(Monitor *m, XButtonPressedEvent *ev) {
 }
 
 // {{{ void drawbars(void)
-void drawbars(void) {
+void WM::drawbars(void) {
   Monitor *m;
   for (m = mons.get(); m; m = m->next.get()) {
     drawbar(m);
@@ -12734,11 +14029,13 @@ void drawbars(void) {
     drawrightbar(m);
   }
   draw_slider_popup();
+  draw_info_popup();
+  bt_popup_draw();
 }
 // }}} void drawbars(void)
 
 // {{{ void enternotify(XEvent *e)
-void enternotify(XEvent *e) {
+void WM::enternotify(XEvent *e) {
   Client *c;
   Monitor *m;
   XCrossingEvent *ev = &e->xcrossing;
@@ -12759,7 +14056,7 @@ void enternotify(XEvent *e) {
 // }}} void enternotify(XEvent *e)
 
 // {{{ void expose(XEvent *e)
-void expose(XEvent *e) {
+void WM::expose(XEvent *e) {
   Monitor *m;
   XExposeEvent *ev = &e->xexpose;
   if (project_visible && ev->window == project_win) {
@@ -12784,6 +14081,14 @@ void expose(XEvent *e) {
   }
   if (slider_popup_visible && ev->window == slider_popup_win) {
     draw_slider_popup();
+    return;
+  }
+  if (info_popup_visible && ev->window == info_popup_win) {
+    draw_info_popup();
+    return;
+  }
+  if (bt_visible && ev->window == bt_win) {
+    bt_popup_draw();
     return;
   }
   if (notif_sidebar_win != None && ev->window == notif_sidebar_win) {
@@ -12813,7 +14118,7 @@ void expose(XEvent *e) {
 // }}} void expose(XEvent *e)
 
 // {{{ void focus(Client *c)
-void focus(Client *c) {
+void WM::focus(Client *c) {
   if (!c || !ISVISIBLE(c)) {
     for (c = selmon->stack.get(); c && !ISVISIBLE(c); c = c->snext.get()) {
       ;
@@ -12845,7 +14150,7 @@ void focus(Client *c) {
 
 // {{{ void focusin(XEvent *e)
 /* there are some broken focus acquiring clients needing extra handling */
-void focusin(XEvent *e) {
+void WM::focusin(XEvent *e) {
   XFocusChangeEvent *ev = &e->xfocus;
   if (selmon->sel && ev->window != selmon->sel->win) {
     setfocus(selmon->sel);
@@ -12854,7 +14159,7 @@ void focusin(XEvent *e) {
 // }}} void focusin(XEvent *e)
 
 // {{{ void focusmon(const Arg *arg)
-void focusmon(const Arg *arg) {
+void WM::focusmon(const Arg *arg) {
   Monitor *m;
   if (!mons->next) {
     return;
@@ -12869,7 +14174,7 @@ void focusmon(const Arg *arg) {
 // }}} void focusmon(const Arg *arg)
 
 // {{{ void focusstack(const Arg *arg)
-void focusstack(const Arg *arg) {
+void WM::focusstack(const Arg *arg) {
   Client *c = NULL, *i;
   if (!selmon->sel || (selmon->sel->isfullscreen && lockfullscreen)) {
     return;
@@ -12905,7 +14210,7 @@ void focusstack(const Arg *arg) {
 // }}} void focusstack(const Arg *arg)
 
 // {{{ void focusdir(const Arg *arg)
-void focusdir(const Arg *arg) {
+void WM::focusdir(const Arg *arg) {
   Client *best, *c, *sel;
   int selcx, selcy, cx, cy, primary, secondary;
   long bestscore, score;
@@ -12969,7 +14274,7 @@ void focusdir(const Arg *arg) {
 // }}} void focusdir(const Arg *arg)
 
 // {{{ Atom getatomprop(Client *c, Atom prop)
-Atom getatomprop(Client *c, Atom prop) {
+Atom WM::getatomprop(Client *c, Atom prop) {
   int di;
   unsigned long dl;
   unsigned char *p = NULL;
@@ -12985,7 +14290,7 @@ Atom getatomprop(Client *c, Atom prop) {
 // }}} Atom getatomprop(Client *c, Atom prop)
 
 // {{{ unsigned int getsystraywidth(void)
-unsigned int getsystraywidth(void) {
+unsigned int WM::getsystraywidth(void) {
   unsigned int width = 0;
   Client *i;
 
@@ -13000,7 +14305,7 @@ unsigned int getsystraywidth(void) {
 // }}} unsigned int getsystraywidth(void)
 
 // {{{ int getrootptr(int *x, int *y)
-int getrootptr(int *x, int *y) {
+int WM::getrootptr(int *x, int *y) {
   int di;
   unsigned int dui;
   Window dummy;
@@ -13009,7 +14314,7 @@ int getrootptr(int *x, int *y) {
 // }}} int getrootptr(int *x, int *y)
 
 // {{{ long getstate(Window w)
-long getstate(Window w) {
+long WM::getstate(Window w) {
   int format;
   long result = -1;
   unsigned char *p = NULL;
@@ -13029,7 +14334,7 @@ long getstate(Window w) {
 // }}} long getstate(Window w)
 
 // {{{ int gettextprop(Window w, Atom atom, char *text, unsigned int size)
-int gettextprop(Window w, Atom atom, char *text, unsigned int size) {
+int WM::gettextprop(Window w, Atom atom, char *text, unsigned int size) {
   char **list = NULL;
   int n;
   XTextProperty name;
@@ -13054,7 +14359,7 @@ int gettextprop(Window w, Atom atom, char *text, unsigned int size) {
 // }}} int gettextprop(Window w, Atom atom, char *text, unsigned int size)
 
 // {{{ void grabbuttons(Client *c, int focused)
-void grabbuttons(Client *c, int focused) {
+void WM::grabbuttons(Client *c, int focused) {
   updatenumlockmask();
   {
     unsigned int i, j;
@@ -13087,7 +14392,7 @@ void grabbuttons(Client *c, int focused) {
 // }}} void grabbuttons(Client *c, int focused)
 
 // {{{ void grabkeys(void)
-void grabkeys(void) {
+void WM::grabkeys(void) {
   updatenumlockmask();
   {
     unsigned int i, j, k;
@@ -13126,13 +14431,13 @@ void grabkeys(void) {
 // }}} void grabkeys(void)
 
 // {{{ void incnmaster(const Arg *arg)
-void incnmaster(const Arg *arg) {
+void WM::incnmaster(const Arg *arg) {
   selmon->nmaster = MAX(selmon->nmaster + arg->i, 0);
   arrange(selmon);
 }
 // }}} void incnmaster(const Arg *arg)
 
-static void command_prompt_stop(void) {
+void WM::command_prompt_stop(void) {
   command_prompt_active = 0;
   command_prompt_len = 0;
   command_prompt[0] = '\0';
@@ -13140,7 +14445,7 @@ static void command_prompt_stop(void) {
   drawbars();
 }
 
-static void command_prompt_submit(void) {
+void WM::command_prompt_submit(void) {
   char *newline;
 
   command_prompt_feedback[0] = '\0';
@@ -13158,7 +14463,7 @@ static void command_prompt_submit(void) {
   command_prompt_stop();
 }
 
-static int handle_command_prompt_keypress(XKeyEvent *ev) {
+int WM::handle_command_prompt_keypress(XKeyEvent *ev) {
   char buf[64];
   KeySym keysym = NoSymbol;
   int len = XLookupString(ev, buf, sizeof(buf), &keysym, NULL);
@@ -13210,7 +14515,7 @@ static int handle_command_prompt_keypress(XKeyEvent *ev) {
 // {{{ int isuniquegeom(XineramaScreenInfo *unique, size_t n,
 //                      XineramaScreenInfo *info)
 #ifdef XINERAMA
-static int isuniquegeom(XineramaScreenInfo *unique, size_t n,
+int WM::isuniquegeom(XineramaScreenInfo *unique, size_t n,
                         XineramaScreenInfo *info) {
   while (n--) {
     if (unique[n].x_org == info->x_org && unique[n].y_org == info->y_org &&
@@ -13224,7 +14529,7 @@ static int isuniquegeom(XineramaScreenInfo *unique, size_t n,
 // }}} int isuniquegeom()
 
 // {{{ void keypress(XEvent *e)
-void keypress(XEvent *e) {
+void WM::keypress(XEvent *e) {
   unsigned int i;
   KeySym keysym;
   XKeyEvent *ev;
@@ -13248,7 +14553,7 @@ void keypress(XEvent *e) {
   for (i = 0; i < LENGTH(keys); i++) {
     if (keysym == keys[i].keysym &&
         CLEANMASK(keys[i].mod) == CLEANMASK(ev->state) && keys[i].func) {
-      keys[i].func(&(keys[i].arg));
+      (this->*keys[i].func)(&(keys[i].arg));
     }
   }
   for (i = 0; i < lua_keys_len; i++) {
@@ -13261,7 +14566,7 @@ void keypress(XEvent *e) {
 // }}} void keypress(XEvent *e)
 
 // {{{ void killclient(const Arg *arg)
-void killclient(const Arg *arg) {
+void WM::killclient(const Arg *arg) {
   if (!selmon->sel) {
     return;
   }
@@ -13278,7 +14583,7 @@ void killclient(const Arg *arg) {
 // }}} void killclient(const Arg *arg)
 
 // {{{ void manage(Window w, XWindowAttributes *wa)
-void manage(Window w, XWindowAttributes *wa) {
+void WM::manage(Window w, XWindowAttributes *wa) {
   Client *c, *t = NULL;
   Window trans = None;
   XWindowChanges wc;
@@ -13351,7 +14656,7 @@ void manage(Window w, XWindowAttributes *wa) {
 // }}} void manage(Window w, XWindowAttributes *wa)
 
 // {{{ void mappingnotify(XEvent *e)
-void mappingnotify(XEvent *e) {
+void WM::mappingnotify(XEvent *e) {
   XMappingEvent *ev = &e->xmapping;
   XRefreshKeyboardMapping(ev);
   if (ev->request == MappingKeyboard) {
@@ -13361,7 +14666,7 @@ void mappingnotify(XEvent *e) {
 // }}} void mappingnotify(XEvent *e)
 
 // {{{ void maprequest(XEvent *e)
-void maprequest(XEvent *e) {
+void WM::maprequest(XEvent *e) {
   static XWindowAttributes wa;
   Client *i;
   XMapRequestEvent *ev = &e->xmaprequest;
@@ -13380,7 +14685,7 @@ void maprequest(XEvent *e) {
 // }}} void maprequest(XEvent *e)
 
 // {{{ void monocle(Monitor *m)
-void monocle(Monitor *m) {
+void WM::monocle(Monitor *m) {
   unsigned int n = 0;
   Client *c;
   for (c = m->clients.get(); c; c = c->next.get()) {
@@ -13389,7 +14694,7 @@ void monocle(Monitor *m) {
     }
   }
   if (n > 0) { /* override layout symbol */
-    snprintf(m->ltsymbol, sizeof m->ltsymbol, "[%d]", n);
+    snprintf(m->ltsymbol, sizeof m->ltsymbol, "[%u]", n);
   }
   for (c = nexttiled(m->clients.get()); c; c = nexttiled(c->next.get())) {
     resize_cell(c, m->wx, m->wy, m->ww, m->wh, 0);
@@ -13398,7 +14703,7 @@ void monocle(Monitor *m) {
 // }}} void monocle(Monitor *m)
 
 // {{{ void motionnotify(XEvent *e)
-void motionnotify(XEvent *e) {
+void WM::motionnotify(XEvent *e) {
   static Monitor *mon = NULL;
   Monitor *m;
   XMotionEvent *ev = &e->xmotion;
@@ -13418,7 +14723,7 @@ void motionnotify(XEvent *e) {
 // }}} void motionnotify(XEvent *e)
 
 // {{{ void movemouse(const Arg *arg)
-void movemouse(const Arg *arg) {
+void WM::movemouse(const Arg *arg) {
   int x, y, ocx, ocy, nx, ny;
   Client *c;
   Monitor *m;
@@ -13447,7 +14752,7 @@ void movemouse(const Arg *arg) {
     case ConfigureRequest:
     case Expose:
     case MapRequest:
-      handler[ev.type](&ev);
+      (this->*handler[ev.type])(&ev);
       break;
     case MotionNotify:
       if ((ev.xmotion.time - lasttime) <= (1000 / 60)) {
@@ -13486,7 +14791,7 @@ void movemouse(const Arg *arg) {
 // }}} void movemouse(const Arg *arg)
 
 // {{{ Client *nexttiled(Client *c)
-Client *nexttiled(Client *c) {
+Client *WM::nexttiled(Client *c) {
   for (; c && (c->isfloating || !ISVISIBLE(c)); c = c->next.get()) {
     ;
   }
@@ -13495,7 +14800,7 @@ Client *nexttiled(Client *c) {
 // }}} Client *nexttiled(Client *c)
 
 // {{{ void pop(Client *c)
-void pop(Client *c) {
+void WM::pop(Client *c) {
   detach(c);
   attach(c);
   focus(c);
@@ -13503,7 +14808,7 @@ void pop(Client *c) {
 }
 // }}} void pop(Client *c)
 
-void promptcommand(const Arg *arg) {
+void WM::promptcommand(const Arg *arg) {
   (void)arg;
   if (command_prompt_active) {
     command_prompt_stop();
@@ -13524,7 +14829,7 @@ void promptcommand(const Arg *arg) {
 }
 
 // {{{ void propertynotify(XEvent *e)
-void propertynotify(XEvent *e) {
+void WM::propertynotify(XEvent *e) {
   Client *c;
   Client *i;
   Window trans;
@@ -13570,11 +14875,11 @@ void propertynotify(XEvent *e) {
 // }}} void propertynotify(XEvent *e)
 
 // {{{ void quit(const Arg *arg)
-void quit(const Arg *arg) { running = 0; }
+void WM::quit(const Arg *arg) { running = 0; }
 // }}} void quit(const Arg *arg)
 
 // {{{ Monitor *recttomon(int x, int y, int w, int h)
-Monitor *recttomon(int x, int y, int w, int h) {
+Monitor *WM::recttomon(int x, int y, int w, int h) {
   Monitor *m, *r = selmon;
   int a, area = 0;
   for (m = mons.get(); m; m = m->next.get()) {
@@ -13588,7 +14893,7 @@ Monitor *recttomon(int x, int y, int w, int h) {
 // }}} Monitor *recttomon(int x, int y, int w, int h)
 
 // {{{ void removesystrayicon(Client *i)
-void removesystrayicon(Client *i) {
+void WM::removesystrayicon(Client *i) {
   std::shared_ptr<Client> *ii;
 
   if (!systray || !i) {
@@ -13604,7 +14909,7 @@ void removesystrayicon(Client *i) {
 // }}} void removesystrayicon(Client *i)
 
 // {{{ void resize(Client *c, int x, int y, int w, int h, int interact)
-void resize(Client *c, int x, int y, int w, int h, int interact) {
+void WM::resize(Client *c, int x, int y, int w, int h, int interact) {
   if (applysizehints(c, &x, &y, &w, &h, interact)) {
     resizeclient(c, x, y, w, h);
   }
@@ -13625,7 +14930,7 @@ void resize(Client *c, int x, int y, int w, int h, int interact) {
  * gap-shrinking a client here would otherwise make consecutive cells in
  * the same column/row eat each other's gap, since HEIGHT(c) would already
  * reflect the smaller, gapped size. */
-void resize_cell(Client *c, int x, int y, int w, int h, int interact) {
+void WM::resize_cell(Client *c, int x, int y, int w, int h, int interact) {
   int inset = gappx;
   int cw, ch;
 
@@ -13651,7 +14956,7 @@ void resize_cell(Client *c, int x, int y, int w, int h, int interact) {
 // }}} void resize_cell(Client *c, int x, int y, int w, int h, int interact)
 
 // {{{ void resizebydir(const Arg *arg)
-void resizebydir(const Arg *arg) {
+void WM::resizebydir(const Arg *arg) {
   Client *c;
   unsigned int i, n, column_count;
   int step, w, h;
@@ -13664,7 +14969,7 @@ void resizebydir(const Arg *arg) {
   }
 
   if (!c->isfloating && selmon->lt[selmon->sellt]->arrange) {
-    if (selmon->lt[selmon->sellt]->arrange != tile) {
+    if (selmon->lt[selmon->sellt]->arrange != &WM::tile) {
       return;
     }
 
@@ -13745,7 +15050,7 @@ void resizebydir(const Arg *arg) {
 // }}} void resizebydir(const Arg *arg)
 
 // {{{ void resizeclient(Client *c, int x, int y, int w, int h)
-void resizeclient(Client *c, int x, int y, int w, int h) {
+void WM::resizeclient(Client *c, int x, int y, int w, int h) {
   XWindowChanges wc;
   c->oldx = c->x;
   c->x = wc.x = x;
@@ -13764,7 +15069,7 @@ void resizeclient(Client *c, int x, int y, int w, int h) {
 // }}} void resizeclient(Client *c, int x, int y, int w, int h)
 
 // {{{ void resizemouse(const Arg *arg)
-void resizemouse(const Arg *arg) {
+void WM::resizemouse(const Arg *arg) {
   int ocx, ocy, nw, nh;
   Client *c;
   Monitor *m;
@@ -13792,7 +15097,7 @@ void resizemouse(const Arg *arg) {
     case ConfigureRequest:
     case Expose:
     case MapRequest:
-      handler[ev.type](&ev);
+      (this->*handler[ev.type])(&ev);
       break;
     case MotionNotify:
       if ((ev.xmotion.time - lasttime) <= (1000 / 60)) {
@@ -13831,7 +15136,7 @@ void resizemouse(const Arg *arg) {
 // }}} void resizemouse(const Arg *arg)
 
 // {{{ void reloadconfig(const Arg *arg)
-void reloadconfig(const Arg *arg) {
+void WM::reloadconfig(const Arg *arg) {
   Monitor *m;
   MonLayoutSnapshot *layout_snap;
   size_t layout_snap_count;
@@ -13874,14 +15179,14 @@ void reloadconfig(const Arg *arg) {
 // }}} void reloadconfig(const Arg *arg)
 
 // {{{ void restartwm(const Arg *arg)
-void restartwm(const Arg *arg) {
+void WM::restartwm(const Arg *arg) {
   restart_requested = 1;
   running = 0;
 }
 // }}} void restartwm(const Arg *arg)
 
 // {{{ void restack(Monitor *m)
-void restack(Monitor *m) {
+void WM::restack(Monitor *m) {
   Client *c;
   XEvent ev;
   XWindowChanges wc;
@@ -13918,7 +15223,7 @@ void restack(Monitor *m) {
  *
  * Handles events from the X server.
  */
-void run(void) {
+void WM::run(void) {
   int xfd;
   int maxfd;
   int dbus_fd;
@@ -13983,7 +15288,13 @@ void run(void) {
       break;
     }
     if (wm_command_fd >= 0 && FD_ISSET(wm_command_fd, &readfds)) {
-      int client_fd = accept(wm_command_fd, NULL, NULL);
+      /* SOCK_CLOEXEC: see the comment on wm_command_server_init()'s
+       * socket() call -- this is the half of the fix that actually
+       * matters day to day, since it's this per-connection fd (not the
+       * listening one) that a forked mwm.exec() grandchild would
+       * otherwise hold open, keeping mwm-cli's read() from ever seeing
+       * EOF until that unrelated child exits. */
+      int client_fd = accept4(wm_command_fd, NULL, NULL, SOCK_CLOEXEC);
       if (client_fd >= 0) {
         wm_command_handle_client(client_fd);
         close(client_fd);
@@ -13999,7 +15310,7 @@ void run(void) {
     while (XPending(dpy)) {
       XNextEvent(dpy, &ev);
       if (handler[ev.type]) {
-        handler[ev.type](&ev);
+        (this->*handler[ev.type])(&ev);
       }
     }
   }
@@ -14023,7 +15334,7 @@ void run(void) {
  * Windows that are already mapped (visible) or have the iconic state
  * (minimized) are managed.
  */
-void scan(void) {
+void WM::scan(void) {
   unsigned int i, num;
   Window d1, d2, *wins = NULL;
   XWindowAttributes wa;
@@ -14054,7 +15365,7 @@ void scan(void) {
 // }}} void scan(void)
 
 // {{{ void sendmon(Client *c, Monitor *m)
-void sendmon(Client *c, Monitor *m) {
+void WM::sendmon(Client *c, Monitor *m) {
   if (c->mon == m) {
     return;
   }
@@ -14080,7 +15391,7 @@ void sendmon(Client *c, Monitor *m) {
  * cleared by unmanage() -- this is belt-and-suspenders against any path
  * that might miss that, since a dangling Client* used here would be a
  * use-after-free. */
-int client_is_managed(Client *target) {
+int WM::client_is_managed(Client *target) {
   Monitor *m;
   Client *c;
 
@@ -14099,7 +15410,7 @@ int client_is_managed(Client *target) {
 
 /* Tags c onto the (never-viewed-by-default) scratchpad workspace, hiding
  * it without killing it. */
-void scratchpad_hide(Client *c) {
+void WM::scratchpad_hide(Client *c) {
   size_t idx = workspace_ensure(scratchpad_workspace);
   if (idx == SIZE_MAX) {
     return;
@@ -14114,7 +15425,7 @@ void scratchpad_hide(Client *c) {
  * reuse sendmon() -- that no-ops when c->mon already equals m, which is
  * exactly the common single-monitor case here (the client needs its tags
  * updated even when its monitor doesn't change). */
-void scratchpad_show(Client *c, Monitor *m) {
+void WM::scratchpad_show(Client *c, Monitor *m) {
   if (c->mon != m) {
     /* See sendmon()'s comment -- keepalive spans the detach/re-attach. */
     std::shared_ptr<Client> keepalive = c->shared_from_this();
@@ -14135,7 +15446,7 @@ void scratchpad_show(Client *c, Monitor *m) {
  * Floats it and gives it a reasonable default size/position the first
  * time, so it reappears as a centered overlay rather than joining
  * whatever tiling layout is active. */
-void scratchpad_set(const Arg *arg) {
+void WM::scratchpad_set(const Arg *arg) {
   Client *c;
   int w, h;
   (void)arg;
@@ -14157,7 +15468,7 @@ void scratchpad_set(const Arg *arg) {
  * workspace, hides it if it's already the one visible here. A no-op if
  * nothing's been designated yet, or the designated client has since been
  * closed. */
-void scratchpad_toggle(const Arg *arg) {
+void WM::scratchpad_toggle(const Arg *arg) {
   (void)arg;
   if (!selmon) {
     return;
@@ -14177,7 +15488,7 @@ void scratchpad_toggle(const Arg *arg) {
 // }}} scratchpad
 
 // {{{ void setclientstate(Client *c, long state)
-void setclientstate(Client *c, long state) {
+void WM::setclientstate(Client *c, long state) {
   long data[] = {state, None};
   XChangeProperty(dpy, c->win, wmatom[WMState], wmatom[WMState], 32,
                   PropModeReplace, (unsigned char *)data, 2);
@@ -14185,7 +15496,7 @@ void setclientstate(Client *c, long state) {
 // }}} void setclientstate(Client *c, long state)
 
 // {{{ int sendevent(Client *c, Atom proto)
-int sendevent(Client *c, Atom proto) {
+int WM::sendevent(Client *c, Atom proto) {
   int n;
   Atom *protocols;
   int exists = 0;
@@ -14210,7 +15521,7 @@ int sendevent(Client *c, Atom proto) {
 // }}} int sendevent(Client *c, Atom proto)
 
 // {{{ void setfocus(Client *c)
-void setfocus(Client *c) {
+void WM::setfocus(Client *c) {
   if (!c->neverfocus) {
     XSetInputFocus(dpy, c->win, RevertToPointerRoot, CurrentTime);
     XChangeProperty(dpy, root, netatom[NetActiveWindow], XA_WINDOW, 32,
@@ -14221,7 +15532,7 @@ void setfocus(Client *c) {
 // }}} void setfocus(Client *c)
 
 // {{{ void setfullscreen(Client *c, int fullscreen)
-void setfullscreen(Client *c, int fullscreen) {
+void WM::setfullscreen(Client *c, int fullscreen) {
   if (fullscreen && !c->isfullscreen) {
     XChangeProperty(dpy, c->win, netatom[NetWMState], XA_ATOM, 32,
                     PropModeReplace, (unsigned char *)&netatom[NetWMFullscreen],
@@ -14250,7 +15561,7 @@ void setfullscreen(Client *c, int fullscreen) {
 // }}} void setfullscreen(Client *c, int fullscreen)
 
 // {{{ void setlayout(const Arg *arg)
-void setlayout(const Arg *arg) {
+void WM::setlayout(const Arg *arg) {
   if (!arg || !arg->v || arg->v != selmon->lt[selmon->sellt]) {
     selmon->sellt ^= 1;
   }
@@ -14269,7 +15580,7 @@ void setlayout(const Arg *arg) {
 
 // {{{ void setmfact(const Arg *arg)
 /* arg > 1.0 will set mfact absolutely */
-void setmfact(const Arg *arg) {
+void WM::setmfact(const Arg *arg) {
   float f;
   if (!arg || !selmon->lt[selmon->sellt]->arrange) {
     return;
@@ -14284,7 +15595,7 @@ void setmfact(const Arg *arg) {
 // }}} void setmfact(const Arg *arg)
 
 // {{{ unsigned int tiledcount(Monitor *m)
-unsigned int tiledcount(Monitor *m) {
+unsigned int WM::tiledcount(Monitor *m) {
   unsigned int n;
   Client *c;
 
@@ -14296,7 +15607,7 @@ unsigned int tiledcount(Monitor *m) {
 // }}} unsigned int tiledcount(Monitor *m)
 
 // {{{ void setup(void)
-void setup(void) {
+void WM::setup(void) {
   XSetWindowAttributes wa;
   Atom utf8string;
   struct sigaction sa;
@@ -14334,8 +15645,9 @@ void setup(void) {
    * width -- widen the dock cells if the icons they show need more than
    * that to render without crowding the cell edge. */
   {
-    static const char *const dock_icon_widths[] = {icon_firefox, icon_terminal, icon_bell,
-                                                    icon_todo, icon_agents};
+    static const char *const dock_icon_widths[] = {
+        icon_firefox, icon_terminal, icon_inkscape, icon_gimp, icon_libreoffice,
+        icon_vscode,  icon_emacs,    icon_bell,     icon_todo, icon_agents};
     size_t di;
     for (di = 0; di < LENGTH(dock_icon_widths); di++) {
       int w = (int)drw_fontset_getwidth(drw, dock_icon_widths[di]) + (bh / 2);
@@ -14454,7 +15766,7 @@ void setup(void) {
 // }}} void setup(void)
 
 // {{{ void seturgent(Client *c, int urg)
-void seturgent(Client *c, int urg) {
+void WM::seturgent(Client *c, int urg) {
   XWMHints *wmh;
   c->isurgent = urg;
   if (!(wmh = XGetWMHints(dpy, c->win))) {
@@ -14467,7 +15779,7 @@ void seturgent(Client *c, int urg) {
 // }}} void seturgent(Client *c, int urg)
 
 // {{{ void showhide(Client *c)
-void showhide(Client *c) {
+void WM::showhide(Client *c) {
   if (!c) {
     return;
   }
@@ -14488,7 +15800,7 @@ void showhide(Client *c) {
 // }}} void showhide(Client *c)
 
 // {{{ void spawn(const Arg *arg)
-void spawn(const Arg *arg) {
+void WM::spawn(const Arg *arg) {
   struct sigaction sa;
   if (arg->v == dmenucmd) {
     dmenumon[0] = '0' + selmon->num;
@@ -14509,7 +15821,7 @@ void spawn(const Arg *arg) {
 // }}} void spawn(const Arg *arg)
 
 // {{{ void tag(const Arg *arg)
-void tag(const Arg *arg) {
+void WM::tag(const Arg *arg) {
   WorkspaceMask mask = arg->ull & get_full_workspace_mask();
   if (selmon->sel && mask) {
     selmon->sel->tags = mask;
@@ -14520,8 +15832,24 @@ void tag(const Arg *arg) {
 }
 // }}} void tag(const Arg *arg)
 
+// {{{ void tasklist_focus(const Arg *arg)
+/* ClkWinTitle, Button1: focus (and raise) whichever client's name segment
+ * in the top bar's tasklist was clicked -- see the ClkWinTitle branch in
+ * buttonpress() for how arg->v gets set to that client. NULL when the
+ * click landed past the last client, in drawtasklist()'s blank fill;
+ * nothing to focus there. */
+void WM::tasklist_focus(const Arg *arg) {
+  Client *c = (Client *)arg->v;
+  if (!c) {
+    return;
+  }
+  focus(c);
+  restack(selmon);
+}
+// }}} void tasklist_focus(const Arg *arg)
+
 // {{{ void tagmon(const Arg *arg)
-void tagmon(const Arg *arg) {
+void WM::tagmon(const Arg *arg) {
   if (!selmon->sel || !mons->next) {
     return;
   }
@@ -14530,7 +15858,7 @@ void tagmon(const Arg *arg) {
 // }}} void tagmon(const Arg *arg)
 
 // {{{ void tile(Monitor *m)
-void tile(Monitor *m) {
+void WM::tile(Monitor *m) {
   unsigned int i, n, h, mw, my, ty;
   float mfacts, sfacts, fact;
   Client *c;
@@ -14576,7 +15904,7 @@ void tile(Monitor *m) {
 // }}} void tile(Monitor *m)
 
 // {{{ void togglebar(const Arg *arg)
-void togglebar(const Arg *arg) {
+void WM::togglebar(const Arg *arg) {
   selmon->showbar = !selmon->showbar;
   updatebarpos(selmon);
   XMoveResizeWindow(dpy, selmon->barwin, selmon->wx, selmon->by, selmon->ww,
@@ -14593,7 +15921,7 @@ void togglebar(const Arg *arg) {
 // }}} void togglebar(const Arg *arg)
 
 // {{{ void togglefloating(const Arg *arg)
-void togglefloating(const Arg *arg) {
+void WM::togglefloating(const Arg *arg) {
   if (!selmon->sel) {
     return;
   }
@@ -14611,7 +15939,7 @@ void togglefloating(const Arg *arg) {
 // }}} void togglefloating(const Arg *arg)
 
 // {{{ void toggletag(const Arg *arg)
-void toggletag(const Arg *arg) {
+void WM::toggletag(const Arg *arg) {
   WorkspaceMask newtags;
   if (!selmon->sel) {
     return;
@@ -14627,7 +15955,7 @@ void toggletag(const Arg *arg) {
 // }}} void toggletag(const Arg *arg)
 
 // {{{ void toggleview(const Arg *arg)
-void toggleview(const Arg *arg) {
+void WM::toggleview(const Arg *arg) {
   WorkspaceMask newtagset =
       selmon->tagset[selmon->seltags] ^ (arg->ull & get_full_workspace_mask());
 
@@ -14644,7 +15972,7 @@ void toggleview(const Arg *arg) {
  * project_workspace_name(). Lazily created via workspace_ensure() the
  * first time it's actually navigated to or tagged, same as any other
  * workspace; nothing pre-creates all 9 up front. */
-void tagnth(const Arg *arg) {
+void WM::tagnth(const Arg *arg) {
   char name[300];
   size_t idx;
   Arg next = {0};
@@ -14661,7 +15989,7 @@ void tagnth(const Arg *arg) {
   tag(&next);
 }
 
-void toggletagnth(const Arg *arg) {
+void WM::toggletagnth(const Arg *arg) {
   char name[300];
   size_t idx;
   Arg next = {0};
@@ -14678,7 +16006,7 @@ void toggletagnth(const Arg *arg) {
   toggletag(&next);
 }
 
-void toggleviewnth(const Arg *arg) {
+void WM::toggleviewnth(const Arg *arg) {
   char name[300];
   size_t idx;
   Arg next = {0};
@@ -14693,7 +16021,7 @@ void toggleviewnth(const Arg *arg) {
 }
 
 // {{{  void unfocus(Client *c, int setfocus)
-void unfocus(Client *c, int setfocus) {
+void WM::unfocus(Client *c, int setfocus) {
   if (!c) {
     return;
   }
@@ -14707,7 +16035,7 @@ void unfocus(Client *c, int setfocus) {
 // }}}  void unfocus(Client *c, int setfocus)
 
 // {{{ void unmanage(Client *c, int destroyed)
-void unmanage(Client *c, int destroyed) {
+void WM::unmanage(Client *c, int destroyed) {
   Monitor *m = c->mon;
   XWindowChanges wc;
   /* detach()+detachstack() below drop both owning references; keepalive
@@ -14740,7 +16068,7 @@ void unmanage(Client *c, int destroyed) {
 // }}} void unmanage(Client *c, int destroyed)
 
 // {{{ void unmapnotify(XEvent *e)
-void unmapnotify(XEvent *e) {
+void WM::unmapnotify(XEvent *e) {
   Client *c;
   Client *i;
   XUnmapEvent *ev = &e->xunmap;
@@ -14760,7 +16088,7 @@ void unmapnotify(XEvent *e) {
 // }}} void unmapnotify(XEvent *e)
 
 // {{{ void updatebars(void)
-void updatebars(void) {
+void WM::updatebars(void) {
   Monitor *m;
   XSetWindowAttributes wa = {};
   XClassHint ch = {};
@@ -14857,7 +16185,7 @@ void updatebars(void) {
 // }}} void updatebars(void)
 
 // {{{ void updatebarpos(Monitor *m)
-void updatebarpos(Monitor *m) {
+void WM::updatebarpos(Monitor *m) {
   m->wy = m->my;
   m->wh = m->mh;
   m->wx = m->mx;
@@ -14886,7 +16214,7 @@ void updatebarpos(Monitor *m) {
 // }}} void updatebarpos(Monitor *m)
 
 // {{{ void updateclientlist(void)
-void updateclientlist() {
+void WM::updateclientlist() {
   Client *c;
   Monitor *m;
 
@@ -14901,7 +16229,7 @@ void updateclientlist() {
 // }}} void updateclientlist(void)
 
 // {{{ int updategeom(void)
-int updategeom(void) {
+int WM::updategeom(void) {
   int dirty = 0;
 
 #ifdef XINERAMA
@@ -15019,7 +16347,7 @@ int updategeom(void) {
 // }}} int updategeom(void)
 
 // {{{ void updatenumlockmask(void)
-void updatenumlockmask(void) {
+void WM::updatenumlockmask(void) {
   unsigned int i, j;
   XModifierKeymap *modmap;
 
@@ -15038,7 +16366,7 @@ void updatenumlockmask(void) {
 // }}} void updatenumlockmask(void)
 
 // {{{ void updatesystrayicongeom(Client *i, int w, int h)
-void updatesystrayicongeom(Client *i, int w, int h) {
+void WM::updatesystrayicongeom(Client *i, int w, int h) {
   if (!i) {
     return;
   }
@@ -15060,7 +16388,7 @@ void updatesystrayicongeom(Client *i, int w, int h) {
 // }}} void updatesystrayicongeom(Client *i, int w, int h)
 
 // {{{ void updatesystrayiconstate(Client *i)
-void updatesystrayiconstate(Client *i) {
+void WM::updatesystrayiconstate(Client *i) {
   int format;
   long flags = 0;
   int mapped = 1;
@@ -15088,7 +16416,7 @@ void updatesystrayiconstate(Client *i) {
 // }}} void updatesystrayiconstate(Client *i)
 
 // {{{ void updatesystray(void)
-void updatesystray(void) {
+void WM::updatesystray(void) {
   Client *i;
   unsigned int width, x;
   XWindowChanges wc;
@@ -15128,7 +16456,7 @@ void updatesystray(void) {
 // }}} void updatesystray(void)
 
 // {{{ void updatesizehints(Client *c)
-void updatesizehints(Client *c) {
+void WM::updatesizehints(Client *c) {
   long msize;
   XSizeHints size;
 
@@ -15178,7 +16506,7 @@ void updatesizehints(Client *c) {
 // }}} void updatesizehints(Client *c)
 
 // {{{ void updatestatus(void)
-void updatestatus(void) {
+void WM::updatestatus(void) {
   if (!gettextprop(root, XA_WM_NAME, stext, sizeof(stext))) {
     strcpy(stext, " ");
   }
@@ -15187,7 +16515,7 @@ void updatestatus(void) {
 // }}} void updatestatus(void)
 
 // {{{ void updatetitle(Client *c)
-void updatetitle(Client *c) {
+void WM::updatetitle(Client *c) {
   if (!gettextprop(c->win, netatom[NetWMName], c->name, sizeof c->name)) {
     gettextprop(c->win, XA_WM_NAME, c->name, sizeof c->name);
   }
@@ -15198,7 +16526,7 @@ void updatetitle(Client *c) {
 // }}} void updatetitle(Client *c)
 
 // {{{ void updatewindowtype(Client *c)
-void updatewindowtype(Client *c) {
+void WM::updatewindowtype(Client *c) {
   Atom state = getatomprop(c, netatom[NetWMState]);
   Atom wtype = getatomprop(c, netatom[NetWMWindowType]);
   if (state == netatom[NetWMFullscreen]) {
@@ -15211,7 +16539,7 @@ void updatewindowtype(Client *c) {
 // }}} void updatewindowtype(Client *c)
 
 // {{{ void updatewmhints(Client *c)
-void updatewmhints(Client *c) {
+void WM::updatewmhints(Client *c) {
   XWMHints *wmh;
   if ((wmh = XGetWMHints(dpy, c->win))) {
     if (c == selmon->sel && wmh->flags & XUrgencyHint) {
@@ -15231,19 +16559,19 @@ void updatewmhints(Client *c) {
 // }}} void updatewmhints(Client *c)
 
 // {{{ void view(const Arg *arg)
-void view(const Arg *arg) {
+void WM::view(const Arg *arg) {
   workspace_view_mask(selmon, arg->ull & get_full_workspace_mask());
 }
 // }}} void view(const Arg *arg)
 
-void viewnth(const Arg *arg) {
+void WM::viewnth(const Arg *arg) {
   char name[300];
   project_workspace_name(arg->i + 1, name, sizeof(name));
   focus_workspace_by_name(selmon, name);
 }
 
 // {{{ Client *wintoclient(Window w)
-Client *wintoclient(Window w) {
+Client *WM::wintoclient(Window w) {
   Client *c;
   Monitor *m;
   for (m = mons.get(); m; m = m->next.get()) {
@@ -15258,7 +16586,7 @@ Client *wintoclient(Window w) {
 // }}} Client *wintoclient(Window w)
 
 // {{{ Client *wintosystrayicon(Window w)
-Client *wintosystrayicon(Window w) {
+Client *WM::wintosystrayicon(Window w) {
   Client *i;
 
   if (!systray) {
@@ -15277,7 +16605,7 @@ Client *wintosystrayicon(Window w) {
 /*
  * Set the W
  */
-Monitor *wintomon(Window w) {
+Monitor *WM::wintomon(Window w) {
   int x, y;
   Client *c;
   Monitor *m;
@@ -15340,7 +16668,7 @@ int xerrorstart(Display *dpy, XErrorEvent *ee) {
 // }}} int xerrorstart(Display *dpy, XErrorEvent *ee)
 
 // {{{  void zoom(const Arg *arg)
-void zoom(const Arg *arg) {
+void WM::zoom(const Arg *arg) {
   Client *c = selmon->sel;
   if (!selmon->lt[selmon->sellt]->arrange || !c || c->isfloating) {
     return;
@@ -15355,20 +16683,21 @@ void zoom(const Arg *arg) {
 // }}} dwm
 
 int main(int argc, char *argv[]) {
-  saved_argv = argv;
-  checkargs(argc, argv);
-  checklocale();
-  checkx11();
-  checkotherwm();
-  setup();
-  scan();
-  run();
-  cleanup();
+  WM wm;
+  wm.saved_argv = argv;
+  wm.checkargs(argc, argv);
+  wm.checklocale();
+  wm.checkx11();
+  wm.checkotherwm();
+  wm.setup();
+  wm.scan();
+  wm.run();
+  wm.cleanup();
   dpy_owner.reset();
   dpy = nullptr;
-  if (restart_requested) {
-    execvp(saved_argv[0], saved_argv);
-    die("mwm: execvp '%s' failed:", saved_argv[0]);
+  if (wm.restart_requested) {
+    execvp(wm.saved_argv[0], wm.saved_argv);
+    die("mwm: execvp '%s' failed:", wm.saved_argv[0]);
   }
   return EXIT_SUCCESS;
 }
