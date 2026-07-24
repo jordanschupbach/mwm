@@ -1067,19 +1067,33 @@ enum SidebarAnim { SidebarAnimIdle, SidebarAnimOpening, SidebarAnimClosing };
  * screenful. */
 #define MAX_PICK_CANDIDATES (MAX_PROJECTS + 4096)
 
-enum PickResultKind { PickResultProject, PickResultApp, PickResultTheme };
+enum PickResultKind {
+  PickResultProject,
+  PickResultApp,
+  PickResultTheme,
+  PickResultWindow,
+  PickResultWallpaper,
+  PickResultSSHHost,
+  PickResultWorkspace
+};
 
 /* What the picker is scoped to for this invocation -- Combined is the
  * original "search everything" behavior (still reachable via Mod+o);
  * ProjectOnly/AppOnly restrict it to one kind, like a dedicated project
  * switcher or a rofi-style drun launcher; Theme lists the named color
- * themes below. All four share the same picker window, filtering, and
- * keyboard handling. */
+ * themes below. Window/Wallpaper/SSH/Workspace are later, single-scope
+ * additions in the same spirit -- fuzzy-jump to an open window, a wallpaper
+ * image, an SSH config Host entry, or a named workspace, respectively. All
+ * eight share the same picker window, filtering, and keyboard handling. */
 enum PickerMode {
   PickerModeCombined,
   PickerModeProjectOnly,
   PickerModeAppOnly,
-  PickerModeTheme
+  PickerModeTheme,
+  PickerModeWindow,
+  PickerModeWallpaper,
+  PickerModeSSH,
+  PickerModeWorkspace
 };
 
 typedef struct {
@@ -1442,6 +1456,9 @@ void active_project_menu_toggle(Monitor *m);
 void active_project_menu_draw(void);
 int active_project_menu_handle_button(XButtonPressedEvent *ev);
 int project_resolve_selected_path(char *out, size_t outsz);
+void window_candidates_scan(void);
+void wallpapers_scan(void);
+void ssh_hosts_scan(void);
 void project_launch(int with_agent);
 void project_filter(void);
 void project_ensure_sel_visible(void);
@@ -1867,6 +1884,9 @@ int agent_clear_x = 0, agent_clear_y = 0, agent_clear_w = 0, agent_clear_h = 0;
 unsigned int agent_last_jumped_id = 0;
 std::vector<LauncherApp> launcher_apps;
 std::vector<std::string> launcher_desktop_ids;
+std::vector<Client *> window_candidates;      /* PickerModeWindow, rescanned per open */
+std::vector<std::string> wallpapers;           /* PickerModeWallpaper, cached like launcher_apps */
+std::vector<std::string> ssh_hosts;            /* PickerModeSSH, rescanned per open */
 std::vector<std::string> projects;
 int projects_loaded = 0;
 char active_project_path[PATH_MAX] = "";
@@ -2023,7 +2043,7 @@ WidgetLayout widget_layout[WidgetCount];
 static inline const enum WidgetId widget_draw_order[] = {
     WidgetBattery, WidgetBacklight, WidgetVolume,    WidgetMic,   WidgetMedia,
     WidgetTheme,   WidgetGit,
-    WidgetLoad,    WidgetCpu,       WidgetMem,       WidgetDisk,    WidgetNet,
+    WidgetLoad,    WidgetCpu,       WidgetMem,       WidgetDisk,
     WidgetWifi,    WidgetBluetooth, WidgetKbLayout,
 };
 Window slider_popup_win = None;
@@ -2216,6 +2236,15 @@ static inline const Key keys[] = {
      * color_themes[] (also reachable by middle-clicking the theme widget). */
     {MODKEY | ShiftMask, XK_t, &WM::project_toggle_key, {.i = PickerModeTheme},
      "Open color theme picker"},
+    /* Four more single-scope pickers on the same shared window: fuzzy-jump
+     * to any open window regardless of workspace, browse and apply a
+     * wallpaper, ssh into a Host from ~/.ssh/config, or fuzzy-jump to any
+     * named workspace. */
+    {MODKEY, XK_w, &WM::project_toggle_key, {.i = PickerModeWindow}, "Open window switcher"},
+    {MODKEY | ShiftMask, XK_w, &WM::project_toggle_key, {.i = PickerModeWallpaper},
+     "Open wallpaper picker"},
+    {MODKEY, XK_e, &WM::project_toggle_key, {.i = PickerModeSSH}, "Open SSH host picker"},
+    {MODKEY, XK_v, &WM::project_toggle_key, {.i = PickerModeWorkspace}, "Open workspace picker"},
     /* Used to be setlayout({0})'s "toggle to the other layout" -- redundant
      * with Ctrl+Mod+space (cyclelayout) and Mod+t/f/m (pick one directly),
      * so it's free for the project picker instead. */
@@ -9094,6 +9123,96 @@ void WM::launcher_scan_apps(void) {
 
 /* {{{ project picker */
 
+/* Refreshes window_candidates[] from every monitor's client list -- called
+ * each time the window picker opens (see project_open()) so it always
+ * reflects whatever's actually on screen, across every workspace, not just
+ * the one currently in view. */
+void WM::window_candidates_scan(void) {
+  Monitor *mm;
+
+  window_candidates.clear();
+  for (mm = mons.get(); mm; mm = mm->next.get()) {
+    Client *c;
+    for (c = mm->clients.get(); c; c = c->next.get()) {
+      window_candidates.push_back(c);
+    }
+  }
+}
+
+/* Scans ~/Pictures/minimalistic-wallpaper-collection/images (the same
+ * directory random-wallpaper/random-dark/random-light already shuf(1)
+ * through) for image files. Cached like launcher_apps rather than rescanned
+ * on every open -- the wallpaper set rarely changes between picker uses. */
+void WM::wallpapers_scan(void) {
+  const char *home = getenv("HOME");
+  char dir_path[PATH_MAX];
+  DIR *dp;
+  struct dirent *de;
+
+  wallpapers.clear();
+  if (!home || !home[0]) {
+    return;
+  }
+  snprintf(dir_path, sizeof(dir_path), "%s/Pictures/minimalistic-wallpaper-collection/images",
+           home);
+  dp = opendir(dir_path);
+  if (!dp) {
+    return;
+  }
+  while ((de = readdir(dp)) != NULL) {
+    size_t len = strlen(de->d_name);
+    int is_image = (len > 4 && !strcasecmp(de->d_name + len - 4, ".jpg")) ||
+                   (len > 4 && !strcasecmp(de->d_name + len - 4, ".png")) ||
+                   (len > 5 && !strcasecmp(de->d_name + len - 5, ".jpeg"));
+    if (!is_image) {
+      continue;
+    }
+    wallpapers.push_back(std::string(dir_path) + "/" + de->d_name);
+  }
+  closedir(dp);
+  std::sort(wallpapers.begin(), wallpapers.end());
+}
+
+/* Parses `Host` entries out of ~/.ssh/config -- wildcard patterns (Host *,
+ * Host 10.0.*) are skipped since they're config-only stanzas, not something
+ * you'd actually want to ssh into. Re-parsed every time the picker opens
+ * (see project_open()), so config edits take effect immediately. */
+void WM::ssh_hosts_scan(void) {
+  const char *home = getenv("HOME");
+  char path[PATH_MAX];
+  char line[1024];
+  FILE *fp;
+
+  ssh_hosts.clear();
+  if (!home || !home[0]) {
+    return;
+  }
+  snprintf(path, sizeof(path), "%s/.ssh/config", home);
+  fp = fopen(path, "r");
+  if (!fp) {
+    return;
+  }
+  while (fgets(line, sizeof(line), fp)) {
+    char *trimmed = launcher_trim(line);
+    char *saveptr = NULL;
+    char *tok;
+    /* "Host" itself, not "HostName" or similar -- the char right after the
+     * keyword must be whitespace. */
+    if (strncasecmp(trimmed, "Host", 4) || !isspace((unsigned char)trimmed[4])) {
+      continue;
+    }
+    for (tok = strtok_r(trimmed + 4, " \t\r\n", &saveptr); tok;
+         tok = strtok_r(NULL, " \t\r\n", &saveptr)) {
+      if (!strpbrk(tok, "*?")) {
+        ssh_hosts.push_back(tok);
+      }
+    }
+  }
+  fclose(fp);
+  std::sort(ssh_hosts.begin(), ssh_hosts.end());
+  ssh_hosts.erase(std::unique(ssh_hosts.begin(), ssh_hosts.end()), ssh_hosts.end());
+}
+
 void WM::get_projects_state_path(char *buf, size_t size) {
   const char *xdg_data_home;
   const char *home;
@@ -9671,6 +9790,50 @@ void WM::project_launch(int with_agent) {
     return;
   }
 
+  if (project_filtered_len > 0 && project_filtered[project_sel].kind == PickResultWindow) {
+    Client *c = window_candidates[project_filtered[project_sel].index];
+    Monitor *cm = c->mon ? c->mon : selmon;
+    const char *wsname = workspace_name_from_mask(c->tags);
+    if (wsname) {
+      focus_workspace_by_name(cm, wsname);
+    }
+    focus(c);
+    restack(cm);
+    project_close();
+    return;
+  }
+
+  if (project_filtered_len > 0 && project_filtered[project_sel].kind == PickResultWallpaper) {
+    const char *argv_wal[4];
+    argv_wal[0] = "wal";
+    argv_wal[1] = "-i";
+    argv_wal[2] = wallpapers[project_filtered[project_sel].index].c_str();
+    argv_wal[3] = NULL;
+    a.v = argv_wal;
+    spawn(&a);
+    project_close();
+    return;
+  }
+
+  if (project_filtered_len > 0 && project_filtered[project_sel].kind == PickResultSSHHost) {
+    const char *argv_ssh[4];
+    argv_ssh[0] = terminal_cmd;
+    argv_ssh[1] = "ssh";
+    argv_ssh[2] = ssh_hosts[project_filtered[project_sel].index].c_str();
+    argv_ssh[3] = NULL;
+    a.v = argv_ssh;
+    spawn(&a);
+    project_close();
+    return;
+  }
+
+  if (project_filtered_len > 0 && project_filtered[project_sel].kind == PickResultWorkspace) {
+    focus_workspace_by_name(project_mon ? project_mon : selmon,
+                             workspaces[project_filtered[project_sel].index].name.c_str());
+    project_close();
+    return;
+  }
+
   if (project_filtered_len > 0 && project_filtered[project_sel].kind == PickResultApp) {
     const char *argv_app[4];
     argv_app[0] = "/bin/sh";
@@ -9788,7 +9951,11 @@ static int project_match_cmp(const void *a, const void *b) {
  * case lists apps in their scanned/alphabetical order, since there's no
  * saved/MRU app list to fall back to); Theme is exclusive of both and only
  * ever matches color_themes[]. Combined is the only mode that runs both the
- * project and app loops together. */
+ * project and app loops together. Window/Wallpaper/SSH/Workspace are each
+ * exclusive single-kind modes too, following the same shape as Theme --
+ * they score whatever project_open() (for Wallpaper/SSH) or this function
+ * itself (for Window) most recently populated window_candidates[]/
+ * wallpapers[]/ssh_hosts[] with, or the global workspaces[] list. */
 void WM::project_filter(void) {
   static ProjectMatch all[MAX_PICK_CANDIDATES];
   size_t all_len = 0;
@@ -9807,6 +9974,70 @@ void WM::project_filter(void) {
         all[all_len].index = (int)i;
         all[all_len].score = score;
         all[all_len].kind = PickResultTheme;
+        all_len++;
+      }
+    }
+    if (project_query_len > 0) {
+      qsort(all, all_len, sizeof(ProjectMatch), project_match_cmp);
+    }
+  } else if (project_mode == PickerModeWindow) {
+    for (i = 0; i < window_candidates.size() && all_len < MAX_PICK_CANDIDATES; i++) {
+      int score = project_query_len > 0
+                      ? project_fuzzy_score(project_query, project_query_len,
+                                             window_candidates[i]->name)
+                      : 0;
+      if (score >= 0) {
+        all[all_len].index = (int)i;
+        all[all_len].score = score;
+        all[all_len].kind = PickResultWindow;
+        all_len++;
+      }
+    }
+    if (project_query_len > 0) {
+      qsort(all, all_len, sizeof(ProjectMatch), project_match_cmp);
+    }
+  } else if (project_mode == PickerModeWallpaper) {
+    for (i = 0; i < wallpapers.size() && all_len < MAX_PICK_CANDIDATES; i++) {
+      char base[256];
+      int score;
+      project_basename(wallpapers[i].c_str(), base, sizeof(base));
+      score = project_query_len > 0
+                  ? project_fuzzy_score(project_query, project_query_len, base)
+                  : 0;
+      if (score >= 0) {
+        all[all_len].index = (int)i;
+        all[all_len].score = score;
+        all[all_len].kind = PickResultWallpaper;
+        all_len++;
+      }
+    }
+    if (project_query_len > 0) {
+      qsort(all, all_len, sizeof(ProjectMatch), project_match_cmp);
+    }
+  } else if (project_mode == PickerModeSSH) {
+    for (i = 0; i < ssh_hosts.size() && all_len < MAX_PICK_CANDIDATES; i++) {
+      int score = project_query_len > 0 ? project_fuzzy_score(project_query, project_query_len,
+                                                                ssh_hosts[i].c_str())
+                                         : 0;
+      if (score >= 0) {
+        all[all_len].index = (int)i;
+        all[all_len].score = score;
+        all[all_len].kind = PickResultSSHHost;
+        all_len++;
+      }
+    }
+    if (project_query_len > 0) {
+      qsort(all, all_len, sizeof(ProjectMatch), project_match_cmp);
+    }
+  } else if (project_mode == PickerModeWorkspace) {
+    for (i = 0; i < workspaces.size() && all_len < MAX_PICK_CANDIDATES; i++) {
+      int score = project_query_len > 0 ? project_fuzzy_score(project_query, project_query_len,
+                                                                workspaces[i].name.c_str())
+                                         : 0;
+      if (score >= 0) {
+        all[all_len].index = (int)i;
+        all[all_len].score = score;
+        all[all_len].kind = PickResultWorkspace;
         all_len++;
       }
     }
@@ -9955,10 +10186,14 @@ void WM::project_draw(void) {
    * modes get their icon as a prefix so it's visually obvious which picker
    * came up, since Mod+space/Mod+p/Mod+o/Mod+Shift+t now open four
    * different ones. */
-  prefix = project_mode == PickerModeProjectOnly ? icon_projects
-           : project_mode == PickerModeAppOnly  ? icon_launcher
-           : project_mode == PickerModeTheme    ? icon_theme_auto
-                                                 : ">";
+  prefix = project_mode == PickerModeProjectOnly  ? icon_projects
+           : project_mode == PickerModeAppOnly    ? icon_launcher
+           : project_mode == PickerModeTheme      ? icon_theme_auto
+           : project_mode == PickerModeWindow     ? icon_layout_floating
+           : project_mode == PickerModeWallpaper  ? icon_desktop_image
+           : project_mode == PickerModeSSH        ? icon_terminal
+           : project_mode == PickerModeWorkspace  ? icon_layout_other
+                                                   : ">";
   /* "(sel/total)" only shows up once there's more than one screenful --
    * it's the only hint that Ctrl+N/P keep going past row 8 instead of
    * wrapping, so it matters most exactly when the list is long. */
@@ -9981,6 +10216,14 @@ void WM::project_draw(void) {
       hint = project_query_len > 0 ? "No matching applications" : "No applications found";
     } else if (project_mode == PickerModeTheme) {
       hint = "No matching themes";
+    } else if (project_mode == PickerModeWindow) {
+      hint = project_query_len > 0 ? "No matching windows" : "No open windows";
+    } else if (project_mode == PickerModeWallpaper) {
+      hint = wallpapers.empty() ? "No wallpapers found" : "No matching wallpapers";
+    } else if (project_mode == PickerModeSSH) {
+      hint = ssh_hosts.empty() ? "No hosts in ~/.ssh/config" : "No matching hosts";
+    } else if (project_mode == PickerModeWorkspace) {
+      hint = "No matching workspaces";
     } else if (project_mode == PickerModeProjectOnly) {
       hint = project_query_len > 0 ? "No matching projects -- Enter adds this path as one"
              : projects.empty()   ? "No projects yet -- type a path to add one"
@@ -10020,6 +10263,22 @@ void WM::project_draw(void) {
         snprintf(row_text, sizeof(row_text), "%s %s%s",
                  ct->is_light ? icon_theme_light : icon_theme_dark, ct->name,
                  match->index == active_color_theme ? " (active)" : "");
+      } else if (match->kind == PickResultWindow) {
+        Client *c = window_candidates[match->index];
+        const char *wsname = workspace_name_from_mask(c->tags);
+        snprintf(row_text, sizeof(row_text), "%s %s  %s", icon_layout_floating, c->name,
+                 wsname ? wsname : "");
+      } else if (match->kind == PickResultWallpaper) {
+        char base[256];
+        project_basename(wallpapers[match->index].c_str(), base, sizeof(base));
+        snprintf(row_text, sizeof(row_text), "%s %s", icon_desktop_image, base);
+      } else if (match->kind == PickResultSSHHost) {
+        snprintf(row_text, sizeof(row_text), "%s %s", icon_terminal,
+                 ssh_hosts[match->index].c_str());
+      } else if (match->kind == PickResultWorkspace) {
+        const char *name = workspaces[match->index].name.c_str();
+        snprintf(row_text, sizeof(row_text), "%s %s%s", icon_layout_other, name,
+                 cur_wsname && !strcmp(cur_wsname, name) ? "  (current)" : "");
       } else {
         const char *path = projects[match->index].c_str();
         char base[256];
@@ -10066,6 +10325,13 @@ void WM::project_open(Monitor *m, enum PickerMode mode) {
   projects_ensure_loaded();
   if (launcher_apps.empty()) {
     launcher_scan_apps();
+  }
+  if (mode == PickerModeWindow) {
+    window_candidates_scan();
+  } else if (mode == PickerModeWallpaper && wallpapers.empty()) {
+    wallpapers_scan();
+  } else if (mode == PickerModeSSH) {
+    ssh_hosts_scan();
   }
   if (project_win == None) {
     wa.override_redirect = True;
