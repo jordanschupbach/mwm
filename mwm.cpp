@@ -1095,7 +1095,8 @@ enum PickerMode {
   PickerModeWindow,
   PickerModeWallpaper,
   PickerModeSSH,
-  PickerModeWorkspace
+  PickerModeWorkspace,
+  PickerModeActiveProjectOnly
 };
 
 typedef struct {
@@ -2192,16 +2193,16 @@ static inline const char *emacs_nixcmd[] = {
     NULL};
 static inline const Key keys[] = {
     /* modifier                     key        function        argument */
-    /* One picker window (see "project picker" further down), four scopes:
+    /* One picker window (see "project picker" further down), several scopes:
      * Mod4+p is a rofi-style desktop-app launcher (XDG .desktop entries), Mod4+Shift+p
-     * jumps straight to a project, Mod4+o is the original combined search
-     * across both, and Mod4+Shift+t (further down, by the layout keys)
-     * browses color themes. */
+     * jumps straight to a project, Mod4+o narrows to projects that
+     * currently have clients on one of their workspaces, and Mod4+Shift+t
+     * (further down, by the layout keys) browses color themes. */
     {MODKEY, XK_p, &WM::project_toggle_key, {.i = PickerModeAppOnly}, "Open app launcher"},
     {MODKEY, XK_Return, &WM::terminal_in_active_project, {0},
      "Open a terminal in the active project"},
-    {MODKEY, XK_o, &WM::project_toggle_key, {.i = PickerModeCombined},
-     "Open combined project/app picker"},
+    {MODKEY, XK_o, &WM::project_toggle_key, {.i = PickerModeActiveProjectOnly},
+     "Open active project picker"},
     {MODKEY, XK_a, &WM::agent_jump_next_needs_input, {0}, "Jump to next agent needing input"},
     {MODKEY, XK_b, &WM::togglebar, {0}, "Toggle the bars"},
     {MODKEY, XK_r, &WM::reloadconfig, {0}, "Reload Lua config"},
@@ -9965,7 +9966,9 @@ void WM::project_filter(void) {
   static ProjectMatch all[MAX_PICK_CANDIDATES];
   size_t all_len = 0;
   size_t i;
-  int want_projects = project_mode == PickerModeCombined || project_mode == PickerModeProjectOnly;
+  int want_projects = project_mode == PickerModeCombined ||
+                       project_mode == PickerModeProjectOnly ||
+                       project_mode == PickerModeActiveProjectOnly;
   int want_apps = project_mode == PickerModeCombined || project_mode == PickerModeAppOnly;
 
   project_sel = 0;
@@ -10052,6 +10055,9 @@ void WM::project_filter(void) {
   } else if (project_query_len == 0) {
     if (want_projects) {
       for (i = 0; i < projects.size() && all_len < MAX_PICK_CANDIDATES; i++) {
+        if (project_mode == PickerModeActiveProjectOnly && !project_has_clients(i)) {
+          continue;
+        }
         all[all_len].index = (int)i;
         all[all_len].score = 0;
         all[all_len].kind = PickResultProject;
@@ -10068,7 +10074,11 @@ void WM::project_filter(void) {
   } else {
     if (want_projects) {
       for (i = 0; i < projects.size() && all_len < MAX_PICK_CANDIDATES; i++) {
-        int score = project_fuzzy_score(project_query, project_query_len, projects[i].c_str());
+        int score;
+        if (project_mode == PickerModeActiveProjectOnly && !project_has_clients(i)) {
+          continue;
+        }
+        score = project_fuzzy_score(project_query, project_query_len, projects[i].c_str());
         if (score >= 0) {
           all[all_len].index = (int)i;
           all[all_len].score = score;
@@ -10191,14 +10201,15 @@ void WM::project_draw(void) {
    * modes get their icon as a prefix so it's visually obvious which picker
    * came up, since Mod+Shift+p/Mod+p/Mod+o/Mod+Shift+t now open four
    * different ones. */
-  prefix = project_mode == PickerModeProjectOnly  ? icon_projects
-           : project_mode == PickerModeAppOnly    ? icon_launcher
-           : project_mode == PickerModeTheme      ? icon_theme_auto
-           : project_mode == PickerModeWindow     ? icon_layout_floating
-           : project_mode == PickerModeWallpaper  ? icon_desktop_image
-           : project_mode == PickerModeSSH        ? icon_terminal
-           : project_mode == PickerModeWorkspace  ? icon_layout_other
-                                                   : ">";
+  prefix = project_mode == PickerModeProjectOnly       ? icon_projects
+           : project_mode == PickerModeActiveProjectOnly ? icon_projects
+           : project_mode == PickerModeAppOnly          ? icon_launcher
+           : project_mode == PickerModeTheme            ? icon_theme_auto
+           : project_mode == PickerModeWindow           ? icon_layout_floating
+           : project_mode == PickerModeWallpaper        ? icon_desktop_image
+           : project_mode == PickerModeSSH              ? icon_terminal
+           : project_mode == PickerModeWorkspace        ? icon_layout_other
+                                                          : ">";
   /* "(sel/total)" only shows up once there's more than one screenful --
    * it's the only hint that Ctrl+N/P keep going past row 8 instead of
    * wrapping, so it matters most exactly when the list is long. */
@@ -10233,6 +10244,8 @@ void WM::project_draw(void) {
       hint = project_query_len > 0 ? "No matching projects -- Enter adds this path as one"
              : projects.empty()   ? "No projects yet -- type a path to add one"
                                    : "No projects";
+    } else if (project_mode == PickerModeActiveProjectOnly) {
+      hint = project_query_len > 0 ? "No matching active projects" : "No active projects";
     } else if (projects.empty() && project_query_len == 0) {
       hint = "No projects yet -- type a path to add one, or search for an app";
     } else if (project_query_len > 0) {
