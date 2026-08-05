@@ -2190,7 +2190,7 @@ static inline const char *emacs_nixcmd[] = {
 static inline const Key keys[] = {
     /* modifier                     key        function        argument */
     /* One picker window (see "project picker" further down), four scopes:
-     * Mod4+p is a rofi-style desktop-app launcher (XDG .desktop entries), Mod4+space
+     * Mod4+p is a rofi-style desktop-app launcher (XDG .desktop entries), Mod4+Shift+p
      * jumps straight to a project, Mod4+o is the original combined search
      * across both, and Mod4+Shift+t (further down, by the layout keys)
      * browses color themes. */
@@ -2245,14 +2245,16 @@ static inline const Key keys[] = {
      "Open wallpaper picker"},
     {MODKEY, XK_e, &WM::project_toggle_key, {.i = PickerModeSSH}, "Open SSH host picker"},
     {MODKEY, XK_v, &WM::project_toggle_key, {.i = PickerModeWorkspace}, "Open workspace picker"},
-    /* Used to be setlayout({0})'s "toggle to the other layout" -- redundant
-     * with Ctrl+Mod+space (cyclelayout) and Mod+t/f/m (pick one directly),
-     * so it's free for the project picker instead. */
-    {MODKEY, XK_space, &WM::project_toggle_key, {.i = PickerModeProjectOnly}, "Open project picker"},
+    /* Mod+space now cycles layouts directly (same action as Mod+Ctrl+space
+     * below, kept for muscle memory); the project picker moved to
+     * Mod+Shift+p to free the slot. Mod+Shift+space still toggles floating. */
+    {MODKEY, XK_space, &WM::cyclelayout, {.i = +1}, "Cycle to next layout"},
     {MODKEY | ShiftMask, XK_space, &WM::togglefloating, {0}, "Toggle focused window floating"},
     {MODKEY | ControlMask, XK_space, &WM::cyclelayout, {.i = +1}, "Cycle to next layout"},
     {MODKEY | ControlMask | ShiftMask, XK_space, &WM::cyclelayout, {.i = -1},
      "Cycle to previous layout"},
+    {MODKEY | ShiftMask, XK_p, &WM::project_toggle_key, {.i = PickerModeProjectOnly},
+     "Open project picker"},
     {MODKEY, XK_0, &WM::view, {.ull = ~0ULL}, "View all workspaces"},
     {MODKEY | ShiftMask, XK_0, &WM::tag, {.ull = ~0ULL}, "Put focused window on all workspaces"},
     {MODKEY, XK_comma, &WM::focusmon, {.i = -1}, "Focus previous monitor"},
@@ -10184,7 +10186,7 @@ void WM::project_draw(void) {
 
   /* Combined keeps the plain "> " prompt it's always had; the single-scope
    * modes get their icon as a prefix so it's visually obvious which picker
-   * came up, since Mod+space/Mod+p/Mod+o/Mod+Shift+t now open four
+   * came up, since Mod+Shift+p/Mod+p/Mod+o/Mod+Shift+t now open four
    * different ones. */
   prefix = project_mode == PickerModeProjectOnly  ? icon_projects
            : project_mode == PickerModeAppOnly    ? icon_launcher
@@ -14558,7 +14560,7 @@ int WM::leftbar_handle_button(Monitor *m, XButtonPressedEvent *ev) {
     return 0;
   }
   /* Top-left project folder: active projects currently owning a client. The
-   * searchable project/app picker remains available on Mod+o/Mod+space. */
+   * searchable project/app picker remains available on Mod+o/Mod+Shift+p. */
   if (ev->y < bh) {
     if (ev->button == Button1) {
       active_project_menu_toggle(m);
