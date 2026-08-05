@@ -809,10 +809,12 @@ struct Client : std::enable_shared_from_this<Client> {
   float cfact;
   int x, y, w, h; // x,y coords and width/height
   int oldx, oldy, oldw, oldh;
+  int maxoldx, maxoldy, maxoldw, maxoldh; // pre-maximize floating geometry
   int basew, baseh, incw, inch, maxw, maxh, minw, minh, hintsvalid;
   int bw, oldbw; // border width
   WorkspaceMask tags;
   int isfixed, isfloating, isurgent, neverfocus, oldstate, isfullscreen;
+  int ismaximized;
   /* Every managed Client sits in two lists at once: mon->clients (via next)
    * and mon->stack (via snext), attached together in manage() and detached
    * together in unmanage() -- genuine dual ownership, not a single owning
@@ -1593,6 +1595,7 @@ unsigned int tiledcount(Monitor *m);
 void tile(Monitor *m);
 void togglebar(const Arg *arg);
 void togglefloating(const Arg *arg);
+void togglemaximize(const Arg *arg);
 void toggletag(const Arg *arg);
 void toggleview(const Arg *arg);
 void toggletagnth(const Arg *arg);
@@ -2231,7 +2234,7 @@ static inline const Key keys[] = {
     {MODKEY | ShiftMask, XK_colon, &WM::promptcommand, {0}, "Open Lua command prompt"},
     {MODKEY, XK_t, &WM::setlayout, {.v = &layouts[0]}, "Switch to tiled layout"},
     {MODKEY, XK_f, &WM::setlayout, {.v = &layouts[1]}, "Switch to floating layout"},
-    {MODKEY, XK_m, &WM::setlayout, {.v = &layouts[2]}, "Switch to monocle layout"},
+    {MODKEY, XK_m, &WM::togglemaximize, {0}, "Maximize/restore focused floating window"},
     /* Same picker, fourth scope: browse and apply the named color themes in
      * color_themes[] (also reachable by middle-clicking the theme widget). */
     {MODKEY | ShiftMask, XK_t, &WM::project_toggle_key, {.i = PickerModeTheme},
@@ -16564,6 +16567,7 @@ void WM::togglefloating(const Arg *arg) {
   if (selmon->sel->isfullscreen) {
     return;
   }
+  selmon->sel->ismaximized = 0;
   selmon->sel->isfloating = !selmon->sel->isfloating || selmon->sel->isfixed;
   if (selmon->sel->isfloating) {
     resize(selmon->sel, selmon->sel->x, selmon->sel->y, selmon->sel->w,
@@ -16572,6 +16576,32 @@ void WM::togglefloating(const Arg *arg) {
   arrange(selmon);
 }
 // }}} void togglefloating(const Arg *arg)
+
+// {{{ void togglemaximize(const Arg *arg)
+/* Toggles the focused floating window between its normal geometry and one
+ * that fills the monitor's work area (screen minus bar/gaps, same boundary
+ * tile()/monocle() arrange into) -- unlike setfullscreen(), the border and
+ * bar stay put. Tiled windows are left alone since the layout already
+ * dictates their geometry. */
+void WM::togglemaximize(const Arg *arg) {
+  Client *c = selmon->sel;
+  if (!c || !c->isfloating || c->isfullscreen) {
+    return;
+  }
+  if (c->ismaximized) {
+    c->ismaximized = 0;
+    resize(c, c->maxoldx, c->maxoldy, c->maxoldw, c->maxoldh, 0);
+  } else {
+    c->maxoldx = c->x;
+    c->maxoldy = c->y;
+    c->maxoldw = c->w;
+    c->maxoldh = c->h;
+    c->ismaximized = 1;
+    resize_cell(c, c->mon->wx, c->mon->wy, c->mon->ww, c->mon->wh, 0);
+  }
+  XRaiseWindow(dpy, c->win);
+}
+// }}} void togglemaximize(const Arg *arg)
 
 // {{{ void toggletag(const Arg *arg)
 void WM::toggletag(const Arg *arg) {
